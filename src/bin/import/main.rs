@@ -28,8 +28,7 @@ fn parse_line(line: &str) -> Option<bo_srv_rs::Strike> {
 
     let mut sta_parts = parts[5].split(';');
     let station_count = sta_parts.nth(1).unwrap().parse::<i32>().ok()?;
-    let x = sta_parts.nth(1).unwrap();
-    let station_ids = x.split(',').map(|s| s.parse().unwrap()).collect();
+    let station_ids = sta_parts.nth(1).unwrap().split(',').map(|s| s.parse()).filter(|x| x.is_ok()).map(|x| x.unwrap()).collect();
 
     Some(bo_srv_rs::Strike {
         timestamp,
