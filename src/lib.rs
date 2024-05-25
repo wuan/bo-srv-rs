@@ -1,6 +1,7 @@
 use chrono::NaiveDateTime;
 
 pub mod config;
+mod db;
 
 pub fn add(left: usize, right: usize) -> usize {
     left + right
@@ -26,5 +27,5 @@ pub struct Strike {
     pub amplitude: f64,
     pub lateral_error: i32,
     pub station_count: i32,
-    pub station_ids: Vec<i32>,
+    pub region: Option<i32>,
 }

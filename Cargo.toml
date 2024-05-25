@@ -1,13 +1,20 @@
 [package]
-name = "bo-srv-rs"
+name = "bo-srvgit "
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
 name = "import"
 
+[[bin]]
+name = "service"
+path = "src/service/main.rs"
+
 [dependencies]
-chrono = "0.4.34"
+chrono = "0.4.38"
 datetime = "0.5.2"
-reqwest = { version = "0.11.24" , features = ["blocking"] }
-tokio = "1.36.0"
+reqwest = { version = "0.12.4", features = ["blocking"] }
+tokio = "1.37.0"
+postgres = { version = "0.19.7", features = ["with-chrono-0_4"] }
+serde = { version = "1.0.203", features = ["derive"] }
+serde_yaml = "0.9.32"
