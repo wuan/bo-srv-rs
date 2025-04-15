@@ -1,8 +1,8 @@
 use chrono::{DurationRound, NaiveDateTime};
 
-use bo_srv_rs::config::read_config;
+use blitzortung::config::read_config;
 
-fn parse_line(region: i32, line: &str) -> Option<bo_srv_rs::Strike> {
+fn parse_line(region: i32, line: &str) -> Option<blitzortung::Strike> {
     let parts: Vec<&str> = line.split(' ').collect();
     if parts.len() != 6 {
         return None;
@@ -27,7 +27,7 @@ fn parse_line(region: i32, line: &str) -> Option<bo_srv_rs::Strike> {
     let mut sta_parts = parts[5].split(';');
     let station_count = sta_parts.nth(1).unwrap().parse::<i32>().ok()?;
 
-    Some(bo_srv_rs::Strike {
+    Some(blitzortung::Strike {
         timestamp,
         latitude,
         longitude,

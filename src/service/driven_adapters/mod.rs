@@ -1,1 +1,1 @@
-mod strike_store;
+mod raster_service;

@@ -1,5 +1,8 @@
-use crate::app::raster::model::{RasterData, RasterParameters};
+use crate::app::raster::model::{GlobalRasterQuery, LocalRasterQuery, RasterData, RegionRasterQuery};
 
-trait RasterQuery {
-    async fn get_raster(query: RasterParameters) -> RasterData;
+
+pub(crate) trait RasterQuery {
+    async fn local(params: LocalRasterQuery) -> RasterData;
+    async fn global(params: Box<dyn GlobalRasterQuery>) -> RasterData;
+    async fn region(params: RegionRasterQuery) -> RasterData;
 }

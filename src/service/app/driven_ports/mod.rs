@@ -1,1 +1,1 @@
-mod strike_store;
+pub(crate) mod raster_data;

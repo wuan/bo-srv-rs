@@ -2,6 +2,7 @@
 name = "bo-srv-rs"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.86"
 
 [[bin]]
 name = "import"
@@ -9,6 +10,10 @@ name = "import"
 [[bin]]
 name = "service"
 path = "src/service/main.rs"
+
+[lib]
+name = "blitzortung"
+path = "src/lib/lib.rs"
 
 [dependencies]
 chrono = "0.4.38"
@@ -18,3 +23,7 @@ tokio = "1.37.0"
 postgres = { version = "0.19.7", features = ["with-chrono-0_4"] }
 serde = { version = "1.0.203", features = ["derive"] }
 serde_yaml = "0.9.32"
+async-trait = "0.1.88"
+
+[dev-dependencies]
+testcontainers = "0.23.3"
