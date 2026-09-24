@@ -1,29 +1,21 @@
 [package]
-name = "bo-srv-rs"
+name = "bo-service"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.86"
-
-[[bin]]
-name = "import"
-
-[[bin]]
-name = "service"
-path = "src/service/main.rs"
-
-[lib]
-name = "blitzortung"
-path = "src/lib/lib.rs"
+description = "Rust port of the blitzortung JSON-RPC webservice/service layer (LSP-style framing, async I/O)"
+license = "Apache-2.0"
 
 [dependencies]
-chrono = "0.4.38"
-datetime = "0.5.2"
-reqwest = { version = "0.12.4", features = ["blocking"] }
-tokio = "1.37.0"
-postgres = { version = "0.19.7", features = ["with-chrono-0_4"] }
-serde = { version = "1.0.203", features = ["derive"] }
-serde_yaml = "0.9.32"
-async-trait = "0.1.88"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+chrono = { version = "0.4", features = ["clock"] }
+bytes = "1"
+ini = "2"
+futures = "0.3"
+log = "0.4"
+env_logger = "0.11"
 
 [dev-dependencies]
-testcontainers = "0.23.3"
+tokio = { version = "1", features = ["full"] }
