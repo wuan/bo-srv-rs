@@ -50,7 +50,11 @@ fn parse_content_length(headers: &str) -> Result<usize, String> {
 
 /// Build the service request metadata from the frame headers (`getHeader`
 /// analogues) and the peer address (`getClientIP`).
-fn request_from_headers(headers: &str, client_ip: Option<String>) -> Request {
+///
+/// Shared with the HTTP transport: both HTTP header blocks and LSP frame
+/// header blocks use the same `Name: value` lines, and the service only reads
+/// `User-Agent`, `Content-Type`, `Referer` and `X-Forwarded-For`.
+pub(crate) fn request_from_headers(headers: &str, client_ip: Option<String>) -> Request {
     let mut request = Request {
         client_ip,
         ..Default::default()

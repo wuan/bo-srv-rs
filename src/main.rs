@@ -7,22 +7,24 @@
 //! cargo run --manifest-path rust/bo-service/Cargo.toml
 //! ```
 //!
-//! Configuration (see [`bo_service::config`]): the `--port` CLI flag,
-//! `BO_SERVICE_PORT`, `BO_DB_*` env vars and/or a `BO_CONFIG` INI file.  The
-//! listening port is resolved with the precedence **CLI > env > config file >
-//! default** (`BO_SERVICE_PORT` and the INI `[webservice] port` are both applied
-//! by `Config::from_env`, the CLI flag wins on top).  The server speaks the
-//! LSP-style `Content-Length` framing over TCP.
+//! Configuration (see [`bo_service::config`]): the `--port`/`--protocol` CLI
+//! flags, `BO_SERVICE_PORT`/`BO_SERVICE_PROTOCOL`, `BO_DB_*` env vars and/or a
+//! `BO_CONFIG` INI file.  Both settings resolve with the precedence **CLI >
+//! env > config file > default** (`Config::from_env` applies the env over the
+//! INI; the CLI flags win on top).
+//!
+//! The default wire protocol is **HTTP/1.1** so the service is a drop-in
+//! replacement behind the deployed Nginx `proxy_pass`.  The original LSP-style
+//! `Content-Length` framing remains available via `--protocol lsp` (or
+//! `BO_SERVICE_PROTOCOL=lsp`) for other consumers/tests.
 
 use std::sync::Arc;
 
 use clap::Parser;
 
-use bo_service::config::Config;
+use bo_service::config::{Config, Protocol};
 use bo_service::executor::QueryExecutor;
-use bo_service::postgres::PostgresExecutor;
-use bo_service::service::Service;
-use bo_service::transport;
+use bo_service::{http, postgres::PostgresExecutor, service::Service, transport};
 
 /// Command-line options for the `service` binary.
 #[derive(Parser, Debug)]
@@ -35,6 +37,10 @@ struct Args {
     /// listening TCP port (overrides BO_SERVICE_PORT and blitzortung.conf)
     #[arg(short, long)]
     port: Option<u16>,
+
+    /// wire protocol: `http` (default, for nginx proxy_pass) or `lsp`
+    #[arg(long, value_name = "http|lsp")]
+    protocol: Option<String>,
 }
 
 /// Resolve the effective listening port: an explicit `--port` wins over the
@@ -42,6 +48,18 @@ struct Args {
 /// over the INI file, defaulting to 8080).
 fn effective_port(cli_port: Option<u16>, config: &Config) -> u16 {
     cli_port.unwrap_or(config.port)
+}
+
+/// Resolve the effective protocol: an explicit `--protocol` wins over the
+/// configured value (`BO_SERVICE_PROTOCOL` over the INI `[webservice]
+/// protocol`, defaulting to `http`).
+fn effective_protocol(cli_protocol: Option<&str>, config: &Config) -> Result<Protocol, String> {
+    match cli_protocol {
+        Some(value) => {
+            Protocol::parse(value).ok_or_else(|| format!("invalid --protocol {value:?} (use http or lsp)"))
+        }
+        None => Ok(config.protocol),
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -52,6 +70,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let config = Config::from_env();
     let port = effective_port(args.port, &config);
+    let protocol = effective_protocol(args.protocol.as_deref(), &config)
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        });
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -65,8 +88,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let service: Arc<Service> = Arc::new(Service::new(executor));
 
         let address = format!("0.0.0.0:{port}");
-        log::info!("bo-service listening on {address}");
-        transport::run(&address, service).await?;
+        log::info!("bo-service listening on {address} ({})", protocol.as_str());
+        match protocol {
+            Protocol::Http => http::run(&address, service).await?,
+            Protocol::Lsp => transport::run(&address, service).await?,
+        }
         Ok(())
     })
 }
@@ -107,5 +133,32 @@ mod tests {
         assert_eq!(args.port, Some(2345));
         let args = Args::try_parse_from(["service"]).unwrap();
         assert_eq!(args.port, None);
+    }
+
+    #[test]
+    fn protocol_defaults_to_http() {
+        let config = Config::default();
+        assert_eq!(effective_protocol(None, &config).unwrap(), Protocol::Http);
+    }
+
+    #[test]
+    fn cli_protocol_overrides_config() {
+        let config = Config {
+            protocol: Protocol::Http,
+            ..Config::default()
+        };
+        assert_eq!(effective_protocol(Some("lsp"), &config).unwrap(), Protocol::Lsp);
+        let config = Config {
+            protocol: Protocol::Lsp,
+            ..Config::default()
+        };
+        assert_eq!(effective_protocol(Some("http"), &config).unwrap(), Protocol::Http);
+        assert!(effective_protocol(Some("bogus"), &config).is_err());
+    }
+
+    #[test]
+    fn cli_parser_accepts_protocol() {
+        let args = Args::try_parse_from(["service", "--protocol", "lsp"]).unwrap();
+        assert_eq!(args.protocol.as_deref(), Some("lsp"));
     }
 }

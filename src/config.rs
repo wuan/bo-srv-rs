@@ -17,6 +17,7 @@
 //!
 //! * `BO_CONFIG` — explicit path to the INI file (bypasses the search)
 //! * `BO_SERVICE_PORT` (default `8080`)
+//! * `BO_SERVICE_PROTOCOL` (`http`|`lsp`, default `http`) — see [`Protocol`]
 //! * `BO_DB_HOST` (default `localhost`)
 //! * `BO_DB_PORT` (default `5432`)
 //! * `BO_DB_NAME` (default `blitzortung`)
@@ -26,10 +27,47 @@
 //! * `BO_BLITZORTUNG_USERNAME` (default `""`) — `[auth] username`
 //! * `BO_BLITZORTUNG_PASSWORD` (default `""`) — `[auth] password`
 
+/// Wire protocol the service speaks.
+///
+/// The deployed service sits behind an Nginx `proxy_pass`, which requires real
+/// HTTP; [`Protocol::Http`] is therefore the default.  [`Protocol::Lsp`] keeps
+/// the original LSP-style `Content-Length` framing available for other
+/// consumers/tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Protocol {
+    /// HTTP/1.1 (`txjsonrpc_ng`-compatible: `POST /`, `GET ?request=`).
+    #[default]
+    Http,
+    /// LSP-style `Content-Length` framing on a raw TCP socket.
+    Lsp,
+}
+
+impl Protocol {
+    /// Parse a protocol name (`http`/`https`/`lsp`/`netstring`/`tcp`).
+    pub fn parse(value: &str) -> Option<Protocol> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "http" | "https" => Some(Protocol::Http),
+            "lsp" | "netstring" | "tcp" => Some(Protocol::Lsp),
+            _ => None,
+        }
+    }
+
+    /// The canonical lower-case name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Protocol::Http => "http",
+            Protocol::Lsp => "lsp",
+        }
+    }
+}
+
 /// Parsed service configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub port: u16,
+    /// Wire protocol (`[webservice] protocol` / `BO_SERVICE_PROTOCOL`),
+    /// default [`Protocol::Http`].
+    pub protocol: Protocol,
     pub db_host: String,
     pub db_port: String,
     pub db_name: String,
@@ -49,6 +87,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             port: 8080,
+            protocol: Protocol::Http,
             db_host: "localhost".into(),
             db_port: "5432".into(),
             db_name: "blitzortung".into(),
@@ -148,6 +187,11 @@ impl Config {
                             config.port = port;
                         }
                     }
+                    if let Some(protocol) = section.get("protocol") {
+                        if let Some(protocol) = Protocol::parse(protocol) {
+                            config.protocol = protocol;
+                        }
+                    }
                 }
                 if let Some(section) = ini.get("db") {
                     config.db_host = section.get("host").cloned().unwrap_or(config.db_host);
@@ -181,6 +225,11 @@ impl Config {
         if let Some(v) = lookup("BO_SERVICE_PORT") {
             if let Ok(port) = v.parse::<u16>() {
                 config.port = port;
+            }
+        }
+        if let Some(v) = lookup("BO_SERVICE_PROTOCOL") {
+            if let Some(protocol) = Protocol::parse(&v) {
+                config.protocol = protocol;
             }
         }
         if let Some(v) = lookup("BO_DB_HOST") {
@@ -359,6 +408,42 @@ mod tests {
         assert_eq!(config.db_connection_count, 7);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn protocol_defaults_to_http_and_reads_ini_and_env() {
+        // Default.
+        assert_eq!(Config::default().protocol, Protocol::Http);
+
+        // INI `[webservice] protocol`.
+        let dir = ini_dir("protocol-ini");
+        let path = dir.join("config.ini");
+        std::fs::write(&path, "[webservice]\nprotocol = lsp\n").unwrap();
+        let config = Config::from_env_with(|k| {
+            if k == "BO_CONFIG" {
+                Some(path.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        });
+        assert_eq!(config.protocol, Protocol::Lsp);
+
+        // Env overrides the INI.
+        let config = Config::from_env_with(|k| match k {
+            "BO_CONFIG" => Some(path.to_string_lossy().into_owned()),
+            "BO_SERVICE_PROTOCOL" => Some("http".into()),
+            _ => None,
+        });
+        assert_eq!(config.protocol, Protocol::Http);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn protocol_parse_accepts_aliases() {
+        assert_eq!(Protocol::parse("http"), Some(Protocol::Http));
+        assert_eq!(Protocol::parse("LSP"), Some(Protocol::Lsp));
+        assert_eq!(Protocol::parse("netstring"), Some(Protocol::Lsp));
+        assert_eq!(Protocol::parse("bogus"), None);
     }
 
     #[test]
