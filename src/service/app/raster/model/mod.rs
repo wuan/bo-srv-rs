@@ -12,8 +12,7 @@ pub(crate) trait RasterQuery {
     fn count_threshold(&self) -> u8;
 }
 
-
-
+#[derive(Clone)]
 pub struct RasterParameters {
     pub longitude_start: f64,
     pub longitude_delta: f64,
@@ -23,6 +22,13 @@ pub struct RasterParameters {
     pub latitude_bins: u16,
 }
 
+impl RasterParameters {
+    pub fn new(longitude_start: f64, longitude_delta: f64, longitude_bins:u16, latitude_start: f64, latitude_delta:f64, latitude_bins: u16) -> Self {
+        Self {longitude_start, longitude_delta, longitude_bins, latitude_start, latitude_delta, latitude_bins }
+    }
+}
+
+#[derive(Clone)]
 pub struct RasterEntry {
     pub x: i16,
     pub y: i16,
@@ -30,7 +36,14 @@ pub struct RasterEntry {
     pub time: u16,
 }
 
+#[derive(Clone)]
 pub struct RasterData {
     pub parameters: RasterParameters,
     pub entries: Vec<RasterEntry>,
+}
+
+impl RasterData {
+    pub fn new(parameters: RasterParameters, entries: Vec<RasterEntry>) -> Self {
+        Self { parameters, entries }
+    }
 }

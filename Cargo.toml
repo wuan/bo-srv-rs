@@ -24,6 +24,7 @@ postgres = { version = "0.19.7", features = ["with-chrono-0_4"] }
 serde = { version = "1.0.203", features = ["derive"] }
 serde_yaml = "0.9.32"
 async-trait = "0.1.88"
+moka = { version = "0.12.10", features = ["future"] }
 
 [dev-dependencies]
 testcontainers = "0.23.3"
