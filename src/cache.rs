@@ -92,10 +92,20 @@ impl ObjectCache {
         }
     }
 
+    /// Lock the cache, tolerating a poisoned mutex so that a panic occurring
+    /// while another task held the lock cannot cascade-panic the whole server.
+    /// The cache only reads/writes owned data, so it is safe to use the
+    /// (possibly inconsistent) inner state after a poison.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Fetch `key`, computing the payload with `creator` on a miss
     /// (`ObjectCache.get`).  `now` is injectable for tests.
     fn get_at(&self, key: &str, creator: impl FnOnce() -> Value, now: f64) -> Value {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock();
 
         if let Some(period) = self.cleanup_period {
             if now > inner.last_cleanup + period {
@@ -156,7 +166,7 @@ impl ObjectCache {
         F: FnOnce() -> Result<Value, E>,
     {
         let now = now_seconds();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock();
 
         if let Some(period) = self.cleanup_period {
             if now > inner.last_cleanup + period {
@@ -203,7 +213,7 @@ impl ObjectCache {
     /// `ObjectCache.get_ratio`: hits / total gets, `0.0` when there were no
     /// hits.
     pub fn get_ratio(&self) -> f64 {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.lock();
         if inner.total_hit_count == 0 {
             0.0
         } else {
@@ -213,7 +223,7 @@ impl ObjectCache {
 
     /// `ObjectCache.get_size`: number of stored entries.
     pub fn get_size(&self) -> usize {
-        self.inner.lock().unwrap().cache.len()
+        self.lock().cache.len()
     }
 
     /// `ObjectCache.get_time_to_live`.
@@ -223,7 +233,7 @@ impl ObjectCache {
 
     /// `ObjectCache.clear`.
     pub fn clear(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock();
         inner.cache.clear();
         inner.keys.clear();
         inner.total_count = 0;
@@ -316,6 +326,27 @@ impl Default for ServiceCache {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A panic while another thread holds the cache lock must not cascade:
+    /// the lock is poisoned but the cache still works.
+    #[test]
+    fn poisoned_mutex_does_not_panic_subsequent_access() {
+        let cache = ObjectCache::new(60, None, None);
+
+        // Poison the mutex by panicking a closure that runs under the lock.
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.lock();
+            panic!("deliberate panic under the cache lock");
+        }));
+        assert!(poisoned.is_err());
+
+        // Accessing the cache must not panic now.
+        assert_eq!(cache.get_size(), 0);
+        let value = cache.get("k", || json!({"v": 1}));
+        assert_eq!(value, json!({"v": 1}));
+        assert_eq!(cache.get_size(), 1);
+        assert_eq!(cache.get_ratio(), 0.0); // one get, zero hits
+    }
 
     #[test]
     fn misses_compute_and_hits_are_cached() {
