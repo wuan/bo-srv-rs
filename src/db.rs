@@ -129,8 +129,10 @@ impl<'a> StrikeDb<'a> {
             params.push(Param::Int(strike.timestamp.nanosecond));
             params.push(Param::Float(strike.x));
             params.push(Param::Float(strike.y));
+            // `altitude` is a SMALLINT column, so send it as an integer (the
+            // Rust model keeps it as f64 to mirror `data.Strike`).
             params.push(match strike.altitude {
-                Some(v) => Param::Float(v),
+                Some(v) => Param::Int(v.round() as i64),
                 None => Param::Null,
             });
             params.push(Param::Int(effective_region));
