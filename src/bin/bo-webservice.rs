@@ -108,9 +108,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     runtime.block_on(async move {
-        let executor = PostgresExecutor::connect(&config)
-            .await
-            .map_err(|e| format!("failed to connect to database: {e}"))?;
+        // Build the executor lazily: startup must NOT connect to the database,
+        // so a missing/unreachable database cannot make the service exit.  Each
+        // request (re)connects on demand; while the database is down it is
+        // answered with a per-request JSON-RPC fault instead of hanging.
+        let executor = PostgresExecutor::lazy(&config);
         let executor: Arc<dyn QueryExecutor> = Arc::new(executor);
         let metrics: Arc<dyn Metrics> = build_metrics(&config);
         let service: Arc<Service<Arc<dyn Metrics>>> = Arc::new(Service::with_parts(

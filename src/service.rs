@@ -523,11 +523,11 @@ impl<M: Metrics> Service<M> {
         minute_offset: &Value,
         region: &Value,
         count_threshold: &Value,
-    ) -> Value {
+    ) -> Result<Value, ServiceError> {
         let (Some(minute_length), Some(grid_base_length), Some(minute_offset), Some(region), Some(count_threshold)) =
             (to_int(minute_length), to_int(grid_base_length), to_int(minute_offset), to_int(region), to_int(count_threshold))
         else {
-            return json!({});
+            return Ok(json!({}));
         };
 
         let client = request.request_client();
@@ -541,7 +541,7 @@ impl<M: Metrics> Service<M> {
             MIN_GRID_BASE_LENGTH,
         ) {
             request.blocked_reason = Some(reason);
-            return json!({});
+            return Ok(json!({}));
         }
 
         let original_grid_base_length = grid_base_length;
@@ -554,6 +554,8 @@ impl<M: Metrics> Service<M> {
             "get_strikes_grid|minute_length={minute_length}|grid_baselength={grid_base_length}|\
              minute_offset={minute_offset}|region={region}|count_threshold={count_threshold}"
         );
+        // A database failure is surfaced as a per-request JSON-RPC fault (the
+        // caller renders `Err(ServiceError::Database)`), not as a null result.
         let response = self
             .cache
             .strikes(minute_offset)
@@ -563,13 +565,12 @@ impl<M: Metrics> Service<M> {
                     .map_err(cache_error)
             })
             .await
-            .map_err(service_error)
-            .unwrap_or(Value::Null);
+            .map_err(service_error)?;
         let _ = request.fix_bad_accept_header();
 
         let _ = (original_grid_base_length, minute_offset);
         self.metrics.for_strikes(minute_length, region, self.cache.strikes(minute_offset).get_ratio());
-        response
+        Ok(response)
     }
 
     /// `jsonrpc_get_strikes_raster` / `jsonrpc_get_strokes_raster`.
@@ -580,7 +581,7 @@ impl<M: Metrics> Service<M> {
         grid_base_length: &Value,
         minute_offset: &Value,
         region: &Value,
-    ) -> Value {
+    ) -> Result<Value, ServiceError> {
         self.jsonrpc_get_strikes_grid(
             request,
             minute_length,
@@ -600,11 +601,11 @@ impl<M: Metrics> Service<M> {
         grid_base_length: &Value,
         minute_offset: &Value,
         count_threshold: &Value,
-    ) -> Value {
+    ) -> Result<Value, ServiceError> {
         let (Some(minute_length), Some(grid_base_length), Some(minute_offset), Some(count_threshold)) =
             (to_int(minute_length), to_int(grid_base_length), to_int(minute_offset), to_int(count_threshold))
         else {
-            return json!({});
+            return Ok(json!({}));
         };
 
 let client = request.request_client();
@@ -618,7 +619,7 @@ let client = request.request_client();
             GLOBAL_MIN_GRID_BASE_LENGTH,
         ) {
             request.blocked_reason = Some(reason);
-            return json!({});
+            return Ok(json!({}));
         }
 
         let original_grid_base_length = grid_base_length;
@@ -639,14 +640,13 @@ let client = request.request_client();
                     .map_err(cache_error)
             })
             .await
-            .map_err(service_error)
-            .unwrap_or(Value::Null);
+            .map_err(service_error)?;
         let _ = request.fix_bad_accept_header();
 
         let _ = (original_grid_base_length, minute_offset);
         self.metrics
             .for_global_strikes(minute_length, self.cache.global_strikes(minute_offset).get_ratio());
-        response
+        Ok(response)
     }
 
     /// `jsonrpc_get_local_strikes_grid`.
@@ -661,7 +661,7 @@ let client = request.request_client();
         minute_offset: &Value,
         count_threshold: &Value,
         data_area: &Value,
-    ) -> Value {
+    ) -> Result<Value, ServiceError> {
         let (
             Some(x),
             Some(y),
@@ -680,7 +680,7 @@ let client = request.request_client();
             to_int(data_area),
         )
         else {
-            return json!({});
+            return Ok(json!({}));
         };
 
         let client = request.request_client();
@@ -694,7 +694,7 @@ let client = request.request_client();
             MIN_GRID_BASE_LENGTH,
         ) {
             request.blocked_reason = Some(reason);
-            return json!({});
+            return Ok(json!({}));
         }
 
         let original_grid_base_length = grid_base_length;
@@ -718,8 +718,7 @@ let client = request.request_client();
                 .map_err(cache_error)
             })
             .await
-            .map_err(service_error)
-            .unwrap_or(Value::Null);
+            .map_err(service_error)?;
 
         let _ = (original_grid_base_length, minute_offset);
         self.metrics.for_local_strikes(
@@ -727,7 +726,7 @@ let client = request.request_client();
             data_area,
             self.cache.local_strikes(minute_offset).get_ratio(),
         );
-        response
+        Ok(response)
     }
 }
 
@@ -1311,7 +1310,7 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         let response = service
             .jsonrpc_get_strikes_grid(&mut req, &json!(60), &json!(10_000), &json!(0), &json!(1), &json!(0))
             .await;
-        assert_eq!(response, json!({}));
+        assert_eq!(response.unwrap(), json!({}));
     }
 
     #[tokio::test]
@@ -1328,7 +1327,7 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
                 &json!(0),
             )
             .await;
-        assert_eq!(response, json!({}));
+        assert_eq!(response.unwrap(), json!({}));
     }
 
     #[tokio::test]
@@ -1361,7 +1360,8 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
                 &json!(0),
             )
             .await;
-        let obj = response.as_object().expect("grid response");
+        let obj = response.unwrap();
+        let obj = obj.as_object().expect("grid response");
         for key in ["r", "xd", "yd", "x0", "y1", "xc", "yc", "t", "dt", "h"] {
             assert!(obj.contains_key(key), "missing key {key}");
         }
@@ -1418,7 +1418,8 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
                 &json!(5),
             )
             .await;
-        let obj = response.as_object().expect("grid response");
+        let obj = response.unwrap();
+        let obj = obj.as_object().expect("grid response");
         for key in ["r", "xd", "yd", "x0", "y1", "xc", "yc", "t", "dt", "h"] {
             assert!(obj.contains_key(key), "missing key {key}");
         }
@@ -1449,6 +1450,6 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         let response = service
             .jsonrpc_get_strikes_grid(&mut req, &json!("x"), &json!(10_000), &json!(0), &json!(1), &json!(0))
             .await;
-        assert_eq!(response, json!({}));
+        assert_eq!(response.unwrap(), json!({}));
     }
 }
