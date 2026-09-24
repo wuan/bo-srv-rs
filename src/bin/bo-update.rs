@@ -9,7 +9,9 @@
 
 use chrono::{Duration, Utc};
 
-use bo_service::cli::{connect_postgres, exit_with, init_logging, update_tool, LockWithTimeout};
+use bo_service::cli::{
+    connect_postgres, describe_error, exit_with, init_logging, update_tool, LockWithTimeout,
+};
 use bo_service::config::Config;
 
 fn main() {
@@ -35,7 +37,7 @@ fn main() {
         .build()
     {
         Ok(client) => client,
-        Err(error) => exit_with(&format!("failed to build HTTP client: {error}"), 1),
+        Err(error) => exit_with(&describe_error("failed to build HTTP client", &error), 1),
     };
 
     let body = match client
@@ -46,9 +48,12 @@ fn main() {
     {
         Ok(response) => match response.text() {
             Ok(body) => body,
-            Err(error) => exit_with(&format!("failed to read response: {error}"), 1),
+            Err(error) => exit_with(&describe_error("failed to read response", &error), 1),
         },
-        Err(error) => exit_with(&format!("failed to fetch strikes from URL {url}: {error}"), 1),
+        Err(error) => exit_with(
+            &describe_error(&format!("failed to fetch strikes from URL {url}"), &error),
+            1,
+        ),
     };
 
     let url_strikes = update_tool::parse_strikes_from_text(&body);
@@ -56,13 +61,13 @@ fn main() {
 
     let (_runtime, executor) = match connect_postgres(&config) {
         Ok(pair) => pair,
-        Err(error) => exit_with(&format!("failed to connect to database: {error}"), 1),
+        Err(error) => exit_with(&describe_error("failed to connect to database", error.as_ref()), 1),
     };
 
     match update_tool::update_strikes(&executor, &url_strikes, update_options.hours, now) {
         Ok(result) => {
             log::info!("Import completed: {} new strikes inserted", result.inserted);
         }
-        Err(error) => exit_with(&format!("Import failed: {error}"), 1),
+        Err(error) => exit_with(&describe_error("Import failed", error.as_ref()), 1),
     }
 }

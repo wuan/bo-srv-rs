@@ -58,6 +58,60 @@ pub fn exit_with(message: &str, code: i32) -> ! {
     std::process::exit(code)
 }
 
+/// Render an error together with its full causal chain.
+///
+/// tokio-postgres' `Error` displays as the unhelpful `"db error"` for server
+/// errors (`Kind::Db`); the real message lives in [`tokio_postgres::Error::as_db_error`]
+/// and in the error's `source()`.  This helper walks the chain and, for every
+/// tokio-postgres error encountered, appends the database `severity`, `message`,
+/// `detail` and `hint` fields.
+///
+/// The result is a single multi-line string, e.g.:
+///
+/// ```text
+/// error: db error
+///   caused by: ERROR: relation "strikes" does not exist
+///     detail: <detail>
+///     hint: <hint>
+/// ```
+pub fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    let mut depth = 0usize;
+
+    while let Some(err) = current {
+        if depth == 0 {
+            lines.push(err.to_string());
+        } else {
+            lines.push(format!("{}caused by: {}", "  ".repeat(depth), err));
+        }
+
+        if let Some(db_error) = err.downcast_ref::<tokio_postgres::Error>() {
+            if let Some(db) = db_error.as_db_error() {
+                let indent = "  ".repeat(depth + 1);
+                lines.push(format!("{indent}{}: {}", db.severity(), db.message()));
+                if let Some(detail) = db.detail() {
+                    lines.push(format!("{indent}detail: {detail}"));
+                }
+                if let Some(hint) = db.hint() {
+                    lines.push(format!("{indent}hint: {hint}"));
+                }
+            }
+        }
+
+        current = err.source();
+        depth += 1;
+    }
+
+    lines.join("\n")
+}
+
+/// Convenience wrapper around [`format_error_chain`] that prefixes a context
+/// label, e.g. `"error: <chain>"`.
+pub fn describe_error(context: &str, error: &(dyn std::error::Error + 'static)) -> String {
+    format!("{context}: {}", format_error_chain(error))
+}
+
 /// Labels used by `cli/db.py` for the default date/time formats.
 pub const DATE_FORMAT: &str = "%Y%m%d";
 /// Time format without seconds (`cli/db.py TIME_FORMAT`).
@@ -202,6 +256,79 @@ fn libc_flock(fd: i32, operation: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A message-bearing leaf error, used to fake a source chain.
+    #[derive(Debug)]
+    struct Leaf(String);
+
+    impl std::fmt::Display for Leaf {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    impl std::error::Error for Leaf {}
+
+    /// A wrapper error that hides the useful message in its `source()`.
+    #[derive(Debug)]
+    struct Wrapper {
+        leaf: Leaf,
+    }
+
+    impl std::fmt::Display for Wrapper {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            // Deliberately unhelpful, like tokio-postgres' "db error".
+            write!(f, "db error")
+        }
+    }
+
+    impl std::error::Error for Wrapper {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.leaf)
+        }
+    }
+
+    #[test]
+    fn error_chain_includes_source_messages() {
+        let error = Wrapper {
+            leaf: Leaf("ERROR: relation \"strikes\" does not exist".to_string()),
+        };
+        let rendered = format_error_chain(&error);
+        assert!(rendered.starts_with("db error"), "got: {rendered}");
+        assert!(
+            rendered.contains("caused by: ERROR: relation \"strikes\" does not exist"),
+            "got: {rendered}"
+        );
+        // The useless top-level message is not the only thing reported.
+        assert_ne!(rendered, "db error");
+    }
+
+    #[test]
+    fn describe_error_prefixes_the_context() {
+        let error = Wrapper {
+            leaf: Leaf("connection refused".to_string()),
+        };
+        let rendered = describe_error("failed to connect to database", &error);
+        assert!(rendered.starts_with("failed to connect to database: db error"));
+        assert!(rendered.contains("caused by: connection refused"));
+    }
+
+    #[test]
+    fn error_chain_handles_sourceless_errors() {
+        let error = Leaf("plain failure".to_string());
+        assert_eq!(format_error_chain(&error), "plain failure");
+    }
+
+    /// A `DbError::Executor` wrapping a tokio-postgres-style source must not
+    /// collapse to the bare source display.
+    #[test]
+    fn db_error_display_walks_the_chain() {
+        let db_error = crate::db::DbError::Executor(Box::new(Wrapper {
+            leaf: Leaf("ERROR: permission denied for table strikes".to_string()),
+        }));
+        let rendered = db_error.to_string();
+        assert!(rendered.contains("caused by: ERROR: permission denied for table strikes"));
+    }
 
     #[test]
     fn parse_local_time_basic() {
