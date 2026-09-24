@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Rust port of the blitzortung JSON-RPC webservice/service layer (LSP-style framing, async I/O)"
 license = "Apache-2.0"
-default-run = "service"
+default-run = "bo-webservice"
 
 [[bin]]
-name = "service"
-path = "src/main.rs"
+name = "bo-webservice"
+path = "src/bin/bo-webservice.rs"
 
 # CLI tools ported from the Python `blitzortung/cli` package; the names match
 # `pyproject.toml` `[project.scripts]` (bo-python).

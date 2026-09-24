@@ -80,9 +80,9 @@ fn rpc(port: u16, body: &str) -> String {
     String::from_utf8(body_out).unwrap()
 }
 
-/// Spin up the service on a multi-thread runtime (as `main.rs` does) and talk
-/// to it over TCP.  Any request that runs a DB query must not panic the
-/// worker thread.
+/// Spin up the service on a multi-thread runtime (as `src/bin/bo-webservice.rs`
+/// does) and talk to it over TCP.  Any request that runs a DB query must not
+/// panic the worker thread.
 #[test]
 #[ignore = "requires a live PostgreSQL with the strikes schema (set DATABASE_URL)"]
 fn service_survives_a_real_query_request() {
