@@ -4,9 +4,11 @@ Rust port of the [blitzortung](https://blitzortung.org) JSON-RPC webservice,
 taken from `blitzortung/service/base.py` and friends on `origin/main` of this
 repository (async I/O on Tokio instead of Twisted).
 
-The port speaks the same wire protocol as the original service: JSON-RPC over a
-raw TCP socket using LSP-style `Content-Length` framing, with the legacy
-pre-1.0 dialect for Android clients (`treat_zero_id_as_pre1 = True`).
+The port speaks JSON-RPC with the legacy pre-1.0 dialect for Android clients
+(`treat_zero_id_as_pre1 = True`).  Two transports are supported: **HTTP/1.1**
+(the default, matching the Python `twisted.web` service and the deployed Nginx
+`proxy_pass`) and the original LSP-style `Content-Length` framing on a raw TCP
+socket (opt-in, `--protocol lsp`).
 
 ## Build & test
 
@@ -37,10 +39,42 @@ cargo run --manifest-path rust/bo-service/Cargo.toml
 cargo run --manifest-path rust/bo-service/Cargo.toml -- --port 8300
 ```
 
-The `service` binary accepts `-p, --port <PORT>` (plus `-h/--help` and
-`-V/--version`).  The listening port is resolved with the precedence
-**CLI `--port` > `BO_SERVICE_PORT` > `blitzortung.conf` `[webservice] port` >
-default `8080`**; the CLI flag wins over both env and file.
+The `service` binary accepts `-p, --port <PORT>` and `--protocol <http|lsp>`
+(plus `-h/--help` and `-V/--version`).  Both settings resolve with the
+precedence **CLI > env > config file > default**:
+
+| Setting | CLI | env | INI (`[webservice]`) | default |
+| --- | --- | --- | --- | --- |
+| port | `--port`/`-p` | `BO_SERVICE_PORT` | `port` | `8080` |
+| protocol | `--protocol` | `BO_SERVICE_PROTOCOL` | `protocol` | `http` |
+
+### HTTP mode (default) and Nginx
+
+The default wire protocol is **HTTP/1.1** so the service is a drop-in
+replacement behind the deployed Nginx `proxy_pass`.  It serves `POST /` (any
+path) with the JSON-RPC document as the body — matching the Python service's
+`twisted.web.server.Site` — plus `GET /?request=<json>` and JSONP
+`?callback=<name>` (as `txjsonrpc_ng` does).  Responses are
+`HTTP/1.1 200 OK` with `Content-Type: application/json` (or `text/javascript`
+for JSONP) and `Content-Length`; keep-alive is supported.
+
+Example Nginx upstream:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:7081/;
+}
+```
+
+### LSP framing mode (opt-in)
+
+The original LSP-style `Content-Length` framing on a raw TCP socket is still
+available for other consumers/tests:
+
+```sh
+cargo run --manifest-path rust/bo-service/Cargo.toml -- --protocol lsp
+# or: BO_SERVICE_PROTOCOL=lsp
+```
 
 At startup a `blitzortung.conf` INI file is searched in `./blitzortung.conf`
 then `/etc/blitzortung.conf` (mirroring `blitzortung/config.py`); set
@@ -118,16 +152,25 @@ access lines).
 
 ## Protocol
 
-Requests and responses both use LSP-style framing:
+### HTTP/1.1 (default)
+
+`POST /` (any path) with the JSON-RPC document as the body; also `GET
+/?request=<json>` and JSONP `?callback=<name>`.  Responses are
+`HTTP/1.1 200 OK`, `Content-Type: application/json` (or `text/javascript` for
+JSONP), `Content-Length`, keep-alive supported.  See the deployment note above.
+
+### LSP-style framing (opt-in, `--protocol lsp`)
+
+Requests and responses use LSP-style framing:
 
 ```text
 Content-Length: <n>\r\n\r\n<json body of exactly n bytes>
 ```
 
-Additional header lines (`User-Agent`, `Content-Type`, `Referer`,
-`X-Forwarded-For`) are parsed into the service request object so the
-`base.py` validation rules apply over TCP as well; a peer that sends no such
-headers is blocked (invalid user agent).
+In both transports the HTTP-style headers (`User-Agent`, `Content-Type`,
+`Referer`, `X-Forwarded-For`) are parsed into the service request object so the
+`base.py` validation rules apply; a peer that sends no such headers is blocked
+(invalid user agent).
 
 ### Envelope dialects (txjsonrpc_ng semantics)
 
@@ -205,8 +248,10 @@ histogram bins (empty when `minute_length <= 10`).
   dialects
 - `metrics` — the `Metrics` trait (no-op for production, recording impl for
   tests)
-- `transport` — `Content-Length` framing, header parsing, and the TCP accept
-  loop
+- `transport` — LSP-style `Content-Length` framing, header parsing, and the TCP
+  accept loop
+- `http` — HTTP/1.1 transport (`POST /`, `GET ?request=`, JSONP, keep-alive,
+  HEAD/405) used by default so the service works behind an Nginx `proxy_pass`
 - `geom` — the grid/envelope machinery and a UTM converter ported from
   PROJ's Poder/Engsager (`etmerc`) implementation, used by the grid factory
 - `round` — CPython-compatible `round()` and `%.Nf` formatting
