@@ -120,9 +120,14 @@ pub fn update_strikes(
 }
 
 /// Build the URL used by `update.update_strikes`.
+///
+/// Python computes `int(start_time.timestamp() * 1e6) * 1000`; the float
+/// multiplication is reproduced here (it differs from exact nanosecond
+/// arithmetic in ~1% of cases, so matching CPython matters).
 pub fn last_strikes_url(start_time: DateTime<Utc>) -> String {
-    let start_timestamp_ns = start_time.timestamp() * 1_000_000_000
-        + start_time.timestamp_subsec_nanos() as i64;
+    let epoch_seconds = start_time.timestamp() as f64
+        + start_time.timestamp_subsec_micros() as f64 / 1_000_000.0;
+    let start_timestamp_ns = (epoch_seconds * 1e6) as i64 * 1000;
     format!(
         "https://data.blitzortung.org/Data/Protected/last_strikes.php?time={start_timestamp_ns}"
     )

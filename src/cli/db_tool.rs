@@ -206,72 +206,78 @@ pub fn resolve_area(options: &DbOptions) -> Option<Area> {
 
 /// `cli/db.py.fetch_strikes`: select strikes, round coordinates to
 /// `precision`, and print each strike; write the count/timing to `stderr`.
+/// `cli/db.py.fetch_strikes`: select strikes, round coordinates to
+/// `precision`, and return one rendered strike per line.
 pub fn fetch_strikes(
     executor: &dyn QueryExecutor,
     options: &DbOptions,
     interval: &TimeInterval,
     area: Option<&Area>,
-) -> std::io::Result<usize> {
-    use std::io::Write;
-
+    tz: chrono_tz::Tz,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let db = StrikeDb::new(executor, options.srid);
-    let timer = std::cell::RefCell::new(Timer::new());
-    let strikes = db
-        .select(interval, area, None)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let strikes = db.select(interval, area, None)?;
 
     let precision_factor = 10f64.powi(options.precision);
-    let mut stdout = std::io::stdout().lock();
-    let mut count = 0usize;
+    let mut lines = Vec::with_capacity(strikes.len());
     for mut strike in strikes {
-        count += 1;
         strike.x = py_round(strike.x * precision_factor, 0) / precision_factor;
         strike.y = py_round(strike.y * precision_factor, 0) / precision_factor;
-        writeln!(stdout, "{strike}")?;
+        // `bo-db --tz` renders the strike timestamps in the selected zone
+        // (`strike_db.set_timezone(tz)` + mapper conversion).
+        lines.push(strike.to_string_in_tz(tz));
     }
-
-    let select_time = timer.borrow_mut().lap();
-    eprintln!("received {count} strikes in {select_time:.3} seconds");
-    Ok(count)
+    Ok(lines.join("\n"))
 }
 
-/// `cli/db.py.fetch_strikes_grid`: select grid data and print arcgrid or map.
+/// `cli/db.py.fetch_strikes_grid`: select grid data and return the arcgrid or
+/// map text.
 pub fn fetch_strikes_grid(
     executor: &dyn QueryExecutor,
     options: &DbOptions,
     grid: &Grid,
     interval: &TimeInterval,
-) -> std::io::Result<()> {
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let db = StrikeDb::new(executor, options.srid);
-    let mut timer = Timer::new();
-    let grid_data: GridData = db
-        .select_grid(grid, 0, interval, None)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let grid_data: GridData = db.select_grid(grid, 0, interval, None)?;
 
-    let select_time = timer.lap();
-    let output = if options.map {
-        grid_data.to_map()
+    if options.map {
+        Ok(grid_data.to_map())
     } else {
-        grid_data.to_arcgrid()
-    };
-    println!("{output}");
-    eprintln!("received grid data in {select_time:.3} seconds");
-    Ok(())
+        Ok(grid_data.to_arcgrid())
+    }
 }
 
 /// Entry point for the `bo-db` binary, given a connected executor.
-pub fn run(executor: &dyn QueryExecutor, options: &DbOptions) -> std::io::Result<()> {
+pub fn run(
+    executor: &dyn QueryExecutor,
+    options: &DbOptions,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let now = Utc::now();
+    let tz = parse_timezone(&options.tz)
+        .unwrap_or_else(|| exit_with(&format!("parse error in timezone \"{}\"", options.tz), 1));
     let (start, end) = resolve_interval(options, now);
     let interval = TimeInterval::new(start, end);
     let area = resolve_area(options);
 
     let grid = prepare_grid_if_applicable(options, area.as_ref());
     if let Some(grid) = grid {
-        fetch_strikes_grid(executor, options, &grid, &interval)
+        let mut timer = Timer::new();
+        let output = fetch_strikes_grid(executor, options, &grid, &interval)?;
+        let select_time = timer.lap();
+        println!("{output}");
+        eprintln!("received grid data in {select_time:.3} seconds");
     } else {
-        fetch_strikes(executor, options, &interval, area.as_ref()).map(|_| ())
+        let mut timer = Timer::new();
+        let output = fetch_strikes(executor, options, &interval, area.as_ref(), tz)?;
+        let select_time = timer.lap();
+        if !output.is_empty() {
+            println!("{output}");
+        }
+        let count = output.lines().filter(|line| !line.is_empty()).count();
+        eprintln!("received {count} strikes in {select_time:.3} seconds");
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -380,8 +386,56 @@ mod tests {
             Utc.with_ymd_and_hms(2025, 1, 1, 10, 0, 0).unwrap(),
             Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap(),
         );
-        let count = fetch_strikes(&mock, &options, &interval, None).unwrap();
-        assert_eq!(count, 1);
+        let output = fetch_strikes(&mock, &options, &interval, None, chrono_tz::UTC).unwrap();
+        assert_eq!(output.lines().count(), 1);
+        // The strike's coordinates are rounded to `precision` decimals and the
+        // altitude/amplitude/error/count suffix matches `Strike.__str__`.
+        assert!(output.starts_with("2025-01-01 11:00:00.000000000 10.1235 20.6543 100.0 10.5 250 5"));
+    }
+
+    #[test]
+    fn fetch_strikes_grid_renders_arcgrid() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows(
+            "GROUP BY",
+            vec![Row::new(vec![
+                Value::Int(0),
+                Value::Int(1),
+                Value::Int(3),
+                Value::Timestamp(Utc.with_ymd_and_hms(2025, 1, 1, 11, 0, 0).unwrap()),
+            ])],
+        );
+        let options = DbOptions::defaults();
+        let grid = Grid::new(0.0, 1.0, 0.0, 1.0, 1.0, 1.0);
+        let interval = TimeInterval::new(
+            Utc.with_ymd_and_hms(2025, 1, 1, 10, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap(),
+        );
+        let output = fetch_strikes_grid(&mock, &options, &grid, &interval).unwrap();
+        assert!(output.starts_with("NCOLS 1\nNROWS 1\nXLLCORNER 0.0000\nYLLCORNER 0.0000\nCELLSIZE 1.0000\nNODATA_VALUE 0\n3"));
+    }
+
+    #[test]
+    fn strike_timestamp_converts_to_timezone() {
+        let strike = crate::data::Strike::new(
+            Some(1),
+            crate::data::Timestamp::new(
+                Utc.with_ymd_and_hms(2025, 1, 1, 11, 0, 0).unwrap(),
+                0,
+            ),
+            10.0,
+            20.0,
+            Some(0.0),
+            Some(0.0),
+            Some(0),
+            Some(0),
+            vec![],
+            None,
+        );
+        let tz = parse_timezone("Europe/Berlin").unwrap();
+        let rendered = strike.to_string_in_tz(tz);
+        // 11:00 UTC == 12:00 CET in January.
+        assert!(rendered.starts_with("2025-01-01 12:00:00.000000000 10.0000 20.0000"));
     }
 
     #[test]

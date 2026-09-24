@@ -183,6 +183,23 @@ impl Timestamp {
             None => "NaT".to_string(),
         }
     }
+
+    /// Like [`Timestamp::event_string`] but rendered in `tz`
+    /// (`db.mapper.Strike.convert_to_timezone`).
+    pub fn event_string_in(&self, tz: chrono_tz::Tz) -> String {
+        match self.datetime {
+            Some(dt) => {
+                let local = dt.with_timezone(&tz);
+                format!(
+                    "{}.{:06}{:03}",
+                    local.format("%Y-%m-%d %H:%M:%S"),
+                    local.timestamp_subsec_micros(),
+                    self.nanosecond
+                )
+            }
+            None => "NaT".to_string(),
+        }
+    }
 }
 
 impl PartialOrd for Timestamp {
@@ -313,15 +330,43 @@ impl std::fmt::Display for Strike {
     }
 }
 
-/// Render a float the way Python's `str(float)` does (shortest round-trip
-/// representation; integers print without a trailing `.0`? no — Python prints
-/// `2500` for an int, but `altitude` is stored as a float here so we keep the
-/// shortest representation including `.0` only when needed).
+/// `str(altitude)` as CPython renders a float (`2500.0`, `500.5`, `-0.003`).
+/// Rust's `{:?}` matches Python's shortest round-trip float repr.
 fn python_float_str(value: f64) -> String {
-    if value.fract() == 0.0 && value.abs() < 1e16 {
-        format!("{}", value as i64)
-    } else {
-        format!("{value}")
+    format!("{value:?}")
+}
+
+impl Strike {
+    /// Format the strike like [`std::fmt::Display`] but with the timestamp
+    /// rendered in `tz` (used by the `bo-db` CLI, whose `--tz` changes the
+    /// printed timestamps via `db.mapper.Strike.convert_to_timezone`).
+    pub fn to_string_in_tz(&self, tz: chrono_tz::Tz) -> String {
+        let altitude = match self.altitude {
+            Some(value) => python_float_str(value),
+            None => "-".to_string(),
+        };
+        let amplitude = match self.amplitude {
+            Some(value) if value != 0.0 => value,
+            _ => 0.0,
+        };
+        let lateral_error = match self.lateral_error {
+            Some(value) if value != 0 => value,
+            _ => 0,
+        };
+        let station_count = match self.station_count {
+            Some(value) if value != 0 => value,
+            _ => 0,
+        };
+        format!(
+            "{} {:.4} {:.4} {} {:.1} {} {}",
+            self.timestamp.event_string_in(tz),
+            self.x,
+            self.y,
+            altitude,
+            amplitude,
+            lateral_error,
+            station_count
+        )
     }
 }
 
@@ -445,7 +490,9 @@ impl GridData {
         for row in self.data.iter().rev() {
             result.push('|');
             for cell in row {
-                let index = GridData::cell_index(*cell, divider);
+                // Python would raise `IndexError` here for out-of-range
+                // indices; clamp instead so the tool never panics.
+                let index = GridData::cell_index(*cell, divider).min(chars.len() - 1);
                 result.push(chars[index]);
             }
             result.push_str("|\n");
@@ -459,9 +506,7 @@ impl GridData {
     /// `GridData.cell_index`.
     pub fn cell_index(cell: Option<GridElement>, divider: f64) -> usize {
         match cell {
-            Some(cell) => {
-                (((cell.count as f64 - 1.0) / divider + 1.0).floor() as usize).min(9)
-            }
+            Some(cell) => ((cell.count as f64 - 1.0) / divider + 1.0).floor().max(0.0) as usize,
             None => 0,
         }
     }
@@ -587,7 +632,7 @@ mod tests {
         );
         assert_eq!(
             strike.to_string(),
-            "2013-09-28 23:23:38.123456789 11.2000 49.3000 2500 10.5 5400 11"
+            "2013-09-28 23:23:38.123456789 11.2000 49.3000 2500.0 10.5 5400 11"
         );
     }
 
