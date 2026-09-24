@@ -24,7 +24,34 @@ use clap::Parser;
 
 use bo_service::config::{Config, Protocol};
 use bo_service::executor::QueryExecutor;
+use bo_service::metrics::{Metrics, StatsDMetrics};
 use bo_service::{http, postgres::PostgresExecutor, service::Service, transport};
+
+/// Build the service metrics sink.
+///
+/// Uses [`StatsDMetrics`] against the configured local StatsD receiver
+/// (default `localhost:8125`, `org.blitzortung.service` prefix).  When the
+/// socket cannot be set up the service falls back to [`NoopMetrics`] so a
+/// missing metrics daemon can never prevent startup.
+fn build_metrics(config: &Config) -> std::sync::Arc<dyn Metrics> {
+    let (host, port) = config.statsd_address();
+    match StatsDMetrics::with_address_and_prefix(host, port, config.statsd_prefix.clone()) {
+        Ok(metrics) => {
+            log::info!(
+                "sending StatsD metrics to {} with prefix {:?}",
+                metrics.target(),
+                config.statsd_prefix
+            );
+            std::sync::Arc::new(metrics)
+        }
+        Err(error) => {
+            log::warn!(
+                "StatsD metrics disabled: could not set up a sender for {host}:{port}: {error}"
+            );
+            std::sync::Arc::new(bo_service::metrics::NoopMetrics)
+        }
+    }
+}
 
 /// Command-line options for the `service` binary.
 #[derive(Parser, Debug)]
@@ -85,7 +112,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await
             .map_err(|e| format!("failed to connect to database: {e}"))?;
         let executor: Arc<dyn QueryExecutor> = Arc::new(executor);
-        let service: Arc<Service> = Arc::new(Service::new(executor));
+        let metrics: Arc<dyn Metrics> = build_metrics(&config);
+        let service: Arc<Service<Arc<dyn Metrics>>> = Arc::new(Service::with_parts(
+            executor,
+            bo_service::cache::ServiceCache::new(),
+            metrics,
+            std::collections::HashSet::new(),
+        ));
 
         let address = format!("0.0.0.0:{port}");
         log::info!("bo-service listening on {address} ({})", protocol.as_str());
@@ -160,5 +193,30 @@ mod tests {
     fn cli_parser_accepts_protocol() {
         let args = Args::try_parse_from(["service", "--protocol", "lsp"]).unwrap();
         assert_eq!(args.protocol.as_deref(), Some("lsp"));
+    }
+
+    #[test]
+    fn build_metrics_uses_configured_receiver() {
+        // A local receiver is always resolvable, so we get a StatsD sender.
+        let config = Config {
+            statsd_host: "127.0.0.1".into(),
+            statsd_port: 18125,
+            ..Config::default()
+        };
+        let metrics = build_metrics(&config);
+        // No panic and a usable sink.
+        metrics.for_db_pool_wait(0.01);
+    }
+
+    #[test]
+    fn build_metrics_falls_back_to_noop_on_bad_host() {
+        let config = Config {
+            // An unresolvable host makes `to_socket_addrs` fail and the
+            // service must stay usable with no metrics.
+            statsd_host: "invalid.invalid.invalid".into(),
+            ..Config::default()
+        };
+        let metrics = build_metrics(&config);
+        metrics.for_strikes(60, 1, 0.5);
     }
 }

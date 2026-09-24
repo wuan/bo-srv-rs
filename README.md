@@ -102,11 +102,20 @@ connection_count = 3
 [auth]
 username = <blitzortung.org account>
 password = <blitzortung.org password>
+
+[statsd]
+host = localhost
+port = 8125
+prefix = org.blitzortung.service
 ```
 
 The `[auth]` section holds the HTTP basic-auth credentials for the protected
 data feeds (`data.blitzortung.org`), mirroring `Config.get_username()` /
 `Config.get_password()`.
+
+The optional `[statsd]` section points at the local StatsD receiver (default
+`localhost:8125`, prefix `org.blitzortung.service`) as in the Python
+implementation.
 
 Environment variables supplement/override the file (explicit env vars win):
 
@@ -122,6 +131,9 @@ Environment variables supplement/override the file (explicit env vars win):
 | `BO_DB_CONNECTION_COUNT` | `3` | desired pool size (informational; see below) |
 | `BO_BLITZORTUNG_USERNAME` | *(empty)* | `[auth]` username |
 | `BO_BLITZORTUNG_PASSWORD` | *(empty)* | `[auth]` password |
+| `BO_STATSD_HOST` | `localhost` | StatsD receiver host |
+| `BO_STATSD_PORT` | `8125` | StatsD receiver UDP port |
+| `BO_STATSD_PREFIX` | `org.blitzortung.service` | StatsD metric name prefix |
 
 The PostgreSQL schema is the normal blitzortung one; the service only reads
 `strikes` rows (the `strikes` table with a `geog` geography column, a
@@ -149,6 +161,39 @@ WARN  bo_service::transport] nope([]) fault -32601 "function nope not found" id=
 The level defaults to `INFO` so these lines are visible out of the box;
 override with `RUST_LOG` (e.g. `RUST_LOG=debug`, or `RUST_LOG=warn` to hide the
 access lines).
+
+## Metrics
+
+Like the Python service (`blitzortung/service/metrics.py`), the service sends
+counters, gauges and timings to a **local StatsD receiver** over UDP —
+`localhost:8125` by default, under the `org.blitzortung.service` prefix
+(`[statsd]` / `BO_STATSD_*` override host, port and prefix).  The payloads are
+plain StatsD lines (`<name>:<value>|<type>`), e.g.:
+
+```text
+org.blitzortung.service.strikes_grid.total_count:1|c
+org.blitzortung.service.strikes_grid.total_count.<region>:1|c
+org.blitzortung.service.strikes_grid.cache_hits:0.5|g
+org.blitzortung.service.global_strikes_grid.total_count:1|c
+org.blitzortung.service.local_strikes_grid.data_area.<area>:1|c
+org.blitzortung.service.histogram.cache_hits:0.75|g
+org.blitzortung.service.histogram.size:4|g
+org.blitzortung.service.db.pool_wait:12|ms
+```
+
+The metric names and counts match the Python implementation exactly:
+
+| Handler | Metrics |
+| --- | --- |
+| `get_strikes_grid` | `strikes_grid.total_count` (+ `.<region>`), `strikes_grid.cache_hits` gauge; at a 10-minute length also `strikes_grid.bg_count` (+ `.<region>`) |
+| `get_global_strikes_grid` | `strikes_grid.total_count`, `global_strikes_grid.total_count`, `global_strikes_grid.cache_hits` gauge; at 10 minutes also both `bg_count`s |
+| `get_local_strikes_grid` | `strikes_grid.total_count`, `local_strikes_grid.total_count`, `local_strikes_grid.data_area.<area>`, `local_strikes_grid.cache_hits` gauge; at 10 minutes also both `bg_count`s |
+| histogram cache | `histogram.cache_hits` gauge, `histogram.size` gauge |
+| DB pool wait | `db.pool_wait` timing in milliseconds (at least `1`) |
+
+StatsD is fire-and-forget: if the socket cannot be created the service logs a
+warning and continues with metrics disabled, and a missing/failing daemon never
+affects request handling.
 
 ## Protocol
 
