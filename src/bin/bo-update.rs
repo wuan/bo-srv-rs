@@ -66,7 +66,10 @@ fn main() {
 
     let (runtime, executor) = match connect_postgres(&config) {
         Ok(pair) => pair,
-        Err(error) => exit_with(&describe_error("failed to connect to database", error.as_ref()), 1),
+        Err(error) => exit_with(
+            &describe_error("failed to connect to database", error.as_ref()),
+            1,
+        ),
     };
 
     match runtime.block_on(update_tool::update_strikes(

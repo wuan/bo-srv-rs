@@ -17,7 +17,9 @@ fn run_server(eq: impl QueryExecutor + 'static) -> u16 {
         .enable_all()
         .build()
         .unwrap();
-    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let listener = rt
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     let eq: Arc<dyn QueryExecutor> = Arc::new(eq);
     let service: Arc<Service> = Arc::new(Service::new(eq));
@@ -153,11 +155,7 @@ fn data_request_without_headers_is_blocked() {
 fn method_not_found_over_tcp() {
     let mock = MockExecutor::new();
     let port = run_server(mock);
-    let response = rpc(
-        port,
-        "",
-        r#"{"jsonrpc":"2.0","id":1,"method":"bogus"}"#,
-    );
+    let response = rpc(port, "", r#"{"jsonrpc":"2.0","id":1,"method":"bogus"}"#);
     let v: serde_json::Value = serde_json::from_str(&response).unwrap();
     assert_eq!(v["error"]["code"], bo_service::jsonrpc::METHOD_NOT_FOUND);
     assert_eq!(v["id"], 1);

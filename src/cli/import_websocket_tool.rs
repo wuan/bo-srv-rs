@@ -146,9 +146,7 @@ impl<'a> Importer<'a> {
         let local_delay = local_time - strike_time;
         self.local_delay_sum += local_delay;
 
-        log::info!(
-            "{strike} - region {region} - delay {delay:.1}, local delay {local_delay:.1}"
-        );
+        log::info!("{strike} - region {region} - delay {delay:.1}, local delay {local_delay:.1}");
 
         // `imprt_websocket.on_message`: count the strike and gauge its delay.
         self.metrics.for_websocket_strike(local_delay);
@@ -195,7 +193,9 @@ async fn run_once(
 
     // on_open: send the initialization message and start the keepalive.
     log::info!("{INITIALIZATION_MESSAGE}");
-    write.send(Message::Text(INITIALIZATION_MESSAGE.to_string())).await?;
+    write
+        .send(Message::Text(INITIALIZATION_MESSAGE.to_string()))
+        .await?;
 
     // Keepalive: send `{}` every 30s (dropped when the socket closes).
     let keepalive_write = write;
@@ -215,7 +215,9 @@ async fn run_once(
         }
     });
 
-    let db = executor.as_ref().map(|_| StrikeDb::new(executor.as_deref().unwrap(), 4326));
+    let db = executor
+        .as_ref()
+        .map(|_| StrikeDb::new(executor.as_deref().unwrap(), 4326));
     let db = db.as_ref();
     let mut importer = Importer::new(db, executor.as_deref(), metrics);
 

@@ -499,7 +499,10 @@ impl GridData {
         }
 
         result.push_str(&format!("{}\n", "-".repeat((x_count + 2).max(0) as usize)));
-        result.push_str(&format!("total count: {}, max per area: {}", total, maximum));
+        result.push_str(&format!(
+            "total count: {}, max per area: {}",
+            total, maximum
+        ));
         result
     }
 
@@ -704,10 +707,22 @@ mod tests {
 
     #[test]
     fn grid_data_cell_index() {
-        assert_eq!(GridData::cell_index(Some(GridElement::new(5, None)), 5.0), 1);
-        assert_eq!(GridData::cell_index(Some(GridElement::new(6, None)), 5.0), 2);
-        assert_eq!(GridData::cell_index(Some(GridElement::new(10, None)), 5.0), 2);
-        assert_eq!(GridData::cell_index(Some(GridElement::new(11, None)), 5.0), 3);
+        assert_eq!(
+            GridData::cell_index(Some(GridElement::new(5, None)), 5.0),
+            1
+        );
+        assert_eq!(
+            GridData::cell_index(Some(GridElement::new(6, None)), 5.0),
+            2
+        );
+        assert_eq!(
+            GridData::cell_index(Some(GridElement::new(10, None)), 5.0),
+            2
+        );
+        assert_eq!(
+            GridData::cell_index(Some(GridElement::new(11, None)), 5.0),
+            3
+        );
         assert_eq!(GridData::cell_index(None, 5.0), 0);
     }
 

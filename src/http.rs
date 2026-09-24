@@ -213,7 +213,10 @@ fn gzip_encode(body: &[u8]) -> Option<Vec<u8>> {
 /// gzip when the client advertised it (and was not downgraded by
 /// `fix_bad_accept_header`) and the body is at least
 /// [`COMPRESSION_THRESHOLD`] bytes, identity otherwise.
-pub(crate) fn encode_body(mut payload: Vec<u8>, accepts_gzip: bool) -> (Option<&'static str>, Vec<u8>) {
+pub(crate) fn encode_body(
+    mut payload: Vec<u8>,
+    accepts_gzip: bool,
+) -> (Option<&'static str>, Vec<u8>) {
     if accepts_gzip && payload.len() >= COMPRESSION_THRESHOLD {
         if let Some(compressed) = gzip_encode(&payload) {
             payload = compressed;
@@ -256,7 +259,10 @@ fn build_response(
 
 /// Handle a single HTTP connection: read requests and answer them in order,
 /// honouring keep-alive.
-async fn handle_connection<M: Metrics>(stream: TcpStream, service: Arc<Service<M>>) -> io::Result<()> {
+async fn handle_connection<M: Metrics>(
+    stream: TcpStream,
+    service: Arc<Service<M>>,
+) -> io::Result<()> {
     let peer_ip = stream.peer_addr().ok().map(|addr| addr.ip().to_string());
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -370,7 +376,10 @@ async fn handle_connection<M: Metrics>(stream: TcpStream, service: Arc<Service<M
 }
 
 /// Accept connections on `listener` and serve each one.
-pub async fn serve<M: Metrics + 'static>(listener: TcpListener, service: Arc<Service<M>>) -> io::Result<()> {
+pub async fn serve<M: Metrics + 'static>(
+    listener: TcpListener,
+    service: Arc<Service<M>>,
+) -> io::Result<()> {
     loop {
         let (stream, _peer) = listener.accept().await?;
         let service = service.clone();

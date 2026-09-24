@@ -40,7 +40,12 @@ fn config_for_dead_port() -> Config {
 fn service_with_dead_database() -> Service<NoopMetrics> {
     let executor = PostgresExecutor::lazy(&config_for_dead_port());
     let executor: Arc<dyn bo_service::executor::QueryExecutor> = Arc::new(executor);
-    Service::with_parts(executor, bo_service::cache::ServiceCache::new(), NoopMetrics, Default::default())
+    Service::with_parts(
+        executor,
+        bo_service::cache::ServiceCache::new(),
+        NoopMetrics,
+        Default::default(),
+    )
 }
 
 /// A data request that passes validation but needs the database: with no
@@ -71,8 +76,14 @@ fn data_request_without_database_returns_a_fault_envelope() {
 
     let value: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
     assert_eq!(value["id"], 42);
-    assert!(value["result"].is_null(), "a fault must not carry a result: {value}");
-    assert!(value["error"].is_object(), "expected a fault envelope: {value}");
+    assert!(
+        value["result"].is_null(),
+        "a fault must not carry a result: {value}"
+    );
+    assert!(
+        value["error"].is_object(),
+        "expected a fault envelope: {value}"
+    );
     assert_eq!(value["error"]["code"], jsonrpc::FAILURE);
     assert!(
         value["error"]["message"]
@@ -182,7 +193,9 @@ fn live_database_serves_and_dead_port_faults() {
         }
     }
     let live_executor = PostgresExecutor::lazy(&live);
-    let rows = rt.block_on(live_executor.query("SELECT 1", &[])).expect("live query");
+    let rows = rt
+        .block_on(live_executor.query("SELECT 1", &[]))
+        .expect("live query");
     assert_eq!(rows.len(), 1);
     assert_eq!(live_executor.failures().log_count(), 0);
 

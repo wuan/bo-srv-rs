@@ -93,7 +93,8 @@ pub fn decode_frame(buf: &[u8]) -> Option<Result<Vec<u8>, String>> {
     if header_end > MAX_HEADER_BYTES {
         return Some(Err("frame headers too large".into()));
     }
-    let headers = std::str::from_utf8(&buf[..header_end]).map_err(|_| "headers not utf-8".to_string());
+    let headers =
+        std::str::from_utf8(&buf[..header_end]).map_err(|_| "headers not utf-8".to_string());
     let headers = match headers {
         Ok(h) => h,
         Err(e) => return Some(Err(e)),
@@ -117,8 +118,7 @@ fn find_headers_end(buf: &[u8]) -> Option<usize> {
     if buf.len() < 4 {
         return None;
     }
-    buf.windows(4)
-        .position(|w| w == b"\r\n\r\n")
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
 /// Read a framed request body from the stream; `None` on EOF between frames.
@@ -136,12 +136,18 @@ async fn read_frame<R: AsyncRead + Unpin>(
                 if header_buf.is_empty() {
                     return Ok(None); // clean EOF between messages
                 }
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF in headers"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "EOF in headers",
+                ));
             }
             _ => {
                 header_buf.push(byte[0]);
                 if header_buf.len() > MAX_HEADER_BYTES {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "headers too large"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "headers too large",
+                    ));
                 }
                 if header_buf.ends_with(b"\r\n\r\n") {
                     break;
@@ -216,7 +222,9 @@ async fn handle_connection<M: Metrics>(
         log_access(&request, &result.meta, elapsed_ms);
 
         if let Some(response) = result.response {
-            write_half.write_all(&encode_frame(response.as_bytes())).await?;
+            write_half
+                .write_all(&encode_frame(response.as_bytes()))
+                .await?;
             write_half.flush().await?;
         }
     }
@@ -226,7 +234,10 @@ async fn handle_connection<M: Metrics>(
 ///
 /// The service object is shared across connections; a connection pool inside
 /// the executor serializes actual database work as needed.
-pub async fn serve<M: Metrics + 'static>(listener: TcpListener, service: Arc<Service<M>>) -> io::Result<()> {
+pub async fn serve<M: Metrics + 'static>(
+    listener: TcpListener,
+    service: Arc<Service<M>>,
+) -> io::Result<()> {
     loop {
         let (stream, _peer) = listener.accept().await?;
         let service = service.clone();
@@ -292,7 +303,10 @@ mod tests {
         let request = request_from_headers(headers, Some("10.0.0.9".to_string()));
         assert_eq!(request.user_agent.as_deref(), Some("bo-android-190"));
         assert_eq!(request.content_type.as_deref(), Some("text/json"));
-        assert_eq!(request.x_forwarded_for.as_deref(), Some("203.0.113.7, 10.0.0.1"));
+        assert_eq!(
+            request.x_forwarded_for.as_deref(),
+            Some("203.0.113.7, 10.0.0.1")
+        );
         assert_eq!(request.referer.as_deref(), Some("http://spam.example"));
         assert_eq!(request.client_ip.as_deref(), Some("10.0.0.9"));
     }

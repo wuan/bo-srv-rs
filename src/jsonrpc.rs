@@ -111,8 +111,7 @@ impl DispatchResult {
     /// The serialized response body (the dispatch always produces one for the
     /// requests this service answers).
     pub fn expect_response(self) -> String {
-        self.response
-            .expect("dispatch always produces a response")
+        self.response.expect("dispatch always produces a response")
     }
 }
 
@@ -313,14 +312,7 @@ async fn invoke<M: Metrics>(
             .unwrap_or(Value::Null)),
         "get_strikes_grid" => {
             service
-                .jsonrpc_get_strikes_grid(
-                    request,
-                    &args[0],
-                    &args[1],
-                    &args[2],
-                    &args[3],
-                    &args[4],
-                )
+                .jsonrpc_get_strikes_grid(request, &args[0], &args[1], &args[2], &args[3], &args[4])
                 .await
         }
         "get_strikes_raster" | "get_strokes_raster" => {
@@ -336,14 +328,7 @@ async fn invoke<M: Metrics>(
         "get_local_strikes_grid" => {
             service
                 .jsonrpc_get_local_strikes_grid(
-                    request,
-                    &args[0],
-                    &args[1],
-                    &args[2],
-                    &args[3],
-                    &args[4],
-                    &args[5],
-                    &args[6],
+                    request, &args[0], &args[1], &args[2], &args[3], &args[4], &args[5], &args[6],
                 )
                 .await
         }
@@ -399,7 +384,12 @@ async fn process_request<M: Metrics>(
     meta.params = summarize_params(&req.get("params").cloned().unwrap_or(Value::Null));
 
     let Some(method) = req.get("method").and_then(Value::as_str) else {
-        let response = request_fault(envelope, &id, INVALID_REQUEST, "Invalid Request: missing method");
+        let response = request_fault(
+            envelope,
+            &id,
+            INVALID_REQUEST,
+            "Invalid Request: missing method",
+        );
         meta.outcome = Some(Outcome::Fault {
             code: INVALID_REQUEST,
             message: "Invalid Request: missing method".to_string(),
@@ -497,7 +487,11 @@ fn request_fault(envelope: Envelope, id: &Value, code: i64, message: &str) -> Va
 
 /// Process a JSON-RPC request body and return the serialized response body
 /// plus access-log metadata.
-pub async fn process<M: Metrics>(service: &Service<M>, request: &mut Request, body: &str) -> DispatchResult {
+pub async fn process<M: Metrics>(
+    service: &Service<M>,
+    request: &mut Request,
+    body: &str,
+) -> DispatchResult {
     let parsed: Result<Value, serde_json::Error> = serde_json::from_str(body);
     let request_value = match parsed {
         Ok(v) => v,
@@ -506,7 +500,8 @@ pub async fn process<M: Metrics>(service: &Service<M>, request: &mut Request, bo
             // is answered with a Fault(INVALID_JSONRPC) in the default
             // pre-1.0 dialect (id/version defaults apply because parsing
             // failed up front).
-            let response = request_fault(Envelope::Pre1, &Value::Null, INVALID_REQUEST, "parse error");
+            let response =
+                request_fault(Envelope::Pre1, &Value::Null, INVALID_REQUEST, "parse error");
             return dispatch_result(
                 response,
                 RequestMeta {
@@ -523,7 +518,11 @@ pub async fn process<M: Metrics>(service: &Service<M>, request: &mut Request, bo
 }
 
 /// Dispatch helper used by the transport.
-pub async fn dispatch<M: Metrics>(service: &Service<M>, request: &mut Request, body: &str) -> DispatchResult {
+pub async fn dispatch<M: Metrics>(
+    service: &Service<M>,
+    request: &mut Request,
+    body: &str,
+) -> DispatchResult {
     process(service, request, body).await
 }
 
@@ -542,12 +541,20 @@ mod tests {
 
     /// Blocking test wrapper around the async [`super::dispatch`]: the tests
     /// below are synchronous assertions over the dispatch result.
-    fn dispatch<M: Metrics>(service: &Service<M>, request: &mut Request, body: &str) -> DispatchResult {
+    fn dispatch<M: Metrics>(
+        service: &Service<M>,
+        request: &mut Request,
+        body: &str,
+    ) -> DispatchResult {
         block_on(super::dispatch(service, request, body))
     }
 
     /// Blocking test wrapper around the async [`super::process`].
-    fn process<M: Metrics>(service: &Service<M>, request: &mut Request, body: &str) -> DispatchResult {
+    fn process<M: Metrics>(
+        service: &Service<M>,
+        request: &mut Request,
+        body: &str,
+    ) -> DispatchResult {
         block_on(super::process(service, request, body))
     }
 

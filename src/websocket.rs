@@ -86,7 +86,7 @@ mod tests {
     }
 
     /// Reference from `tests/test_websocket.py::test_decode`: the compressed
-/// message and its full decompressed JSON.
+    /// message and its full decompressed JSON.
     #[test]
     fn decode_reference_message_from_python_tests() {
         let source = include_str!("../tests/fixtures/websocket_compressed.txt");

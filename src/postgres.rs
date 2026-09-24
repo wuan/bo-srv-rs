@@ -77,7 +77,11 @@ impl<'a> PgParam<'a> {
 /// generated SQL binds integers where PostgreSQL infers `INT4` (e.g. the
 /// `srid` argument of `ST_Transform(..., $1)`) or `INT2` (the `SMALLINT`
 /// strike columns).  Dispatch on `ty` and narrow as needed.
-fn int_to_sql(value: i64, ty: &Type, out: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
+fn int_to_sql(
+    value: i64,
+    ty: &Type,
+    out: &mut BytesMut,
+) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
     if *ty == Type::INT2 {
         (value as i16).to_sql(ty, out)
     } else if *ty == Type::INT4 {
@@ -100,7 +104,11 @@ fn int_to_sql(value: i64, ty: &Type, out: &mut BytesMut) -> Result<IsNull, Box<d
 
 /// Serialize a floating-point parameter against the server-inferred target
 /// type (REAL/`FLOAT4` needs an `f32` payload, `FLOAT8` an `f64`).
-fn float_to_sql(value: f64, ty: &Type, out: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
+fn float_to_sql(
+    value: f64,
+    ty: &Type,
+    out: &mut BytesMut,
+) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
     if *ty == Type::FLOAT4 {
         (value as f32).to_sql(ty, out)
     } else if *ty == Type::FLOAT8 {
@@ -136,7 +144,11 @@ fn timestamp_to_sql(
 }
 
 impl<'a> ToSql for PgParam<'a> {
-    fn to_sql(&self, ty: &Type, out: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
         match self {
             PgParam::Null => Ok(IsNull::Yes),
             PgParam::Int(i) => int_to_sql(*i, ty, out),
@@ -152,7 +164,11 @@ impl<'a> ToSql for PgParam<'a> {
         true
     }
 
-    fn to_sql_checked(&self, ty: &Type, out: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
+    fn to_sql_checked(
+        &self,
+        ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
         match self {
             PgParam::Null => Ok(IsNull::Yes),
             PgParam::Int(i) => int_to_sql(*i, ty, out),
@@ -327,7 +343,9 @@ impl PostgresExecutor {
     /// single-flight, so a burst of requests while the database is down issues
     /// one connect attempt, not one per request.  A failed connect leaves the
     /// slot empty (the next request retries) and logs the first failure.
-    async fn current_client(&self) -> Result<Arc<tokio_postgres::Client>, Box<dyn Error + Sync + Send>> {
+    async fn current_client(
+        &self,
+    ) -> Result<Arc<tokio_postgres::Client>, Box<dyn Error + Sync + Send>> {
         if let Some(client) = self.client.read().await.as_ref() {
             return Ok(client.clone());
         }
@@ -354,7 +372,10 @@ impl PostgresExecutor {
     /// reconnects.  Only clears the slot if it still holds the same client.
     async fn drop_dead_client(&self, dead: &Arc<tokio_postgres::Client>) {
         let mut guard = self.client.write().await;
-        if guard.as_ref().is_some_and(|client| Arc::ptr_eq(client, dead)) {
+        if guard
+            .as_ref()
+            .is_some_and(|client| Arc::ptr_eq(client, dead))
+        {
             *guard = None;
         }
     }
@@ -367,10 +388,7 @@ impl PostgresExecutor {
     }
 
     fn to_refs<'a>(pg_params: &'a [PgParam<'a>]) -> Vec<&'a (dyn ToSql + Sync)> {
-        pg_params
-            .iter()
-            .map(|p| p as &(dyn ToSql + Sync))
-            .collect()
+        pg_params.iter().map(|p| p as &(dyn ToSql + Sync)).collect()
     }
 }
 
@@ -449,10 +467,8 @@ mod tests {
     }
 
     #[test]
-fn pg_param_adapter_maps_values() {
-        let param = Param::Timestamp(
-            DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
-        );
+    fn pg_param_adapter_maps_values() {
+        let param = Param::Timestamp(DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap());
         let p = PgParam::from_param(&param);
         match p {
             PgParam::Timestamp(ts) => assert_eq!(ts.timestamp(), 1_700_000_000),
@@ -482,7 +498,10 @@ fn pg_param_adapter_maps_values() {
 
         let int4 = encode(&param, &Type::INT4).expect("INT4");
         assert_eq!(int4.len(), 4);
-        assert_eq!(i32::from_be_bytes([int4[0], int4[1], int4[2], int4[3]]), 4326);
+        assert_eq!(
+            i32::from_be_bytes([int4[0], int4[1], int4[2], int4[3]]),
+            4326
+        );
 
         let int8 = encode(&param, &Type::INT8).expect("INT8");
         assert_eq!(int8.len(), 8);
@@ -509,7 +528,10 @@ fn pg_param_adapter_maps_values() {
 
         let float4 = encode(&param, &Type::FLOAT4).expect("FLOAT4");
         assert_eq!(float4.len(), 4);
-        assert_eq!(f32::from_be_bytes([float4[0], float4[1], float4[2], float4[3]]), 12.5);
+        assert_eq!(
+            f32::from_be_bytes([float4[0], float4[1], float4[2], float4[3]]),
+            12.5
+        );
 
         let float8 = encode(&param, &Type::FLOAT8).expect("FLOAT8");
         assert_eq!(float8.len(), 8);
@@ -517,14 +539,17 @@ fn pg_param_adapter_maps_values() {
     }
 
     /// `insert_many` binds every strike column against the type the server
-/// infers from the schema; verify each one encodes.
+    /// infers from the schema; verify each one encodes.
     #[test]
     fn insert_column_types_encode() {
         // bigserial id is INT8; timestamp TIMESTAMPTZ; nanoseconds/region/
         // error2d/stationcount/altitude INT2; amplitude FLOAT4; geog is built
         // by ST_MakePoint from two FLOAT8 coordinates.
         let columns = [
-            (Param::Timestamp(DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap()), Type::TIMESTAMPTZ),
+            (
+                Param::Timestamp(DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap()),
+                Type::TIMESTAMPTZ,
+            ),
             (Param::Int(700), Type::INT2),
             (Param::Float(8.91), Type::FLOAT8),
             (Param::Float(44.28), Type::FLOAT8),
@@ -535,9 +560,8 @@ fn pg_param_adapter_maps_values() {
             (Param::Int(5), Type::INT2),
         ];
         for (param, ty) in columns {
-            encode(&param, &ty).unwrap_or_else(|error| {
-                panic!("failed to encode {param:?} as {ty:?}: {error}")
-            });
+            encode(&param, &ty)
+                .unwrap_or_else(|error| panic!("failed to encode {param:?} as {ty:?}: {error}"));
         }
         // The `srid` parameter of ST_Transform is INT4.
         encode(&Param::Int(4326), &Type::INT4).expect("srid INT4");
@@ -546,7 +570,10 @@ fn pg_param_adapter_maps_values() {
     /// The text parameter must not be affected by the numeric dispatch.
     #[test]
     fn text_and_null_params_still_encode() {
-        assert_eq!(encode(&Param::Text("abc".into()), &Type::TEXT).unwrap(), b"abc");
+        assert_eq!(
+            encode(&Param::Text("abc".into()), &Type::TEXT).unwrap(),
+            b"abc"
+        );
         let null = encode(&Param::Null, &Type::INT4).unwrap();
         assert!(null.is_empty());
     }

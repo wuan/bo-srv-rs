@@ -82,9 +82,8 @@ fn effective_port(cli_port: Option<u16>, config: &Config) -> u16 {
 /// protocol`, defaulting to `http`).
 fn effective_protocol(cli_protocol: Option<&str>, config: &Config) -> Result<Protocol, String> {
     match cli_protocol {
-        Some(value) => {
-            Protocol::parse(value).ok_or_else(|| format!("invalid --protocol {value:?} (use http or lsp)"))
-        }
+        Some(value) => Protocol::parse(value)
+            .ok_or_else(|| format!("invalid --protocol {value:?} (use http or lsp)")),
         None => Ok(config.protocol),
     }
 }
@@ -97,11 +96,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let config = Config::from_env();
     let port = effective_port(args.port, &config);
-    let protocol = effective_protocol(args.protocol.as_deref(), &config)
-        .unwrap_or_else(|error| {
-            eprintln!("{error}");
-            std::process::exit(2);
-        });
+    let protocol = effective_protocol(args.protocol.as_deref(), &config).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -182,12 +180,18 @@ mod tests {
             protocol: Protocol::Http,
             ..Config::default()
         };
-        assert_eq!(effective_protocol(Some("lsp"), &config).unwrap(), Protocol::Lsp);
+        assert_eq!(
+            effective_protocol(Some("lsp"), &config).unwrap(),
+            Protocol::Lsp
+        );
         let config = Config {
             protocol: Protocol::Lsp,
             ..Config::default()
         };
-        assert_eq!(effective_protocol(Some("http"), &config).unwrap(), Protocol::Http);
+        assert_eq!(
+            effective_protocol(Some("http"), &config).unwrap(),
+            Protocol::Http
+        );
         assert!(effective_protocol(Some("bogus"), &config).is_err());
     }
 

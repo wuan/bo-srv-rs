@@ -113,6 +113,9 @@ fn service_survives_a_real_query_request() {
         port,
         r#"{"jsonrpc":"2.0","id":1,"method":"get_strikes_grid","params":{"minute_length":60,"grid_base_length":10000,"region":1}}"#,
     );
-    assert!(body.contains("r") || body.contains("error"), "unexpected response: {body}");
+    assert!(
+        body.contains("r") || body.contains("error"),
+        "unexpected response: {body}"
+    );
     println!("response: {}", &body[..body.len().min(160)]);
 }

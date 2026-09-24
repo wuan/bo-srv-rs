@@ -52,7 +52,9 @@ fn server(executor: impl QueryExecutor + 'static) -> u16 {
         .enable_all()
         .build()
         .unwrap();
-    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let listener = rt
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
     let port = listener.local_addr().unwrap().port();
     let executor: Arc<dyn QueryExecutor> = Arc::new(executor);
     let service: Arc<Service> = Arc::new(Service::new(executor));
@@ -77,7 +79,9 @@ fn post(port: u16, id: usize) -> Result<(), String> {
          Content-Type: text/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    stream.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| e.to_string())?;
 
     let mut header = Vec::new();
     let mut byte = [0u8; 1];
@@ -98,9 +102,14 @@ fn post(port: u16, id: usize) -> Result<(), String> {
         })
         .unwrap_or(0);
     let mut response = vec![0u8; content_length];
-    stream.read_exact(&mut response).map_err(|e| e.to_string())?;
+    stream
+        .read_exact(&mut response)
+        .map_err(|e| e.to_string())?;
     if !response.starts_with(b"{") && !response.starts_with(b"[") {
-        return Err(format!("unexpected body: {}", String::from_utf8_lossy(&response)));
+        return Err(format!(
+            "unexpected body: {}",
+            String::from_utf8_lossy(&response)
+        ));
     }
     Ok(())
 }

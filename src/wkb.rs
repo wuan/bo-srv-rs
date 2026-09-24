@@ -62,12 +62,7 @@ mod tests {
 
     #[test]
     fn encodes_polygon_with_expected_layout() {
-        let wkb = polygon(&[vec![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 1.0],
-        ]]);
+        let wkb = polygon(&[vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]]);
         assert_eq!(wkb[0], 0x01);
         assert_eq!(u32::from_le_bytes(wkb[1..5].try_into().unwrap()), 3);
         assert_eq!(u32::from_le_bytes(wkb[5..9].try_into().unwrap()), 1); // rings
@@ -82,13 +77,7 @@ mod tests {
         assert_eq!(u32::from_le_bytes(wkb[1..5].try_into().unwrap()), 2);
         let n = u32::from_le_bytes(wkb[5..9].try_into().unwrap());
         assert_eq!(n, 3); // first point repeated to close the ring
-        assert_eq!(
-            f64::from_le_bytes(wkb[9..17].try_into().unwrap()),
-            1.0
-        );
-        assert_eq!(
-            f64::from_le_bytes(wkb[17..25].try_into().unwrap()),
-            2.0
-        );
+        assert_eq!(f64::from_le_bytes(wkb[9..17].try_into().unwrap()), 1.0);
+        assert_eq!(f64::from_le_bytes(wkb[17..25].try_into().unwrap()), 2.0);
     }
 }

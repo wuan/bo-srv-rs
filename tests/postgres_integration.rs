@@ -12,11 +12,11 @@
 //! the real server (0x00 / UTF8 errors, int2 deserialization, ambiguous
 //! `ST_Transform` and `ST_MakePoint` placeholders).
 
+use bo_service::config::Config;
 use bo_service::data::Timestamp;
 use bo_service::db::StrikeDb;
 use bo_service::postgres::PostgresExecutor;
 use bo_service::query::TimeInterval;
-use bo_service::config::Config;
 
 /// Build a [`Config`] from `DATABASE_URL` (a libpq keyword/value string).
 fn config_from_env() -> Config {
@@ -62,7 +62,10 @@ fn default_select_executes_and_deserializes() {
         let db = StrikeDb::new(&executor, 4326);
         let now = chrono::Utc::now();
         let interval = TimeInterval::new(now - chrono::Duration::hours(24), now);
-        let strikes = db.select(&interval, None, None).await.expect("select must succeed");
+        let strikes = db
+            .select(&interval, None, None)
+            .await
+            .expect("select must succeed");
         println!("selected {} strikes", strikes.len());
     });
 }
@@ -108,7 +111,10 @@ fn get_latest_time_executes() {
     let (runtime, executor) = runtime_and_executor();
     runtime.block_on(async {
         let db = StrikeDb::new(&executor, 4326);
-        let latest = db.get_latest_time(Some(1)).await.expect("get_latest_time must succeed");
+        let latest = db
+            .get_latest_time(Some(1))
+            .await
+            .expect("get_latest_time must succeed");
         println!("latest: {latest:?}");
     });
 }

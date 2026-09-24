@@ -49,17 +49,23 @@ fn main() {
     } else {
         match runtime.block_on(PostgresExecutor::connect(&config)) {
             Ok(executor) => Some(Arc::new(executor)),
-            Err(error) => {
-                exit_with(&describe_error("failed to connect to database", error.as_ref()), 1)
-            }
+            Err(error) => exit_with(
+                &describe_error("failed to connect to database", error.as_ref()),
+                1,
+            ),
         }
     };
 
     let metrics = build_import_metrics(&config);
 
-    if let Err(error) =
-        runtime.block_on(import_websocket_tool::run(executor, &ws_options, metrics.as_ref()))
-    {
-        exit_with(&describe_error("websocket import failed", error.as_ref()), 1);
+    if let Err(error) = runtime.block_on(import_websocket_tool::run(
+        executor,
+        &ws_options,
+        metrics.as_ref(),
+    )) {
+        exit_with(
+            &describe_error("websocket import failed", error.as_ref()),
+            1,
+        );
     }
 }

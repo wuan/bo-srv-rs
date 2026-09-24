@@ -22,10 +22,9 @@
 //! trait so it can be tested without a live PostgreSQL database; a mock
 //! executor is provided in the [`mock`] module.
 
+pub mod builder;
 pub mod cache;
 pub mod cli;
-pub mod metrics;
-pub mod builder;
 pub mod config;
 pub mod data;
 pub mod dataimport;
@@ -34,6 +33,7 @@ pub mod executor;
 pub mod geom;
 pub mod http;
 pub mod jsonrpc;
+pub mod metrics;
 pub mod mock;
 pub mod postgres;
 pub mod query;

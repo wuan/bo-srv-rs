@@ -174,7 +174,12 @@ impl ObjectCache {
     }
 
     /// [`ObjectCache::get_result`] with an injectable clock.
-    async fn get_result_at<F, Fut>(&self, key: &str, creator: F, now: f64) -> Result<Value, CacheError>
+    async fn get_result_at<F, Fut>(
+        &self,
+        key: &str,
+        creator: F,
+        now: f64,
+    ) -> Result<Value, CacheError>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<Value, CacheError>>,
@@ -404,18 +409,26 @@ mod tests {
         let mut created = 0;
         let now = 1_000.0;
         let first = cache
-            .get_at("k", || async {
-                created += 1;
-                Ok(json!(created))
-            }, now)
+            .get_at(
+                "k",
+                || async {
+                    created += 1;
+                    Ok(json!(created))
+                },
+                now,
+            )
             .await;
         assert_eq!(first, json!(1));
         // after the TTL, the entry is stale even within the same second
         let second = cache
-            .get_at("k", || async {
-                created += 1;
-                Ok(json!(created))
-            }, 1_020.0)
+            .get_at(
+                "k",
+                || async {
+                    created += 1;
+                    Ok(json!(created))
+                },
+                1_020.0,
+            )
             .await;
         assert_eq!(second, json!(2));
     }
@@ -426,28 +439,54 @@ mod tests {
         let cache = ObjectCache::new(60, Some(2), None);
         let now = 1_000.0;
 
-        assert_eq!(cache.get_at("a", || async { Ok(json!(1)) }, now).await, json!(1));
-        assert_eq!(cache.get_at("b", || async { Ok(json!(2)) }, now).await, json!(2));
+        assert_eq!(
+            cache.get_at("a", || async { Ok(json!(1)) }, now).await,
+            json!(1)
+        );
+        assert_eq!(
+            cache.get_at("b", || async { Ok(json!(2)) }, now).await,
+            json!(2)
+        );
         // touch "a", pushing it behind "b"
-        assert_eq!(cache.get_at("a", || async { Ok(json!(99)) }, now).await, json!(1));
+        assert_eq!(
+            cache.get_at("a", || async { Ok(json!(99)) }, now).await,
+            json!(1)
+        );
         // insert "c": cache full (2 >= 2) -> evict oldest ("b")
-        assert_eq!(cache.get_at("c", || async { Ok(json!(3)) }, now).await, json!(3));
+        assert_eq!(
+            cache.get_at("c", || async { Ok(json!(3)) }, now).await,
+            json!(3)
+        );
         assert_eq!(cache.get_size(), 2);
         // "b" was evicted; re-fetching it evicts the oldest ("a") again
-        assert_eq!(cache.get_at("b", || async { Ok(json!(22)) }, now).await, json!(22));
+        assert_eq!(
+            cache.get_at("b", || async { Ok(json!(22)) }, now).await,
+            json!(22)
+        );
         assert_eq!(cache.get_size(), 2);
         // "a" was evicted in turn, so it is recomputed
-        assert_eq!(cache.get_at("a", || async { Ok(json!(77)) }, now).await, json!(77));
-        assert_eq!(cache.get_at("a", || async { Ok(json!(78)) }, now).await, json!(77));
+        assert_eq!(
+            cache.get_at("a", || async { Ok(json!(77)) }, now).await,
+            json!(77)
+        );
+        assert_eq!(
+            cache.get_at("a", || async { Ok(json!(78)) }, now).await,
+            json!(77)
+        );
     }
 
     #[tokio::test]
     async fn cleanup_removes_expired_entries() {
         let cache = ObjectCache::new(20, None, Some(300.0));
         let now = 1_000.0;
-        assert_eq!(cache.get_at("k", || async { Ok(json!(1)) }, now).await, json!(1));
+        assert_eq!(
+            cache.get_at("k", || async { Ok(json!(1)) }, now).await,
+            json!(1)
+        );
         // same-second get after the cleanup period: expired removed, recompute
-        let value = cache.get_at("k", || async { Ok(json!(2)) }, now + 300.1).await;
+        let value = cache
+            .get_at("k", || async { Ok(json!(2)) }, now + 300.1)
+            .await;
         assert_eq!(value, json!(2));
         assert_eq!(cache.get_size(), 1);
     }
@@ -508,7 +547,10 @@ mod tests {
 
         let producer_cache = cache.clone();
         let producer = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
             rt.block_on(producer_cache.get_result("k", || async {
                 entered_tx.send(()).unwrap();
                 // Block like a database query would, until the test releases us.
@@ -532,7 +574,13 @@ mod tests {
     #[tokio::test]
     async fn poisoned_mutex_does_not_panic_subsequent_access() {
         let cache = Arc::new(ObjectCache::new(60, None, None));
-        assert_eq!(cache.get_result("k", || async { Ok(json!(1)) }).await.unwrap(), json!(1));
+        assert_eq!(
+            cache
+                .get_result("k", || async { Ok(json!(1)) })
+                .await
+                .unwrap(),
+            json!(1)
+        );
 
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = cache.lock();
@@ -541,7 +589,13 @@ mod tests {
         assert!(poisoned.is_err());
 
         // The cache still serves without panicking.
-        assert_eq!(cache.get_result("k", || async { Ok(json!(2)) }).await.unwrap(), json!(1));
+        assert_eq!(
+            cache
+                .get_result("k", || async { Ok(json!(2)) })
+                .await
+                .unwrap(),
+            json!(1)
+        );
     }
 
     #[test]

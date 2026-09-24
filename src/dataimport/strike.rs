@@ -66,8 +66,7 @@ impl<'a, T: Transport> StrikesBlitzortungDataProvider<'a, T> {
         region: u32,
         deadline: Option<std::time::Instant>,
     ) -> Result<Vec<Strike>, ImportError> {
-        let latest_strike = latest_strike
-            .unwrap_or_else(|| Utc::now() - Duration::hours(6));
+        let latest_strike = latest_strike.unwrap_or_else(|| Utc::now() - Duration::hours(6));
         log::debug!("import strikes since {latest_strike}");
 
         let mut strikes = Vec::new();

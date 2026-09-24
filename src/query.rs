@@ -40,7 +40,12 @@ impl Area {
         Area {
             envelope_wkb: envelope.as_wkb_polygon(),
             geometry_wkb: None,
-            bounds: (envelope.x_min, envelope.y_min, envelope.x_max, envelope.y_max),
+            bounds: (
+                envelope.x_min,
+                envelope.y_min,
+                envelope.x_max,
+                envelope.y_max,
+            ),
         }
     }
 
@@ -283,8 +288,7 @@ impl Query {
     /// [`Query::to_postgres`]).
     pub fn parameters(&self) -> Vec<Param> {
         let sql = self.to_sql();
-        let map: std::collections::HashMap<String, Param> =
-            self.params.iter().cloned().collect();
+        let map: std::collections::HashMap<String, Param> = self.params.iter().cloned().collect();
         let mut seen = std::collections::HashSet::new();
         param_names_in_order(&sql)
             .into_iter()
@@ -538,7 +542,12 @@ pub fn strikes_query(time_interval: &TimeInterval, id_interval: Option<IdInterva
 /// grid with `x_min`/`y_min` offsets, plus a `region` condition when a region
 /// is given (regions with overlapping bounding boxes would otherwise count
 /// strikes twice).
-pub fn grid_query(grid: &Grid, time_interval: &TimeInterval, region: Option<i64>, count_threshold: i64) -> Query {
+pub fn grid_query(
+    grid: &Grid,
+    time_interval: &TimeInterval,
+    region: Option<i64>,
+    count_threshold: i64,
+) -> Query {
     let env = grid.envelope().as_wkb_linear_ring();
     let mut q = Query::new("strikes");
     q = q
@@ -572,7 +581,11 @@ pub fn grid_query(grid: &Grid, time_interval: &TimeInterval, region: Option<i64>
     q = q.group_by("rx").group_by("ry");
     if count_threshold > 0 {
         q = q
-            .group_having("count(*) > %(count_threshold)s", "count_threshold", Param::Int(count_threshold))
+            .group_having(
+                "count(*) > %(count_threshold)s",
+                "count_threshold",
+                Param::Int(count_threshold),
+            )
             .cast("count_threshold", "bigint");
     }
     q
@@ -600,7 +613,11 @@ pub fn global_grid_query(grid: &Grid, time_interval: &TimeInterval, count_thresh
     q = q.group_by("rx").group_by("ry");
     if count_threshold > 0 {
         q = q
-            .group_having("count(*) > %(count_threshold)s", "count_threshold", Param::Int(count_threshold))
+            .group_having(
+                "count(*) > %(count_threshold)s",
+                "count_threshold",
+                Param::Int(count_threshold),
+            )
             .cast("count_threshold", "bigint");
     }
     q
@@ -684,7 +701,7 @@ mod tests {
              AND id >= %(start_id)s ORDER BY id";
         assert_eq!(q.to_sql(), expected);
         assert_eq!(q.parameters().len(), 4); // srid, start_time, end_time, start_id
-        // The PostgreSQL rendering adds explicit casts (see `Query::casts`).
+                                             // The PostgreSQL rendering adds explicit casts (see `Query::casts`).
         assert_eq!(
             q.to_postgres(),
             "SELECT id, \"timestamp\", nanoseconds, \
@@ -697,11 +714,11 @@ mod tests {
     }
 
     /// Regression for the `0x00` / "invalid byte sequence for encoding UTF8"
-/// failure: without an explicit `::integer`, PostgreSQL cannot choose between
-/// `ST_Transform(geometry, integer)` and `ST_Transform(geometry, text)` and
-/// defaults the placeholder to `text`; tokio-postgres then sends the integer
-/// in binary form and the server rejects the NUL byte.  The default select
-/// query must therefore carry the cast.
+    /// failure: without an explicit `::integer`, PostgreSQL cannot choose between
+    /// `ST_Transform(geometry, integer)` and `ST_Transform(geometry, text)` and
+    /// defaults the placeholder to `text`; tokio-postgres then sends the integer
+    /// in binary form and the server rejects the NUL byte.  The default select
+    /// query must therefore carry the cast.
     #[test]
     fn to_postgres_adds_explicit_casts() {
         let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
@@ -838,7 +855,8 @@ mod tests {
         let q = histogram_query(&interval, 5, Some(1), Some(&grid));
         let sql = q.to_sql();
         assert!(sql.contains("AND region = %(region)s"));
-        assert!(sql.contains("AND ST_SetSRID(CAST(%(envelope)s AS geometry), %(envelope_srid)s) && geog"));
+        assert!(sql
+            .contains("AND ST_SetSRID(CAST(%(envelope)s AS geometry), %(envelope_srid)s) && geog"));
         let params = q.parameters();
         assert_eq!(params.len(), 6); // end_time, binsize, start_time, region, envelope, envelope_srid
         assert!(matches!(params[3], Param::Int(1)));
@@ -991,10 +1009,9 @@ mod tests {
 
     #[test]
     fn parse_wkt_polygon_with_hole() {
-        let area = parse_wkt_polygon(
-            "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0),(1 1, 2 1, 2 2, 1 2, 1 1))",
-        )
-        .unwrap();
+        let area =
+            parse_wkt_polygon("POLYGON((0 0, 4 0, 4 4, 0 4, 0 0),(1 1, 2 1, 2 2, 1 2, 1 1))")
+                .unwrap();
         assert!(area.geometry_wkb.is_some());
     }
 

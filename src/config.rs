@@ -213,7 +213,10 @@ impl Config {
                     config.db_port = section.get("port").cloned().unwrap_or(config.db_port);
                     config.db_name = section.get("dbname").cloned().unwrap_or(config.db_name);
                     config.db_user = section.get("username").cloned().unwrap_or(config.db_user);
-                    config.db_password = section.get("password").cloned().unwrap_or(config.db_password);
+                    config.db_password = section
+                        .get("password")
+                        .cloned()
+                        .unwrap_or(config.db_password);
                     if let Some(count) = section.get("connection_count") {
                         if let Ok(count) = count.parse::<u32>() {
                             config.db_connection_count = count;
@@ -375,7 +378,9 @@ fn find_blitzortung_conf() -> Option<String> {
 }
 
 /// Read a simple INI file into a map of section name -> key/value pairs.
-fn read_ini(path: &str) -> Option<std::collections::HashMap<String, std::collections::HashMap<String, String>>> {
+fn read_ini(
+    path: &str,
+) -> Option<std::collections::HashMap<String, std::collections::HashMap<String, String>>> {
     let content = std::fs::read_to_string(path).ok()?;
     let mut sections: std::collections::HashMap<String, std::collections::HashMap<String, String>> =
         std::collections::HashMap::new();
@@ -647,8 +652,7 @@ mod tests {
         let dir = ini_dir("diag-missing");
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(&dir).unwrap();
-        let (config, diagnostics) =
-            Config::from_env_with_diagnostics(|_| None);
+        let (config, diagnostics) = Config::from_env_with_diagnostics(|_| None);
         std::env::set_current_dir(original).unwrap();
 
         assert!(diagnostics.is_missing());
@@ -659,7 +663,10 @@ mod tests {
         // The search order is reported.
         assert_eq!(
             diagnostics.searched_paths,
-            vec!["./blitzortung.conf".to_string(), "/etc/blitzortung.conf".to_string()]
+            vec![
+                "./blitzortung.conf".to_string(),
+                "/etc/blitzortung.conf".to_string()
+            ]
         );
         let warning = diagnostics.missing_warning();
         assert!(warning.contains("no blitzortung configuration file found"));

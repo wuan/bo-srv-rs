@@ -20,8 +20,8 @@ const DEG_TO_RAD: f64 = PI / 180.0;
 /// Tuple layout: `(region, min_lon, max_lon, min_lat, max_lat, utm_zone,
 /// southern)`
 pub const REGIONS: &[(u32, f64, f64, f64, f64, u32, bool)] = &[
-    (1, -25.0, 57.0, 27.0, 72.0, 33, false),  // UTM 33N / WGS84 (Europe)
-    (2, 110.0, 180.0, -50.0, 0.0, 55, true),  // UTM 55S / WGS84 (Oceania)
+    (1, -25.0, 57.0, 27.0, 72.0, 33, false), // UTM 33N / WGS84 (Europe)
+    (2, 110.0, 180.0, -50.0, 0.0, 55, true), // UTM 55S / WGS84 (Oceania)
     (3, -140.0, -50.0, 10.0, 60.0, 14, false), // UTM 14N / WGS84 (North America)
     (4, 85.0, 150.0, -10.0, 60.0, 50, false), // UTM 50N / WGS84 (Asia)
     (5, -100.0, -30.0, -50.0, 20.0, 20, true), // UTM 20S / WGS84 (South America)
@@ -332,11 +332,21 @@ impl UtmConverter {
         let sinh_arg_i = tan_ce * two_inv_denom_tan_ce;
         let cosh_arg_i = two_inv_denom_tan_ce_square - 1.0;
 
-        let (dcn, dce) = clen_s(&self.gtu, ETMERC_ORDER, sin_arg_r, cos_arg_r, sinh_arg_i, cosh_arg_i);
+        let (dcn, dce) = clen_s(
+            &self.gtu,
+            ETMERC_ORDER,
+            sin_arg_r,
+            cos_arg_r,
+            sinh_arg_i,
+            cosh_arg_i,
+        );
         cn += dcn;
         ce += dce;
         if ce.abs() <= 2.623395162778 {
-            (self.quasinorthing * ce + self.x0, self.quasinorthing * cn + self.zb + self.y0)
+            (
+                self.quasinorthing * ce + self.x0,
+                self.quasinorthing * cn + self.zb + self.y0,
+            )
         } else {
             (f64::NAN, f64::NAN) // outside projection domain
         }
@@ -358,7 +368,14 @@ impl UtmConverter {
             let sinh_arg_i = 0.5 * exp_2_ce - half_inv_exp_2_ce;
             let cosh_arg_i = 0.5 * exp_2_ce + half_inv_exp_2_ce;
 
-            let (_dcn_ignored, dce) = clen_s(&self.utg, ETMERC_ORDER, sin_arg_r, cos_arg_r, sinh_arg_i, cosh_arg_i);
+            let (_dcn_ignored, dce) = clen_s(
+                &self.utg,
+                ETMERC_ORDER,
+                sin_arg_r,
+                cos_arg_r,
+                sinh_arg_i,
+                cosh_arg_i,
+            );
             cn += _dcn_ignored;
             ce += dce;
 
@@ -534,14 +551,7 @@ impl GridFactory {
     pub fn for_region(region_id: u32) -> Option<Self> {
         region(region_id).map(|(_, min_lon, max_lon, min_lat, max_lat, zone, southern)| {
             GridFactory::new(
-                *min_lon,
-                *max_lon,
-                *min_lat,
-                *max_lat,
-                *zone,
-                *southern,
-                None,
-                None,
+                *min_lon, *max_lon, *min_lat, *max_lat, *zone, *southern, None, None,
             )
         })
     }
@@ -550,7 +560,16 @@ impl GridFactory {
     /// (`blitzortung.gis.constants.global_grid`): UTM 33N with explicit
     /// reference point (11, 48).
     pub fn global() -> Self {
-        GridFactory::new(-180.0, 180.0, -90.0, 90.0, 33, false, Some(11.0), Some(48.0))
+        GridFactory::new(
+            -180.0,
+            180.0,
+            -90.0,
+            90.0,
+            33,
+            false,
+            Some(11.0),
+            Some(48.0),
+        )
     }
 
     /// `blitzortung.geom.GridFactory.fix_max`
@@ -561,8 +580,12 @@ impl GridFactory {
     /// Build the grid for `base_length` metres
     /// (`blitzortung.geom.GridFactory.get_for`).
     pub fn get_for(&self, base_length: f64) -> Grid {
-        let ref_lon = self.ref_lon.unwrap_or_else(|| (self.min_lon + self.max_lon) / 2.0);
-        let ref_lat = self.ref_lat.unwrap_or_else(|| (self.min_lat + self.max_lat) / 2.0);
+        let ref_lon = self
+            .ref_lon
+            .unwrap_or_else(|| (self.min_lon + self.max_lon) / 2.0);
+        let ref_lat = self
+            .ref_lat
+            .unwrap_or_else(|| (self.min_lat + self.max_lat) / 2.0);
 
         let utm = UtmConverter::new(self.zone, self.southern);
         let (utm_x, utm_y) = utm.forward(ref_lat, ref_lon);
@@ -654,20 +677,81 @@ mod tests {
     // against the origin/main region table (see gen_grid_ref.py in the task
     // notes).
     const REF: &[(u32, f64, f64, f64, f64, f64)] = &[
-        (1, 0.14017221762500753, 0.08865376938211966, 56.8605750930044, 71.94746107673467, 10000.0),
-        (2, 0.10042732079560324, 0.08896248521472572, 179.99784259453546, -0.00308330932414691, 10000.0),
-        (3, 0.11382317953352583, 0.08628400349865473, -50.07968816851459, 59.95843802572109, 10000.0),
-        (4, 0.09953271581591139, 0.08993934856256303, 149.99486342779014, 59.97281318167404, 10000.0),
-        (5, 0.09376108435947117, 0.08956457406750751, -30.054231067834507, 19.949932346723358, 10000.0),
-        (6, 0.08986754959421539, 0.09047302416644964, 49.91695358429958, 39.97815336314149, 10000.0),
-        (7, 0.09603562976465696, 0.07996095890690214, -50.079914279091895, 29.9853595900883, 10000.0),
+        (
+            1,
+            0.14017221762500753,
+            0.08865376938211966,
+            56.8605750930044,
+            71.94746107673467,
+            10000.0,
+        ),
+        (
+            2,
+            0.10042732079560324,
+            0.08896248521472572,
+            179.99784259453546,
+            -0.00308330932414691,
+            10000.0,
+        ),
+        (
+            3,
+            0.11382317953352583,
+            0.08628400349865473,
+            -50.07968816851459,
+            59.95843802572109,
+            10000.0,
+        ),
+        (
+            4,
+            0.09953271581591139,
+            0.08993934856256303,
+            149.99486342779014,
+            59.97281318167404,
+            10000.0,
+        ),
+        (
+            5,
+            0.09376108435947117,
+            0.08956457406750751,
+            -30.054231067834507,
+            19.949932346723358,
+            10000.0,
+        ),
+        (
+            6,
+            0.08986754959421539,
+            0.09047302416644964,
+            49.91695358429958,
+            39.97815336314149,
+            10000.0,
+        ),
+        (
+            7,
+            0.09603562976465696,
+            0.07996095890690214,
+            -50.079914279091895,
+            29.9853595900883,
+            10000.0,
+        ),
     ];
 
     // Reference values for the factory used by `get_global_strikes_grid`
     // (GridFactory(-180, 180, -90, 90, epsg:32633, ref_lon=11, ref_lat=48)).
     const REF_GLOBAL: &[(f64, f64, f64, f64, f64)] = &[
-        (25000.0, 0.3183994501281493, 0.2356365657886883, 179.79137864480873, 89.79069969676917),
-        (50000.0, 0.6397258555172272, 0.4704490373267589, 179.52593080068164, 89.7115322588219),
+        (
+            25000.0,
+            0.3183994501281493,
+            0.2356365657886883,
+            179.79137864480873,
+            89.79069969676917,
+        ),
+        (
+            50000.0,
+            0.6397258555172272,
+            0.4704490373267589,
+            179.52593080068164,
+            89.7115322588219,
+        ),
     ];
 
     // Reference values for the local grid factory with data_area=5, x=5, y=5
@@ -722,7 +806,10 @@ mod tests {
     #[test]
     fn fix_max_rounds_down() {
         assert_eq!(GridFactory::fix_max(0.0, 10.0, 3.0), 9.0);
-        assert_eq!(GridFactory::fix_max(-20.0, 57.0, 0.14), -20.0 + 550.0 * 0.14);
+        assert_eq!(
+            GridFactory::fix_max(-20.0, 57.0, 0.14),
+            -20.0 + 550.0 * 0.14
+        );
     }
 
     #[test]

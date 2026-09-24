@@ -10,9 +10,7 @@
 //! Times default to the last hour (end: now minus one minute) in the selected
 //! time zone.
 
-use bo_service::cli::{
-    connect_postgres, db_tool, describe_error, exit_with, parse_timezone,
-};
+use bo_service::cli::{connect_postgres, db_tool, describe_error, exit_with, parse_timezone};
 use bo_service::config::Config;
 
 fn main() {
@@ -28,7 +26,10 @@ fn main() {
     let config = Config::from_env();
     let (runtime, executor) = match connect_postgres(&config) {
         Ok(pair) => pair,
-        Err(error) => exit_with(&describe_error("failed to connect to database", error.as_ref()), 1),
+        Err(error) => exit_with(
+            &describe_error("failed to connect to database", error.as_ref()),
+            1,
+        ),
     };
 
     if let Err(error) = runtime.block_on(db_tool::run(&executor, &db_options)) {

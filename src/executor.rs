@@ -169,7 +169,11 @@ mod tests {
 
     #[test]
     fn row_accessors() {
-        let row = Row::new(vec![Value::Int(7), Value::Float(1.5), Value::Text("x".into())]);
+        let row = Row::new(vec![
+            Value::Int(7),
+            Value::Float(1.5),
+            Value::Text("x".into()),
+        ]);
         assert_eq!(row.get_i64(0), Some(7));
         assert_eq!(row.get_f64(1), Some(1.5));
         assert_eq!(row.get_i64(2), None);

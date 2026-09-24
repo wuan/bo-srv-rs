@@ -172,8 +172,7 @@ impl Strike {
     /// rounded to 4 decimals, `time` is nanoseconds since the epoch, and
     /// `alt`/`mds`/`region` default as in `from_json`.
     pub fn from_json(&mut self, json: &serde_json::Value) -> Result<&mut Self, BuilderError> {
-        self.try_from_json(json)
-            .map_err(BuilderError)
+        self.try_from_json(json).map_err(BuilderError)
     }
 
     fn try_from_json(&mut self, json: &serde_json::Value) -> Result<&mut Self, String> {
@@ -192,8 +191,8 @@ impl Strike {
 
         self.set_x(py_round(lon, 4));
         self.set_y(py_round(lat, 4));
-        let timestamp =
-            Timestamp::from_nanosecond_value(time).ok_or_else(|| "invalid timestamp".to_string())?;
+        let timestamp = Timestamp::from_nanosecond_value(time)
+            .ok_or_else(|| "invalid timestamp".to_string())?;
         self.set_timestamp(timestamp);
 
         let altitude = json.get("alt").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -332,7 +331,8 @@ mod tests {
 
     #[test]
     fn from_line_no_stations() {
-        let line = "2025-01-15T12:30:45.123456+00:00 pos;48.5;-10.2;500.5 str;45.2 dev;250.0 sta;0;10;";
+        let line =
+            "2025-01-15T12:30:45.123456+00:00 pos;48.5;-10.2;500.5 str;45.2 dev;250.0 sta;0;10;";
         let strike = Strike::new().from_line(line).unwrap().build().unwrap();
         assert_eq!(strike.stations, Vec::<i64>::new());
     }
@@ -356,10 +356,12 @@ mod tests {
 
     #[test]
     fn lateral_error_clamped() {
-        let line = "2025-01-15 12:30:45.123456 pos;48.5;-10.2;500.5 str;45.2 dev;-100.0 sta;5;10;1,2,3";
+        let line =
+            "2025-01-15 12:30:45.123456 pos;48.5;-10.2;500.5 str;45.2 dev;-100.0 sta;5;10;1,2,3";
         let strike = Strike::new().from_line(line).unwrap().build().unwrap();
         assert_eq!(strike.lateral_error, Some(0));
-        let line = "2025-01-15 12:30:45.123456 pos;48.5;-10.2;500.5 str;45.2 dev;100000.0 sta;5;10;1,2,3";
+        let line =
+            "2025-01-15 12:30:45.123456 pos;48.5;-10.2;500.5 str;45.2 dev;100000.0 sta;5;10;1,2,3";
         let strike = Strike::new().from_line(line).unwrap().build().unwrap();
         assert_eq!(strike.lateral_error, Some(32767));
     }

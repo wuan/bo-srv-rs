@@ -43,7 +43,9 @@ pub fn connect_postgres(
 /// metrics daemon can never prevent an import.
 ///
 /// [`NoopMetrics`]: crate::metrics::NoopMetrics
-pub fn build_import_metrics(config: &crate::config::Config) -> std::sync::Arc<dyn crate::metrics::Metrics> {
+pub fn build_import_metrics(
+    config: &crate::config::Config,
+) -> std::sync::Arc<dyn crate::metrics::Metrics> {
     use crate::metrics::{NoopMetrics, StatsDMetrics, IMPORT_STATSD_PREFIX};
 
     let (host, port) = config.statsd_address();
@@ -83,9 +85,8 @@ pub fn init_logging(verbose: bool, debug: bool) {
     } else {
         "warn"
     };
-    let mut builder = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(default),
-    );
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default));
     if debug {
         builder.filter_level(log::LevelFilter::Debug);
     }
@@ -140,7 +141,11 @@ pub fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
         // not printed again as "caused by".
         if let Some(db_error) = err.downcast_ref::<tokio_postgres::Error>() {
             if let Some(db) = db_error.as_db_error() {
-                push_cause(&mut lines, &mut caused, format!("{}: {}", db.severity(), db.message()));
+                push_cause(
+                    &mut lines,
+                    &mut caused,
+                    format!("{}: {}", db.severity(), db.message()),
+                );
                 let detail_indent = "  ".repeat(caused + 1);
                 if let Some(detail) = db.detail() {
                     lines.push(format!("{detail_indent}detail: {detail}"));
@@ -208,11 +213,7 @@ pub fn parse_local_time(
     use chrono::TimeZone;
     let has_seconds = time_string.len() > 4;
     let naive_date = chrono::NaiveDate::parse_from_str(date_string, DATE_FORMAT).ok()?;
-    let fmt = if has_seconds {
-        "%H%M%S"
-    } else {
-        TIME_FORMAT
-    };
+    let fmt = if has_seconds { "%H%M%S" } else { TIME_FORMAT };
     let naive_time = chrono::NaiveTime::parse_from_str(time_string, fmt).ok()?;
     let naive = naive_date.and_time(naive_time);
     let local = tz.from_local_datetime(&naive).single()?;
@@ -398,7 +399,9 @@ mod tests {
         // ...and the chain walker adds the useful cause exactly once.
         let rendered = format_error_chain(&db_error);
         assert_eq!(
-            rendered.matches("permission denied for table strikes").count(),
+            rendered
+                .matches("permission denied for table strikes")
+                .count(),
             1,
             "cause must not be duplicated: {rendered}"
         );
@@ -415,7 +418,9 @@ mod tests {
         let rendered = format_error_chain(&error);
         assert_eq!(rendered.matches("db error").count(), 1, "got: {rendered}");
         assert_eq!(
-            rendered.matches("relation \"strikes\" does not exist").count(),
+            rendered
+                .matches("relation \"strikes\" does not exist")
+                .count(),
             1,
             "got: {rendered}"
         );
@@ -424,7 +429,10 @@ mod tests {
     #[test]
     fn parse_local_time_basic() {
         let result = parse_local_time("20250101", "1200", chrono_tz::UTC, false).unwrap();
-        assert_eq!(result.format("%Y-%m-%d %H:%M:%S").to_string(), "2025-01-01 12:00:00");
+        assert_eq!(
+            result.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2025-01-01 12:00:00"
+        );
     }
 
     #[test]

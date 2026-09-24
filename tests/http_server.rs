@@ -17,7 +17,9 @@ fn run_server(eq: impl QueryExecutor + 'static) -> u16 {
         .enable_all()
         .build()
         .unwrap();
-    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let listener = rt
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     let eq: Arc<dyn QueryExecutor> = Arc::new(eq);
     let service: Arc<Service> = Arc::new(Service::new(eq));
@@ -117,8 +119,16 @@ const ANDROID_HEADERS: &str = "User-Agent: bo-android-190\r\nContent-Type: text/
 #[test]
 fn post_returns_valid_http_200_json() {
     let port = run_server(MockExecutor::new());
-    let response = post(port, ANDROID_HEADERS, r#"{"jsonrpc":"2.0","id":1,"method":"check","params":[]}"#);
-    assert_eq!(response.status_line, "HTTP/1.1 200 OK", "{:?}", response.status_line);
+    let response = post(
+        port,
+        ANDROID_HEADERS,
+        r#"{"jsonrpc":"2.0","id":1,"method":"check","params":[]}"#,
+    );
+    assert_eq!(
+        response.status_line, "HTTP/1.1 200 OK",
+        "{:?}",
+        response.status_line
+    );
     assert_eq!(response.header("content-type"), Some("application/json"));
     let v: serde_json::Value = serde_json::from_str(&response.body).unwrap();
     assert_eq!(v["result"]["count"], 1);
@@ -130,7 +140,11 @@ fn missing_user_agent_is_blocked_but_still_http_200() {
     let port = run_server(MockExecutor::new());
     // No User-Agent -> base.py blocks data requests; the HTTP layer still
     // returns a well-formed 200 with the (empty-grid) body.
-    let response = post(port, "Content-Type: text/json\r\n", r#"{"jsonrpc":"2.0","id":1,"method":"get_strikes_grid","params":[60,10000,0,1,0]}"#);
+    let response = post(
+        port,
+        "Content-Type: text/json\r\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"get_strikes_grid","params":[60,10000,0,1,0]}"#,
+    );
     assert_eq!(response.status_line, "HTTP/1.1 200 OK");
     assert_eq!(response.header("content-type"), Some("application/json"));
     let v: serde_json::Value = serde_json::from_str(&response.body).unwrap();
@@ -141,7 +155,9 @@ fn missing_user_agent_is_blocked_but_still_http_200() {
 fn keep_alive_serves_two_requests_on_one_connection() {
     let port = run_server(MockExecutor::new());
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
 
     for id in [1, 2] {
         let body = format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"check","params":[]}}"#);
@@ -203,7 +219,9 @@ fn head_returns_headers_without_body() {
     let port = run_server(MockExecutor::new());
     let request = format!("HEAD / HTTP/1.1\r\nHost: localhost\r\n{ANDROID_HEADERS}\r\n");
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     stream.write_all(request.as_bytes()).unwrap();
     let response = read_response_head_only(&mut stream);
     assert_eq!(response.status_line, "HTTP/1.1 200 OK");
@@ -215,7 +233,10 @@ fn head_returns_headers_without_body() {
 #[test]
 fn unsupported_method_is_405() {
     let port = run_server(MockExecutor::new());
-    let response = http_roundtrip(port, &format!("PUT / HTTP/1.1\r\nHost: localhost\r\n{ANDROID_HEADERS}\r\n"));
+    let response = http_roundtrip(
+        port,
+        &format!("PUT / HTTP/1.1\r\nHost: localhost\r\n{ANDROID_HEADERS}\r\n"),
+    );
     assert_eq!(response.status_line, "HTTP/1.1 405 Method Not Allowed");
 }
 
@@ -254,7 +275,9 @@ fn live_http_grid_query() {
         .expect("connect");
     let executor: Arc<dyn QueryExecutor> = Arc::new(executor);
     let service: Arc<Service> = Arc::new(Service::new(executor));
-    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let listener = rt
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
     let port = listener.local_addr().unwrap().port();
     rt.spawn(async move {
         let _ = http::serve(listener, service).await;
@@ -356,7 +379,9 @@ fn large_response_executor() -> MockExecutor {
                 Value::Int(i % 100),
                 Value::Int(i % 50 + 1),
                 Value::Int(3),
-                Value::Timestamp(chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap()),
+                Value::Timestamp(
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
+                ),
             ])
         })
         .collect();
@@ -451,7 +476,9 @@ fn live_region_grid_with_histogram_returns_result() {
         .expect("connect");
     let executor: Arc<dyn QueryExecutor> = Arc::new(executor);
     let service: Arc<Service> = Arc::new(Service::new(executor));
-    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let listener = rt
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
     let port = listener.local_addr().unwrap().port();
     rt.spawn(async move {
         let _ = http::serve(listener, service).await;
@@ -465,6 +492,10 @@ fn live_region_grid_with_histogram_returns_result() {
     );
     let v: serde_json::Value = serde_json::from_str(&response.body).unwrap();
     let result = v.get("result").expect("unexpected response");
-    assert!(!result.is_null(), "region histogram returned null: {}", response.body);
+    assert!(
+        !result.is_null(),
+        "region histogram returned null: {}",
+        response.body
+    );
     assert!(result.get("h").is_some(), "missing histogram: {result}");
 }

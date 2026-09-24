@@ -81,7 +81,10 @@ fn success_is_logged_at_info_with_method_and_client() {
     transport::log_access(&client_request(), &meta, 12.3);
     let (level, message) = last_record(logger);
     assert_eq!(level, log::Level::Info);
-    assert!(message.contains("get_strikes_grid([60,10000,0,1,0])"), "{message}");
+    assert!(
+        message.contains("get_strikes_grid([60,10000,0,1,0])"),
+        "{message}"
+    );
     assert!(message.contains("client=203.0.113.7"), "{message}");
     assert!(message.contains("ua=bo-android-190"), "{message}");
     assert!(message.contains("12.3ms"), "{message}");
@@ -98,7 +101,9 @@ fn blocked_is_logged_at_warn_with_blocked_marker() {
         method: Some("get_strikes_grid".to_string()),
         id: "1".to_string(),
         params: "[60,10000,0,1,0]".to_string(),
-        outcome: Some(Outcome::Blocked("invalid user agent \"Mozilla/5.0\"".to_string())),
+        outcome: Some(Outcome::Blocked(
+            "invalid user agent \"Mozilla/5.0\"".to_string(),
+        )),
     };
     let mut request = client_request();
     request.user_agent = Some("Mozilla/5.0".to_string());

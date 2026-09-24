@@ -18,7 +18,9 @@ pub fn py_round(x: f64, ndigits: i32) -> f64 {
         return x;
     }
     if ndigits >= 0 {
-        format!("{:.*}", ndigits as usize, x).parse::<f64>().unwrap()
+        format!("{:.*}", ndigits as usize, x)
+            .parse::<f64>()
+            .unwrap()
     } else {
         let scale = 10f64.powi(-ndigits);
         py_round(x / scale, 0) * scale

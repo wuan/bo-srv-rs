@@ -105,7 +105,11 @@ impl<'a> StrikeDb<'a> {
     /// `region` pins every strike to the same region (the `bo-import` case);
     /// when it is `None` each strike's own region is used, falling back to 1
     /// (the `bo-update` case).
-    pub async fn insert_many(&self, strikes: &[Strike], region: Option<i64>) -> Result<usize, DbError> {
+    pub async fn insert_many(
+        &self,
+        strikes: &[Strike],
+        region: Option<i64>,
+    ) -> Result<usize, DbError> {
         if strikes.is_empty() {
             return Ok(0);
         }
@@ -170,7 +174,8 @@ impl<'a> StrikeDb<'a> {
 
     /// `Strike.insert`: insert a single strike (used by the websocket importer).
     pub async fn insert(&self, strike: &Strike, region: i64) -> Result<(), DbError> {
-        self.insert_many(std::slice::from_ref(strike), Some(region)).await?;
+        self.insert_many(std::slice::from_ref(strike), Some(region))
+            .await?;
         Ok(())
     }
 

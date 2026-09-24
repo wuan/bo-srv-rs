@@ -113,7 +113,11 @@ impl Request {
         let Some(user_agent) = self.user_agent.as_deref() else {
             return 0;
         };
-        match user_agent.split(' ').next().and_then(|word| word.rsplit_once('-')) {
+        match user_agent
+            .split(' ')
+            .next()
+            .and_then(|word| word.rsplit_once('-'))
+        {
             Some(("bo-android", version)) => version.parse::<i64>().unwrap_or(0),
             _ => 0,
         }
@@ -143,13 +147,11 @@ impl Request {
         if self.accept_encoding_removed {
             return false;
         }
-        self.accept_encoding
-            .as_deref()
-            .is_some_and(|value| {
-                value
-                    .split(',')
-                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("gzip"))
-            })
+        self.accept_encoding.as_deref().is_some_and(|value| {
+            value
+                .split(',')
+                .any(|encoding| encoding.trim().eq_ignore_ascii_case("gzip"))
+        })
     }
 }
 
@@ -234,7 +236,12 @@ impl<M: Metrics> Service<M> {
     ///
     /// Returns `None` when the parameters fail the `__to_int` coercion, which
     /// the JSON-RPC layer renders as a `null` result.
-    pub fn get_strikes(&self, request: &Request, minute_length: &Value, id_or_offset: &Value) -> Option<Value> {
+    pub fn get_strikes(
+        &self,
+        request: &Request,
+        minute_length: &Value,
+        id_or_offset: &Value,
+    ) -> Option<Value> {
         let minute_length = to_int(minute_length)?;
         let _id_or_offset = to_int(id_or_offset)?;
         let _minute_length = force_range(0, minute_length, MAX_MINUTES_PER_DAY);
@@ -273,7 +280,10 @@ impl<M: Metrics> Service<M> {
         let response = Self::build_grid_response(grid_data, histogram, &grid, &time_interval);
         // `StrikeGridQuery.build_grid_response` records the total grid time
         // once the response is fully built (a cache miss only).
-        self.metrics.for_grid_total(crate::metrics::name::STRIKES_GRID, started.elapsed().as_secs_f64());
+        self.metrics.for_grid_total(
+            crate::metrics::name::STRIKES_GRID,
+            started.elapsed().as_secs_f64(),
+        );
         Ok(response)
     }
 
@@ -303,7 +313,10 @@ impl<M: Metrics> Service<M> {
         let response = Self::build_grid_response(grid_data, histogram, &grid, &time_interval);
         // `GlobalStrikeGridQuery.build_grid_response` records the total grid
         // time once the response is fully built (a cache miss only).
-        self.metrics.for_grid_total(crate::metrics::name::GLOBAL_STRIKES_GRID, started.elapsed().as_secs_f64());
+        self.metrics.for_grid_total(
+            crate::metrics::name::GLOBAL_STRIKES_GRID,
+            started.elapsed().as_secs_f64(),
+        );
         Ok(response)
     }
 
@@ -320,11 +333,7 @@ impl<M: Metrics> Service<M> {
         data_area: i64,
     ) -> Result<Value, ServiceError> {
         let started = std::time::Instant::now();
-        let local_grid = LocalGrid {
-            data_area,
-            x,
-            y,
-        };
+        let local_grid = LocalGrid { data_area, x, y };
         let grid = local_grid.grid_factory().get_for(grid_baselength as f64);
         let time_interval = create_time_interval(minute_length, minute_offset);
         let (grid_data, histogram) = self
@@ -343,7 +352,10 @@ impl<M: Metrics> Service<M> {
         // `StrikeGridQuery.build_grid_response` records the total grid time
         // once the response is fully built (a cache miss only); local grids
         // share the `strikes_grid` metric name.
-        self.metrics.for_grid_total(crate::metrics::name::STRIKES_GRID, started.elapsed().as_secs_f64());
+        self.metrics.for_grid_total(
+            crate::metrics::name::STRIKES_GRID,
+            started.elapsed().as_secs_f64(),
+        );
         Ok(response)
     }
 
@@ -429,8 +441,10 @@ impl<M: Metrics> Service<M> {
                     .map_err(cache_error)
             })
             .await;
-        self.metrics
-            .for_histogram(self.cache.histogram.get_ratio(), self.cache.histogram.get_size());
+        self.metrics.for_histogram(
+            self.cache.histogram.get_ratio(),
+            self.cache.histogram.get_size(),
+        );
         match result {
             Ok(Value::Array(bins)) => Ok(bins),
             // The histogram cache only ever stores arrays.
@@ -452,7 +466,10 @@ impl<M: Metrics> Service<M> {
         response.insert("xd".into(), json!(crate::round::py_round(grid.x_div, 6)));
         response.insert("yd".into(), json!(crate::round::py_round(grid.y_div, 6)));
         response.insert("x0".into(), json!(crate::round::py_round(grid.x_min, 4)));
-        response.insert("y1".into(), json!(crate::round::py_round(grid.y_max + grid.y_div, 4)));
+        response.insert(
+            "y1".into(),
+            json!(crate::round::py_round(grid.y_max + grid.y_div, 4)),
+        );
         response.insert("xc".into(), json!(grid.x_bin_count()));
         response.insert("yc".into(), json!(grid.y_bin_count()));
         response.insert("t".into(), json!(strftime_yyyymmddthms(time_interval.end)));
@@ -505,7 +522,12 @@ impl<M: Metrics> Service<M> {
 impl Service<crate::metrics::NoopMetrics> {
     /// A ready-to-use service with a no-op metrics implementation.
     pub fn new(executor: Arc<dyn QueryExecutor>) -> Self {
-        Service::with_parts(executor, ServiceCache::new(), crate::metrics::NoopMetrics, HashSet::new())
+        Service::with_parts(
+            executor,
+            ServiceCache::new(),
+            crate::metrics::NoopMetrics,
+            HashSet::new(),
+        )
     }
 }
 
@@ -525,8 +547,19 @@ impl<M: Metrics> Service<M> {
         region: &Value,
         count_threshold: &Value,
     ) -> Result<Value, ServiceError> {
-        let (Some(minute_length), Some(grid_base_length), Some(minute_offset), Some(region), Some(count_threshold)) =
-            (to_int(minute_length), to_int(grid_base_length), to_int(minute_offset), to_int(region), to_int(count_threshold))
+        let (
+            Some(minute_length),
+            Some(grid_base_length),
+            Some(minute_offset),
+            Some(region),
+            Some(count_threshold),
+        ) = (
+            to_int(minute_length),
+            to_int(grid_base_length),
+            to_int(minute_offset),
+            to_int(region),
+            to_int(count_threshold),
+        )
         else {
             return Ok(json!({}));
         };
@@ -547,7 +580,9 @@ impl<M: Metrics> Service<M> {
 
         let original_grid_base_length = grid_base_length;
         let grid_base_length = i64::max(MIN_GRID_BASE_LENGTH, grid_base_length);
-        let (minute_length, minute_offset) = self.minute_constraints.enforce(minute_length, minute_offset);
+        let (minute_length, minute_offset) = self
+            .minute_constraints
+            .enforce(minute_length, minute_offset);
         let region = force_range(1, region, MAX_REGION);
         let count_threshold = i64::max(0, count_threshold);
 
@@ -561,16 +596,26 @@ impl<M: Metrics> Service<M> {
             .cache
             .strikes(minute_offset)
             .get_result(&cache_key, || async {
-                self.get_strikes_grid(minute_length, grid_base_length, minute_offset, region, count_threshold)
-                    .await
-                    .map_err(cache_error)
+                self.get_strikes_grid(
+                    minute_length,
+                    grid_base_length,
+                    minute_offset,
+                    region,
+                    count_threshold,
+                )
+                .await
+                .map_err(cache_error)
             })
             .await
             .map_err(service_error)?;
         let _ = request.fix_bad_accept_header();
 
         let _ = (original_grid_base_length, minute_offset);
-        self.metrics.for_strikes(minute_length, region, self.cache.strikes(minute_offset).get_ratio());
+        self.metrics.for_strikes(
+            minute_length,
+            region,
+            self.cache.strikes(minute_offset).get_ratio(),
+        );
         Ok(response)
     }
 
@@ -603,13 +648,22 @@ impl<M: Metrics> Service<M> {
         minute_offset: &Value,
         count_threshold: &Value,
     ) -> Result<Value, ServiceError> {
-        let (Some(minute_length), Some(grid_base_length), Some(minute_offset), Some(count_threshold)) =
-            (to_int(minute_length), to_int(grid_base_length), to_int(minute_offset), to_int(count_threshold))
+        let (
+            Some(minute_length),
+            Some(grid_base_length),
+            Some(minute_offset),
+            Some(count_threshold),
+        ) = (
+            to_int(minute_length),
+            to_int(grid_base_length),
+            to_int(minute_offset),
+            to_int(count_threshold),
+        )
         else {
             return Ok(json!({}));
         };
 
-let client = request.request_client();
+        let client = request.request_client();
         let user_agent_version = request.user_agent_version();
 
         if let Some(reason) = self.forbidden_reason(
@@ -625,7 +679,9 @@ let client = request.request_client();
 
         let original_grid_base_length = grid_base_length;
         let grid_base_length = i64::max(GLOBAL_MIN_GRID_BASE_LENGTH, grid_base_length);
-        let (minute_length, minute_offset) = self.minute_constraints.enforce(minute_length, minute_offset);
+        let (minute_length, minute_offset) = self
+            .minute_constraints
+            .enforce(minute_length, minute_offset);
         let count_threshold = i64::max(0, count_threshold);
 
         let cache_key = format!(
@@ -636,17 +692,24 @@ let client = request.request_client();
             .cache
             .global_strikes(minute_offset)
             .get_result(&cache_key, || async {
-                self.get_global_strikes_grid(minute_length, grid_base_length, minute_offset, count_threshold)
-                    .await
-                    .map_err(cache_error)
+                self.get_global_strikes_grid(
+                    minute_length,
+                    grid_base_length,
+                    minute_offset,
+                    count_threshold,
+                )
+                .await
+                .map_err(cache_error)
             })
             .await
             .map_err(service_error)?;
         let _ = request.fix_bad_accept_header();
 
         let _ = (original_grid_base_length, minute_offset);
-        self.metrics
-            .for_global_strikes(minute_length, self.cache.global_strikes(minute_offset).get_ratio());
+        self.metrics.for_global_strikes(
+            minute_length,
+            self.cache.global_strikes(minute_offset).get_ratio(),
+        );
         Ok(response)
     }
 
@@ -700,7 +763,9 @@ let client = request.request_client();
 
         let original_grid_base_length = grid_base_length;
         let grid_base_length = i64::max(MIN_GRID_BASE_LENGTH, grid_base_length);
-        let (minute_length, minute_offset) = self.minute_constraints.enforce(minute_length, minute_offset);
+        let (minute_length, minute_offset) = self
+            .minute_constraints
+            .enforce(minute_length, minute_offset);
         let data_area = round_max_5(data_area);
         let count_threshold = i64::max(0, count_threshold);
 
@@ -713,7 +778,13 @@ let client = request.request_client();
             .local_strikes(minute_offset)
             .get_result(&cache_key, || async {
                 self.get_local_strikes_grid(
-                    x, y, grid_base_length, minute_length, minute_offset, count_threshold, data_area,
+                    x,
+                    y,
+                    grid_base_length,
+                    minute_length,
+                    minute_offset,
+                    count_threshold,
+                    data_area,
                 )
                 .await
                 .map_err(cache_error)
@@ -808,10 +879,13 @@ pub fn create_time_interval(minute_length: i64, minute_offset: i64) -> TimeInter
 }
 
 /// Testable variant of [`create_time_interval`] with an explicit clock.
-pub fn create_time_interval_at(minute_length: i64, minute_offset: i64, now: DateTime<Utc>) -> TimeInterval {
+pub fn create_time_interval_at(
+    minute_length: i64,
+    minute_offset: i64,
+    now: DateTime<Utc>,
+) -> TimeInterval {
     let now_secs = now.timestamp();
-    let end = DateTime::<Utc>::from_timestamp(now_secs, 0)
-        .expect("valid timestamp")
+    let end = DateTime::<Utc>::from_timestamp(now_secs, 0).expect("valid timestamp")
         + Duration::minutes(minute_offset);
     let start = end - Duration::minutes(minute_length);
     TimeInterval::new(start, end)
@@ -827,7 +901,11 @@ fn strftime_yyyymmddthms(ts: DateTime<Utc>) -> String {
 /// `value_count = int(minutes / bin_size)`; index = `interval +
 /// value_count - 1` with Python's negative-index wrap; out-of-range indexes
 /// abort the request (Python `IndexError`).
-pub fn build_histogram(rows: &[Row], minutes: i64, bin_size: i64) -> Result<Vec<Value>, ServiceError> {
+pub fn build_histogram(
+    rows: &[Row],
+    minutes: i64,
+    bin_size: i64,
+) -> Result<Vec<Value>, ServiceError> {
     let value_count = (minutes / bin_size) as usize;
     let mut result: Vec<Value> = vec![json!(0); value_count];
 
@@ -835,9 +913,7 @@ pub fn build_histogram(rows: &[Row], minutes: i64, bin_size: i64) -> Result<Vec<
         let interval = row
             .get_i64(0)
             .ok_or(ServiceError::MissingColumn("interval"))?;
-        let count = row
-            .get_i64(1)
-            .ok_or(ServiceError::MissingColumn("count"))?;
+        let count = row.get_i64(1).ok_or(ServiceError::MissingColumn("count"))?;
         let mut index = interval + value_count as i64 - 1;
         if index < 0 {
             index = index.rem_euclid(value_count as i64);
@@ -1075,7 +1151,14 @@ mod tests {
             content_type: Some(JSON_CONTENT_TYPE.to_string()),
             ..Default::default()
         };
-        assert!(is_forbidden(&service, &blocked_ip, Some("1.2.3.4"), 190, 10_000, MIN_GRID_BASE_LENGTH));
+        assert!(is_forbidden(
+            &service,
+            &blocked_ip,
+            Some("1.2.3.4"),
+            190,
+            10_000,
+            MIN_GRID_BASE_LENGTH
+        ));
 
         let bad_ua = Request {
             user_agent: Some("Mozilla/5.0".to_string()),
@@ -1083,7 +1166,14 @@ mod tests {
             content_type: Some(JSON_CONTENT_TYPE.to_string()),
             ..Default::default()
         };
-        assert!(is_forbidden(&service, &bad_ua, Some("5.6.7.8"), 0, 10_000, MIN_GRID_BASE_LENGTH));
+        assert!(is_forbidden(
+            &service,
+            &bad_ua,
+            Some("5.6.7.8"),
+            0,
+            10_000,
+            MIN_GRID_BASE_LENGTH
+        ));
 
         let bad_content_type = Request {
             user_agent: Some("bo-android-190".to_string()),
@@ -1091,7 +1181,8 @@ mod tests {
             content_type: Some("application/json".to_string()),
             ..Default::default()
         };
-        assert!(is_forbidden(&service, 
+        assert!(is_forbidden(
+            &service,
             &bad_content_type,
             Some("5.6.7.8"),
             190,
@@ -1106,7 +1197,14 @@ mod tests {
             referer: Some("http://example.com".to_string()),
             ..Default::default()
         };
-        assert!(is_forbidden(&service, &referer, Some("5.6.7.8"), 190, 10_000, MIN_GRID_BASE_LENGTH));
+        assert!(is_forbidden(
+            &service,
+            &referer,
+            Some("5.6.7.8"),
+            190,
+            10_000,
+            MIN_GRID_BASE_LENGTH
+        ));
 
         let low_baseline = Request {
             user_agent: Some("bo-android-190".to_string()),
@@ -1114,7 +1212,8 @@ mod tests {
             content_type: Some(JSON_CONTENT_TYPE.to_string()),
             ..Default::default()
         };
-        assert!(is_forbidden(&service, 
+        assert!(is_forbidden(
+            &service,
             &low_baseline,
             Some("5.6.7.8"),
             190,
@@ -1122,7 +1221,8 @@ mod tests {
             MIN_GRID_BASE_LENGTH
         ));
         // unsupported size in the valid set
-        assert!(is_forbidden(&service, 
+        assert!(is_forbidden(
+            &service,
             &low_baseline,
             Some("5.6.7.8"),
             190,
@@ -1136,7 +1236,14 @@ mod tests {
             content_type: Some(JSON_CONTENT_TYPE.to_string()),
             ..Default::default()
         };
-        assert!(!is_forbidden(&service, &valid, Some("5.6.7.8"), 190, 10_000, MIN_GRID_BASE_LENGTH));
+        assert!(!is_forbidden(
+            &service,
+            &valid,
+            Some("5.6.7.8"),
+            190,
+            10_000,
+            MIN_GRID_BASE_LENGTH
+        ));
     }
 
     #[test]
@@ -1214,7 +1321,14 @@ mod tests {
 
     #[test]
     fn strikes_grid_response_is_built_with_all_keys() {
-        let grid = Grid::new(-25.0, 27.0, 50.0, 72.0, 0.14017221762500753, 0.08865376938211966);
+        let grid = Grid::new(
+            -25.0,
+            27.0,
+            50.0,
+            72.0,
+            0.14017221762500753,
+            0.08865376938211966,
+        );
         let interval = create_time_interval_at(30, 0, fixed_now());
         let response = Service::<crate::metrics::NoopMetrics>::build_grid_response(
             vec![json!([0, 1, 4, -500])],
@@ -1230,7 +1344,7 @@ mod tests {
         );
         assert_eq!(obj["xd"].as_f64().unwrap(), 0.140172);
         assert_eq!(obj["yd"].as_f64().unwrap(), 0.088654);
-assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
+        assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         assert_eq!(obj["y1"].as_f64().unwrap(), 72.0887);
         assert_eq!(obj["xc"].as_i64().unwrap(), 371);
         assert_eq!(obj["yc"].as_i64().unwrap(), 249);
@@ -1253,12 +1367,8 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         );
         mock.add_rows("-extract( epoch", vec![]);
         let metrics = crate::metrics::RecordingMetrics::new();
-        let service: Service<crate::metrics::RecordingMetrics> = Service::with_parts(
-            Arc::new(mock),
-            ServiceCache::new(),
-            metrics,
-            HashSet::new(),
-        );
+        let service: Service<crate::metrics::RecordingMetrics> =
+            Service::with_parts(Arc::new(mock), ServiceCache::new(), metrics, HashSet::new());
         let mut req = req_with("5.6.7.8");
 
         let _response = service
@@ -1309,7 +1419,14 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         let service = Service::new(Arc::new(MockExecutor::new()));
         let mut req = Request::default();
         let response = service
-            .jsonrpc_get_strikes_grid(&mut req, &json!(60), &json!(10_000), &json!(0), &json!(1), &json!(0))
+            .jsonrpc_get_strikes_grid(
+                &mut req,
+                &json!(60),
+                &json!(10_000),
+                &json!(0),
+                &json!(1),
+                &json!(0),
+            )
             .await;
         assert_eq!(response.unwrap(), json!({}));
     }
@@ -1345,12 +1462,8 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         );
         mock.add_rows("-extract( epoch", vec![]);
         let metrics = crate::metrics::RecordingMetrics::new();
-        let service: Service<crate::metrics::RecordingMetrics> = Service::with_parts(
-            Arc::new(mock),
-            ServiceCache::new(),
-            metrics,
-            HashSet::new(),
-        );
+        let service: Service<crate::metrics::RecordingMetrics> =
+            Service::with_parts(Arc::new(mock), ServiceCache::new(), metrics, HashSet::new());
         let mut req = req_with("5.6.7.8");
         let response = service
             .jsonrpc_get_global_strikes_grid(
@@ -1400,12 +1513,8 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         );
         mock.add_rows("-extract( epoch", vec![]);
         let metrics = crate::metrics::RecordingMetrics::new();
-        let service: Service<crate::metrics::RecordingMetrics> = Service::with_parts(
-            Arc::new(mock),
-            ServiceCache::new(),
-            metrics,
-            HashSet::new(),
-        );
+        let service: Service<crate::metrics::RecordingMetrics> =
+            Service::with_parts(Arc::new(mock), ServiceCache::new(), metrics, HashSet::new());
         let mut req = req_with("5.6.7.8");
         let response = service
             .jsonrpc_get_local_strikes_grid(
@@ -1449,7 +1558,14 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         let service = Service::new(Arc::new(MockExecutor::new()));
         let mut req = req_with("5.6.7.8");
         let response = service
-            .jsonrpc_get_strikes_grid(&mut req, &json!("x"), &json!(10_000), &json!(0), &json!(1), &json!(0))
+            .jsonrpc_get_strikes_grid(
+                &mut req,
+                &json!("x"),
+                &json!(10_000),
+                &json!(0),
+                &json!(1),
+                &json!(0),
+            )
             .await;
         assert_eq!(response.unwrap(), json!({}));
     }

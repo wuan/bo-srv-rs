@@ -132,8 +132,8 @@ pub async fn update_strikes(
 /// multiplication is reproduced here (it differs from exact nanosecond
 /// arithmetic in ~1% of cases, so matching CPython matters).
 pub fn last_strikes_url(start_time: DateTime<Utc>) -> String {
-    let epoch_seconds = start_time.timestamp() as f64
-        + start_time.timestamp_subsec_micros() as f64 / 1_000_000.0;
+    let epoch_seconds =
+        start_time.timestamp() as f64 + start_time.timestamp_subsec_micros() as f64 / 1_000_000.0;
     let start_timestamp_ns = (epoch_seconds * 1e6) as i64 * 1000;
     format!(
         "https://data.blitzortung.org/Data/Protected/last_strikes.php?time={start_timestamp_ns}"
@@ -198,7 +198,18 @@ mod tests {
 
     fn strike_at(dt: DateTime<Utc>, x: f64, y: f64, mds: Option<i64>) -> Strike {
         let ts = crate::data::Timestamp::new(dt, 0);
-        Strike::new(Some(-1), ts, x, y, Some(0.0), Some(0.0), mds, Some(0), vec![], None)
+        Strike::new(
+            Some(-1),
+            ts,
+            x,
+            y,
+            Some(0.0),
+            Some(0.0),
+            mds,
+            Some(0),
+            vec![],
+            None,
+        )
     }
 
     fn empty_keys_executor() -> MockExecutor {
@@ -211,7 +222,10 @@ mod tests {
     fn create_strike_key_rounds() {
         let strike = strike_at(utc(2025, 1, 1, 12, 0, 0), 12.345678, 45.678901, Some(100));
         let key = create_strike_key(&strike);
-        assert_eq!(key.0, crate::data::Timestamp::new(utc(2025, 1, 1, 12, 0, 0), 0).value());
+        assert_eq!(
+            key.0,
+            crate::data::Timestamp::new(utc(2025, 1, 1, 12, 0, 0), 0).value()
+        );
         assert_eq!(key.1, 12.3457);
         assert_eq!(key.2, 45.6789);
         assert_eq!(key.3, Some(100));
@@ -247,7 +261,9 @@ mod tests {
             strike_at(now - Duration::minutes(30), 10.5, 20.5, None),
             strike_at(now - Duration::minutes(30), 11.5, 21.5, None),
         ];
-        let result = update_strikes(&mock, &strikes, 1, now, &NoopMetrics).await.unwrap();
+        let result = update_strikes(&mock, &strikes, 1, now, &NoopMetrics)
+            .await
+            .unwrap();
         assert_eq!(result.inserted, 2);
         assert_eq!(mock.execution_count(), 1);
         assert_eq!(mock.commit_count(), 1);
@@ -264,7 +280,9 @@ mod tests {
             strike_at(now - Duration::minutes(30), 11.5, 21.5, None),
         ];
         let metrics = crate::metrics::RecordingMetrics::new();
-        update_strikes(&mock, &strikes, 1, now, &metrics).await.unwrap();
+        update_strikes(&mock, &strikes, 1, now, &metrics)
+            .await
+            .unwrap();
         assert_eq!(metrics.lines(), vec!["strikes.imported:2|g".to_string()]);
         let _ = &mut mock;
     }
@@ -274,7 +292,9 @@ mod tests {
         let now = utc(2025, 1, 1, 12, 0, 0);
         let mut mock = empty_keys_executor();
         let strikes = vec![strike_at(now - Duration::seconds(59), 10.5, 20.5, None)];
-        let result = update_strikes(&mock, &strikes, 1, now, &NoopMetrics).await.unwrap();
+        let result = update_strikes(&mock, &strikes, 1, now, &NoopMetrics)
+            .await
+            .unwrap();
         assert_eq!(result.inserted, 0);
         assert_eq!(mock.execution_count(), 0);
         assert_eq!(mock.commit_count(), 0);
@@ -297,7 +317,9 @@ mod tests {
             ])],
         );
         let strikes = vec![strike_at(now - Duration::minutes(30), 10.5, 20.5, None)];
-        let result = update_strikes(&mock, &strikes, 1, now, &NoopMetrics).await.unwrap();
+        let result = update_strikes(&mock, &strikes, 1, now, &NoopMetrics)
+            .await
+            .unwrap();
         assert_eq!(result.inserted, 0);
         assert_eq!(mock.execution_count(), 0);
         let _ = &mut mock;
@@ -311,7 +333,9 @@ mod tests {
             strike_at(now - Duration::minutes(30), 10.5, 20.5, None),
             strike_at(now - Duration::hours(2), 11.5, 21.5, None),
         ];
-        let result = update_strikes(&mock, &strikes, 1, now, &NoopMetrics).await.unwrap();
+        let result = update_strikes(&mock, &strikes, 1, now, &NoopMetrics)
+            .await
+            .unwrap();
         assert_eq!(result.inserted, 1);
         let _ = &mut mock;
     }
@@ -334,9 +358,7 @@ mod tests {
         let ns = utc(2025, 1, 1, 12, 0, 0).timestamp() * 1_000_000_000;
         assert_eq!(
             url,
-            format!(
-                "https://data.blitzortung.org/Data/Protected/last_strikes.php?time={ns}"
-            )
+            format!("https://data.blitzortung.org/Data/Protected/last_strikes.php?time={ns}")
         );
     }
 
@@ -346,7 +368,9 @@ mod tests {
         let now = utc(2025, 1, 1, 12, 0, 0);
         let mut mock = empty_keys_executor();
         let strikes = vec![strike_at(now - Duration::minutes(30), 10.5, 20.5, None)];
-        update_strikes(&mock, &strikes, 1, now, &NoopMetrics).await.unwrap();
+        update_strikes(&mock, &strikes, 1, now, &NoopMetrics)
+            .await
+            .unwrap();
         let (_, params) = &mock.executions()[0];
         assert_eq!(params[5], Param::Int(1));
         let _ = &mut mock;

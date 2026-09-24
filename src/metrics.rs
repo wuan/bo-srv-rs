@@ -124,7 +124,10 @@ pub trait Metrics: Send + Sync {
 
     /// `StatsDMetrics.for_histogram(cache_ratio, cache_size)`.
     fn for_histogram(&self, cache_ratio: f64, cache_size: usize) {
-        self.incr(&metric_name(&[name::HISTOGRAM, name::QUERY, name::COUNT]), 1);
+        self.incr(
+            &metric_name(&[name::HISTOGRAM, name::QUERY, name::COUNT]),
+            1,
+        );
         self.gauge_f64(
             &metric_name(&[name::HISTOGRAM, name::CACHE_HITS]),
             cache_ratio,
@@ -165,13 +168,7 @@ pub trait Metrics: Send + Sync {
     /// Increments `strikes.<region>`, gauges `strikes.<region>.count` and
     /// reports the fetch/insert phases as millisecond timings clamped to at
     /// least `1` (the Python `max(1, int(seconds * 1000))`).
-    fn for_import(
-        &self,
-        region: u32,
-        strike_count: u64,
-        get_seconds: f64,
-        insert_seconds: f64,
-    ) {
+    fn for_import(&self, region: u32, strike_count: u64, get_seconds: f64, insert_seconds: f64) {
         let region = region.to_string();
         self.incr(&metric_name(&[name::STRIKES, &region]), 1);
         self.gauge(
@@ -207,10 +204,7 @@ pub trait Metrics: Send + Sync {
     /// `cli/update.py::update_strikes`: gauge the number of inserted strikes
     /// as `strikes.imported`.
     fn for_update_imported(&self, insert_count: u64) {
-        self.gauge(
-            &metric_name(&[name::STRIKES, name::IMPORTED]),
-            insert_count,
-        );
+        self.gauge(&metric_name(&[name::STRIKES, name::IMPORTED]), insert_count);
     }
 }
 
@@ -642,8 +636,9 @@ mod tests {
             .unwrap();
         let port = receiver.local_addr().unwrap().port();
 
-        let metrics = StatsDMetrics::with_address_and_prefix("127.0.0.1", port, IMPORT_STATSD_PREFIX)
-            .unwrap();
+        let metrics =
+            StatsDMetrics::with_address_and_prefix("127.0.0.1", port, IMPORT_STATSD_PREFIX)
+                .unwrap();
         metrics.for_update_imported(2);
 
         let mut buffer = [0u8; 512];

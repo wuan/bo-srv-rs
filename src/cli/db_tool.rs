@@ -138,10 +138,7 @@ impl DbOptions {
 
 /// `cli/db.py.prepare_grid_if_applicable`: return a [`Grid`] when any grid
 /// option is set, requiring an `area`.
-pub fn prepare_grid_if_applicable(
-    options: &DbOptions,
-    area: Option<&Area>,
-) -> Option<Grid> {
+pub fn prepare_grid_if_applicable(options: &DbOptions, area: Option<&Area>) -> Option<Grid> {
     if options.grid.is_none() && options.xgrid.is_none() && options.ygrid.is_none() {
         return None;
     }
@@ -170,7 +167,10 @@ pub fn prepare_grid_if_applicable(
 /// Returns `(start, end)` in UTC; `end` may be the fixed `now - 1min` when the
 /// user did not override it (`non_default_end` is false), matching the
 /// history behaviour where the end time is left implicit.
-pub fn resolve_interval(options: &DbOptions, now: chrono::DateTime<Utc>) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+pub fn resolve_interval(
+    options: &DbOptions,
+    now: chrono::DateTime<Utc>,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
     let tz = match parse_timezone(&options.tz) {
         Some(tz) => tz,
         None => exit_with(&format!("parse error in timezone \"{}\"", options.tz), 1),
@@ -180,7 +180,10 @@ pub fn resolve_interval(options: &DbOptions, now: chrono::DateTime<Utc>) -> (chr
     let end_time = now - Duration::minutes(1);
 
     let startdate = if options.startdate == "default" {
-        start_time.with_timezone(&tz).format(DATE_FORMAT).to_string()
+        start_time
+            .with_timezone(&tz)
+            .format(DATE_FORMAT)
+            .to_string()
     } else {
         options.startdate.clone()
     };
@@ -203,7 +206,10 @@ pub fn resolve_interval(options: &DbOptions, now: chrono::DateTime<Utc>) -> (chr
 
     let parsed_start = match parse_local_time(&startdate, &starttime, tz, false) {
         Some(value) => value,
-        None => exit_with(&format!("parse error in starttime: '{startdate} {starttime}'"), 5),
+        None => exit_with(
+            &format!("parse error in starttime: '{startdate} {starttime}'"),
+            5,
+        ),
     };
     let parsed_end = if non_default_end {
         match parse_local_time(&enddate, &endtime, tz, true) {
@@ -318,8 +324,8 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mock::MockExecutor;
     use crate::executor::{Row, Value};
+    use crate::mock::MockExecutor;
     use chrono::TimeZone;
 
     #[test]
@@ -421,11 +427,15 @@ mod tests {
             Utc.with_ymd_and_hms(2025, 1, 1, 10, 0, 0).unwrap(),
             Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap(),
         );
-        let output = fetch_strikes(&mock, &options, &interval, None, chrono_tz::UTC).await.unwrap();
+        let output = fetch_strikes(&mock, &options, &interval, None, chrono_tz::UTC)
+            .await
+            .unwrap();
         assert_eq!(output.lines().count(), 1);
         // The strike's coordinates are rounded to `precision` decimals and the
         // altitude/amplitude/error/count suffix matches `Strike.__str__`.
-        assert!(output.starts_with("2025-01-01 11:00:00.000000000 10.1235 20.6543 100.0 10.5 250 5"));
+        assert!(
+            output.starts_with("2025-01-01 11:00:00.000000000 10.1235 20.6543 100.0 10.5 250 5")
+        );
     }
 
     #[tokio::test]
@@ -446,7 +456,9 @@ mod tests {
             Utc.with_ymd_and_hms(2025, 1, 1, 10, 0, 0).unwrap(),
             Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap(),
         );
-        let output = fetch_strikes_grid(&mock, &options, &grid, &interval).await.unwrap();
+        let output = fetch_strikes_grid(&mock, &options, &grid, &interval)
+            .await
+            .unwrap();
         assert!(output.starts_with("NCOLS 1\nNROWS 1\nXLLCORNER 0.0000\nYLLCORNER 0.0000\nCELLSIZE 1.0000\nNODATA_VALUE 0\n3"));
     }
 
@@ -454,10 +466,7 @@ mod tests {
     fn strike_timestamp_converts_to_timezone() {
         let strike = crate::data::Strike::new(
             Some(1),
-            crate::data::Timestamp::new(
-                Utc.with_ymd_and_hms(2025, 1, 1, 11, 0, 0).unwrap(),
-                0,
-            ),
+            crate::data::Timestamp::new(Utc.with_ymd_and_hms(2025, 1, 1, 11, 0, 0).unwrap(), 0),
             10.0,
             20.0,
             Some(0.0),

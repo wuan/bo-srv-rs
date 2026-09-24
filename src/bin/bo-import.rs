@@ -33,7 +33,10 @@ fn main() {
     let metrics = build_import_metrics(&config);
     let (runtime, executor) = match connect_postgres(&config) {
         Ok(pair) => pair,
-        Err(error) => exit_with(&describe_error("failed to connect to database", error.as_ref()), 1),
+        Err(error) => exit_with(
+            &describe_error("failed to connect to database", error.as_ref()),
+            1,
+        ),
     };
 
     // Per-file HTTP timeout: the task pins this at 30 seconds (the Python

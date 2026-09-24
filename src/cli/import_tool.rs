@@ -194,16 +194,13 @@ pub async fn import_strikes<T: Transport>(
             let deadline = if no_timeout {
                 None
             } else {
-                Some(std::time::Instant::now() + std::time::Duration::from_secs(REGION_TIMEOUT_SECONDS))
+                Some(
+                    std::time::Instant::now()
+                        + std::time::Duration::from_secs(REGION_TIMEOUT_SECONDS),
+                )
             };
             match import_strikes_for(
-                executor,
-                transport,
-                *region,
-                start_time,
-                is_update,
-                deadline,
-                metrics,
+                executor, transport, *region, start_time, is_update, deadline, metrics,
             )
             .await
             {
@@ -266,8 +263,8 @@ mod tests {
     use std::sync::Mutex;
 
     /// Transport that returns canned lines for the first call only (each
-/// subsequent call, i.e. each further log path, is empty).  `fail_times`
-/// requests fail before any line is returned.
+    /// subsequent call, i.e. each further log path, is empty).  `fail_times`
+    /// requests fail before any line is returned.
     struct StubTransport {
         lines: Vec<String>,
         remaining_failures: Mutex<usize>,
@@ -418,7 +415,8 @@ mod tests {
         }
         let transport = StubTransport::new(vec![], RETRY_COUNT);
         let metrics = crate::metrics::RecordingMetrics::new();
-        let (_, errors) = import_strikes(&mock, &transport, &[1], None, true, false, &metrics).await;
+        let (_, errors) =
+            import_strikes(&mock, &transport, &[1], None, true, false, &metrics).await;
         assert_eq!(errors, RETRY_COUNT);
         assert_eq!(metrics.lines(), vec!["strikes.error_count:5|g".to_string()]);
         let _ = &mut mock;

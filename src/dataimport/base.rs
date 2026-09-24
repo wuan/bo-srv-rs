@@ -191,11 +191,7 @@ mod tests {
     #[test]
     fn data_path_with_region_template() {
         let path = BlitzortungDataPath::default();
-        let url = path.build_path(
-            "Protected/Strikes_{region}/2013/08/20/11/40.log",
-            "data",
-            3,
-        );
+        let url = path.build_path("Protected/Strikes_{region}/2013/08/20/11/40.log", "data", 3);
         assert_eq!(
             url,
             "https://data.blitzortung.org/Data/Protected/Strikes_3/2013/08/20/11/40.log"
