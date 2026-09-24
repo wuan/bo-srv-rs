@@ -27,6 +27,7 @@ pub mod metrics;
 pub mod builder;
 pub mod config;
 pub mod data;
+pub mod dataimport;
 pub mod db;
 pub mod executor;
 pub mod geom;
@@ -37,6 +38,8 @@ pub mod query;
 pub mod round;
 pub mod service;
 pub mod transport;
+pub mod util;
+pub mod websocket;
 pub mod wkb;
 
 pub use executor::{Param, QueryExecutor, Row, Value};
