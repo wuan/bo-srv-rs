@@ -1192,16 +1192,22 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         // second call hits the cache: second query count is 1, ratio 0.5
         assert_eq!(service.cache().strikes(0).get_size(), 1);
         assert!((service.cache().strikes(0).get_ratio() - 0.5).abs() < 1e-9);
-        // metrics recorded after each call
-        let recorded = service
-            .metrics
-            .strikes_calls
-            .lock()
-            .unwrap()
-            .clone();
-        assert_eq!(recorded.len(), 2);
-        assert_eq!(recorded[0].0, 30);
-        assert_eq!(recorded[0].1, 1);
+        // metrics recorded after each call: the histogram of the (30-minute)
+        // grid query, then the three strikes-grid lines.
+        let recorded = service.metrics.lines();
+        assert_eq!(
+            recorded,
+            vec![
+                "histogram.cache_hits:0|g".to_string(),
+                "histogram.size:1|g".to_string(),
+                "strikes_grid.total_count:1|c".to_string(),
+                "strikes_grid.total_count.1:1|c".to_string(),
+                "strikes_grid.cache_hits:0|g".to_string(),
+                "strikes_grid.total_count:1|c".to_string(),
+                "strikes_grid.total_count.1:1|c".to_string(),
+                "strikes_grid.cache_hits:0.5|g".to_string(),
+            ]
+        );
     }
 
     #[test]

@@ -26,6 +26,9 @@
 //! * `BO_DB_CONNECTION_COUNT` (default `3`)
 //! * `BO_BLITZORTUNG_USERNAME` (default `""`) — `[auth] username`
 //! * `BO_BLITZORTUNG_PASSWORD` (default `""`) — `[auth] password`
+//! * `BO_STATSD_HOST` (default `localhost`) — `[statsd] host`
+//! * `BO_STATSD_PORT` (default `8125`) — `[statsd] port`
+//! * `BO_STATSD_PREFIX` (default `org.blitzortung.service`) — `[statsd] prefix`
 
 /// Wire protocol the service speaks.
 ///
@@ -81,6 +84,15 @@ pub struct Config {
     /// HTTP basic-auth password for the protected Blitzortung data feeds
     /// (`Config.get_password`, `[auth] password`).
     pub auth_password: String,
+    /// StatsD receiver host (`[statsd] host` / `BO_STATSD_HOST`), default
+    /// `localhost` (the Python `StatsClient('localhost', 8125)`).
+    pub statsd_host: String,
+    /// StatsD receiver UDP port (`[statsd] port` / `BO_STATSD_PORT`), default
+    /// `8125`.
+    pub statsd_port: u16,
+    /// StatsD metric name prefix (`[statsd] prefix` / `BO_STATSD_PREFIX`),
+    /// default `org.blitzortung.service`.
+    pub statsd_prefix: String,
 }
 
 impl Default for Config {
@@ -96,6 +108,9 @@ impl Default for Config {
             db_connection_count: 3,
             auth_username: String::new(),
             auth_password: String::new(),
+            statsd_host: "localhost".into(),
+            statsd_port: 8125,
+            statsd_prefix: "org.blitzortung.service".into(),
         }
     }
 }
@@ -215,6 +230,18 @@ impl Config {
                         .cloned()
                         .unwrap_or(config.auth_password);
                 }
+                if let Some(section) = ini.get("statsd") {
+                    config.statsd_host = section.get("host").cloned().unwrap_or(config.statsd_host);
+                    if let Some(port) = section.get("port") {
+                        if let Ok(port) = port.parse::<u16>() {
+                            config.statsd_port = port;
+                        }
+                    }
+                    config.statsd_prefix = section
+                        .get("prefix")
+                        .cloned()
+                        .unwrap_or(config.statsd_prefix);
+                }
             }
         }
 
@@ -258,6 +285,17 @@ impl Config {
         if let Some(v) = lookup("BO_BLITZORTUNG_PASSWORD") {
             config.auth_password = v;
         }
+        if let Some(v) = lookup("BO_STATSD_HOST") {
+            config.statsd_host = v;
+        }
+        if let Some(v) = lookup("BO_STATSD_PORT") {
+            if let Ok(port) = v.parse::<u16>() {
+                config.statsd_port = port;
+            }
+        }
+        if let Some(v) = lookup("BO_STATSD_PREFIX") {
+            config.statsd_prefix = v;
+        }
 
         (config, diagnostics)
     }
@@ -270,6 +308,12 @@ impl Config {
     /// `Config.get_password`: the HTTP basic-auth password from `[auth]`.
     pub fn password(&self) -> &str {
         &self.auth_password
+    }
+
+    /// The StatsD receiver `host`/`port` the service should send metrics to
+    /// (`[statsd] host`/`port`, default `localhost:8125`).
+    pub fn statsd_address(&self) -> (&str, u16) {
+        (&self.statsd_host, self.statsd_port)
     }
 
     /// The PostgreSQL connection string used by tokio-postgres, built like
@@ -502,6 +546,55 @@ mod tests {
         });
         assert_eq!(config.username(), "alice");
         assert_eq!(config.password(), "s3cret");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn statsd_defaults_to_localhost_8125() {
+        let config = Config::default();
+        assert_eq!(config.statsd_address(), ("localhost", 8125));
+        assert_eq!(config.statsd_prefix, "org.blitzortung.service");
+    }
+
+    #[test]
+    fn ini_file_config_reads_statsd_section() {
+        let dir = ini_dir("statsd-ini");
+        let path = dir.join("config.ini");
+        std::fs::write(
+            &path,
+            "[db]\nhost = db.local\n[statsd]\nhost = metrics.local\nport = 9125\nprefix = my.prefix\n",
+        )
+        .unwrap();
+
+        let config = Config::from_env_with(|k| {
+            if k == "BO_CONFIG" {
+                Some(path.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        });
+        assert_eq!(config.statsd_address(), ("metrics.local", 9125));
+        assert_eq!(config.statsd_prefix, "my.prefix");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn env_overrides_statsd_section() {
+        let dir = ini_dir("statsd-env");
+        let path = dir.join("config.ini");
+        std::fs::write(&path, "[statsd]\nhost = fromfile\nport = 1111\n").unwrap();
+
+        let config = Config::from_env_with(|k| match k {
+            "BO_CONFIG" => Some(path.to_string_lossy().into_owned()),
+            "BO_STATSD_HOST" => Some("fromenv".into()),
+            "BO_STATSD_PORT" => Some("2222".into()),
+            "BO_STATSD_PREFIX" => Some("env.prefix".into()),
+            _ => None,
+        });
+        assert_eq!(config.statsd_address(), ("fromenv", 2222));
+        assert_eq!(config.statsd_prefix, "env.prefix");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
