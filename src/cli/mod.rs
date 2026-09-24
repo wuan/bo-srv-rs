@@ -75,32 +75,58 @@ pub fn exit_with(message: &str, code: i32) -> ! {
 ///     hint: <hint>
 /// ```
 pub fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    use std::error::Error as _;
+
     let mut lines: Vec<String> = Vec::new();
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
-    let mut depth = 0usize;
+    // How many "caused by" levels have been emitted (drives the indentation).
+    let mut caused = 0usize;
+
+    let push_cause = |lines: &mut Vec<String>, caused: &mut usize, message: String| {
+        if lines.is_empty() {
+            lines.push(message);
+        } else {
+            *caused += 1;
+            lines.push(format!("{}caused by: {message}", "  ".repeat(*caused)));
+        }
+    };
 
     while let Some(err) = current {
-        if depth == 0 {
-            lines.push(err.to_string());
-        } else {
-            lines.push(format!("{}caused by: {}", "  ".repeat(depth), err));
-        }
-
+        // tokio-postgres renders a server error as the bare, useless
+        // "db error"; the real message lives in the `DbError` payload, which
+        // is also the error's own `source()`.  Emit the payload once (with
+        // severity/detail/hint) and skip the payload as a chain entry so it is
+        // not printed again as "caused by".
         if let Some(db_error) = err.downcast_ref::<tokio_postgres::Error>() {
             if let Some(db) = db_error.as_db_error() {
-                let indent = "  ".repeat(depth + 1);
-                lines.push(format!("{indent}{}: {}", db.severity(), db.message()));
+                push_cause(&mut lines, &mut caused, format!("{}: {}", db.severity(), db.message()));
+                let detail_indent = "  ".repeat(caused + 1);
                 if let Some(detail) = db.detail() {
-                    lines.push(format!("{indent}detail: {detail}"));
+                    lines.push(format!("{detail_indent}detail: {detail}"));
                 }
                 if let Some(hint) = db.hint() {
-                    lines.push(format!("{indent}hint: {hint}"));
+                    lines.push(format!("{detail_indent}hint: {hint}"));
                 }
+                // Its `source()` is the same `DbError`; skip past it.
+                current = db_error.source().and_then(|payload| payload.source());
+                continue;
             }
         }
 
+        let message = err.to_string();
+        // Drop the information-free tokio sentinel / wrapper so it does not add
+        // a redundant "db error" line.
+        if !lines.is_empty() && message == "db error" {
+            current = err.source();
+            continue;
+        }
+
+        push_cause(&mut lines, &mut caused, message);
         current = err.source();
-        depth += 1;
+    }
+
+    if lines.is_empty() {
+        lines.push(error.to_string());
     }
 
     lines.join("\n")
@@ -319,15 +345,39 @@ mod tests {
         assert_eq!(format_error_chain(&error), "plain failure");
     }
 
-    /// A `DbError::Executor` wrapping a tokio-postgres-style source must not
-    /// collapse to the bare source display.
+    /// `DbError`'s own Display is concise (the chain is expanded exactly once by
+    /// `format_error_chain`, avoiding a duplicated "db error").
     #[test]
-    fn db_error_display_walks_the_chain() {
+    fn db_error_display_is_concise_and_chain_is_expanded_once() {
         let db_error = crate::db::DbError::Executor(Box::new(Wrapper {
             leaf: Leaf("ERROR: permission denied for table strikes".to_string()),
         }));
-        let rendered = db_error.to_string();
-        assert!(rendered.contains("caused by: ERROR: permission denied for table strikes"));
+        // The Display is just the inner error's display...
+        assert_eq!(db_error.to_string(), "db error");
+        // ...and the chain walker adds the useful cause exactly once.
+        let rendered = format_error_chain(&db_error);
+        assert_eq!(
+            rendered.matches("permission denied for table strikes").count(),
+            1,
+            "cause must not be duplicated: {rendered}"
+        );
+        assert!(!rendered.contains("caused by: db error"));
+    }
+
+    /// A tokio-postgres-style error whose message is the bare "db error"
+    /// sentinel must not be printed twice.
+    #[test]
+    fn error_chain_does_not_repeat_the_db_sentinel() {
+        let error = Wrapper {
+            leaf: Leaf("ERROR: relation \"strikes\" does not exist".to_string()),
+        };
+        let rendered = format_error_chain(&error);
+        assert_eq!(rendered.matches("db error").count(), 1, "got: {rendered}");
+        assert_eq!(
+            rendered.matches("relation \"strikes\" does not exist").count(),
+            1,
+            "got: {rendered}"
+        );
     }
 
     #[test]
