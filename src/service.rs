@@ -257,18 +257,25 @@ impl<M: Metrics> Service<M> {
             None => GridFactory::global().get_for(grid_baselength as f64),
         };
         let time_interval = create_time_interval(minute_length, minute_offset);
-        let grid_data = self.run_grid_query(&grid, &time_interval, Some(region), count_threshold, false).await?;
-        let histogram = if minute_length > HISTOGRAM_MINUTE_THRESHOLD {
-            self.get_histogram(
-                &time_interval,
-                None,
-                Some(&grid),
-                &histogram_cache_key(minute_length, minute_offset, Some(&grid)),
-            )
-            .await?
-        } else {
-            vec![]
-        };
+        // The grid query and the histogram query are independent: run them
+        // concurrently and join before shaping the response.
+        let (grid_data, histogram) = tokio::try_join!(
+            self.run_grid_query(&grid, &time_interval, Some(region), count_threshold, false),
+            // `base.get_histogram`: empty below the histogram threshold.
+            async {
+                if minute_length > HISTOGRAM_MINUTE_THRESHOLD {
+                    self.get_histogram(
+                        &time_interval,
+                        None,
+                        Some(&grid),
+                        &histogram_cache_key(minute_length, minute_offset, Some(&grid)),
+                    )
+                    .await
+                } else {
+                    Ok(vec![])
+                }
+            },
+        )?;
         Ok(Self::build_grid_response(grid_data, histogram, &grid, &time_interval))
     }
 
@@ -282,18 +289,22 @@ impl<M: Metrics> Service<M> {
     ) -> Result<Value, ServiceError> {
         let grid = GridFactory::global().get_for(grid_baselength as f64);
         let time_interval = create_time_interval(minute_length, minute_offset);
-        let grid_data = self.run_grid_query(&grid, &time_interval, None, count_threshold, true).await?;
-        let histogram = if minute_length > HISTOGRAM_MINUTE_THRESHOLD {
-            self.get_histogram(
-                &time_interval,
-                None,
-                None,
-                &histogram_cache_key(minute_length, minute_offset, None),
-            )
-            .await?
-        } else {
-            vec![]
-        };
+        let (grid_data, histogram) = tokio::try_join!(
+            self.run_grid_query(&grid, &time_interval, None, count_threshold, true),
+            async {
+                if minute_length > HISTOGRAM_MINUTE_THRESHOLD {
+                    self.get_histogram(
+                        &time_interval,
+                        None,
+                        None,
+                        &histogram_cache_key(minute_length, minute_offset, None),
+                    )
+                    .await
+                } else {
+                    Ok(vec![])
+                }
+            },
+        )?;
         Ok(Self::build_grid_response(grid_data, histogram, &grid, &time_interval))
     }
 
@@ -316,18 +327,22 @@ impl<M: Metrics> Service<M> {
         };
         let grid = local_grid.grid_factory().get_for(grid_baselength as f64);
         let time_interval = create_time_interval(minute_length, minute_offset);
-        let grid_data = self.run_grid_query(&grid, &time_interval, None, count_threshold, false).await?;
-        let histogram = if minute_length > HISTOGRAM_MINUTE_THRESHOLD {
-            self.get_histogram(
-                &time_interval,
-                None,
-                Some(&grid),
-                &histogram_cache_key(minute_length, minute_offset, Some(&grid)),
-            )
-            .await?
-        } else {
-            vec![]
-        };
+        let (grid_data, histogram) = tokio::try_join!(
+            self.run_grid_query(&grid, &time_interval, None, count_threshold, false),
+            async {
+                if minute_length > HISTOGRAM_MINUTE_THRESHOLD {
+                    self.get_histogram(
+                        &time_interval,
+                        None,
+                        Some(&grid),
+                        &histogram_cache_key(minute_length, minute_offset, Some(&grid)),
+                    )
+                    .await
+                } else {
+                    Ok(vec![])
+                }
+            },
+        )?;
         Ok(Self::build_grid_response(grid_data, histogram, &grid, &time_interval))
     }
 
