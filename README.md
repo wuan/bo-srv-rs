@@ -1,4 +1,9 @@
-# bo-service
+[![Quality gate status](https://sonarcloud.io/api/project_badges/measure?project=wuan_bo-srv-rs&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=wuan_bo-srv-rs)
+[![Lines of Code](https://sonarcloud.io/api/project_badges/measure?project=wuan_bo-srv-rs&metric=ncloc)](https://sonarcloud.io/summary/new_code?id=wuan_bo-srv-rs)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=wuan_bo-srv-rs&metric=coverage)](https://sonarcloud.io/summary/new_code?id=wuan_bo-srv-rs)
+[![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=wuan_bo-srv-rs&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=wuan_bo-srv-rs)
+
+# bo-srv-rs
 
 Rust port of the [blitzortung](https://blitzortung.org) JSON-RPC webservice,
 taken from `blitzortung/service/base.py` and friends on `origin/main` of this
