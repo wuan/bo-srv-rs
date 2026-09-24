@@ -2,7 +2,7 @@
 
 use chrono::{Duration, Utc};
 
-use crate::cli::{exit_with, parse_local_time, parse_timezone, Options, DATE_FORMAT};
+use crate::cli::{exit_with, parse_local_time, parse_timezone, spec, OptionSpec, Options, DATE_FORMAT};
 use crate::data::GridData;
 use crate::db::StrikeDb;
 use crate::executor::QueryExecutor;
@@ -14,21 +14,21 @@ use crate::util::Timer;
 /// Default grid cell size (`cli/db.py DEFAULT_GRID`).
 pub const DEFAULT_GRID: (f64, f64) = (1.0, 1.0);
 
-/// The option specs understood by `bo-db`.
-pub const SPECS: &[(&str, &str, bool)] = &[
-    ("startdate", "", true),
-    ("starttime", "", true),
-    ("enddate", "", true),
-    ("endtime", "", true),
-    ("area", "", true),
-    ("tz", "", true),
-    ("useenv", "", false),
-    ("srid", "", true),
-    ("precision", "", true),
-    ("grid", "", true),
-    ("x-grid", "", true),
-    ("y-grid", "", true),
-    ("map", "", false),
+/// The option specs understood by `bo-db` (help text mirrors `cli/db.py`).
+pub const SPECS: &[OptionSpec] = &[
+    spec("startdate", "", true, "start date for data retrieval"),
+    spec("starttime", "", true, "start time for data retrieval"),
+    spec("enddate", "", true, "end date for data retrieval"),
+    spec("endtime", "", true, "end time for data retrieval"),
+    spec("area", "", true, "area for which strikes are selected"),
+    spec("tz", "", true, "used timezone"),
+    spec("useenv", "", false, "use envelope of given area for query"),
+    spec("srid", "", true, "srid for query area and results"),
+    spec("precision", "", true, "precision of coordinates"),
+    spec("grid", "", true, "grid width"),
+    spec("x-grid", "", true, "grid x width"),
+    spec("y-grid", "", true, "grid y width"),
+    spec("map", "", false, "show ascii map instead of numerical grid"),
 ];
 
 /// Resolved `bo-db` options.

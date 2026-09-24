@@ -15,7 +15,7 @@ use bo_service::dataimport::HttpFileTransport;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let options = Options::parse(&args, import_tool::SPECS);
+    let options = Options::parse("bo-import", &args, import_tool::SPECS);
     let import_options = import_tool::ImportOptions::from_options(&options);
     init_logging(import_options.verbose, import_options.debug);
 

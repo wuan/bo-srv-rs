@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 
-use crate::cli::Options;
+use crate::cli::{spec, OptionSpec, Options};
 use crate::data::Timestamp;
 use crate::dataimport::{StrikesBlitzortungDataProvider, Transport};
 use crate::db::StrikeDb;
@@ -28,13 +28,13 @@ pub const STRIKE_GROUP_SIZE: i64 = 10000;
 /// Sleep between retries.
 pub const RETRY_SLEEP_MILLIS: u64 = 2000;
 
-/// The option specs understood by `bo-import`.
-pub const SPECS: &[(&str, &str, bool)] = &[
-    ("verbose", "v", false),
-    ("debug", "d", false),
-    ("no-timeout", "", false),
-    ("startdate", "", true),
-    ("update", "", false),
+/// The option specs understood by `bo-import` (help text mirrors `cli/imprt.py`).
+pub const SPECS: &[OptionSpec] = &[
+    spec("verbose", "v", false, "verbose output"),
+    spec("debug", "d", false, "debug output"),
+    spec("no-timeout", "", false, "do not apply 5 minute timeout"),
+    spec("startdate", "", true, "import start date"),
+    spec("update", "", false, "run as regular update"),
 ];
 
 /// `imprt.update_start_time`: now - 30 minutes.

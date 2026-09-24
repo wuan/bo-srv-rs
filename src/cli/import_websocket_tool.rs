@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::builder::Strike as StrikeBuilder;
-use crate::cli::Options;
+use crate::cli::{spec, OptionSpec, Options};
 use crate::db::StrikeDb;
 use crate::executor::QueryExecutor;
 use crate::websocket::decode;
@@ -30,11 +30,12 @@ pub const COMMIT_STRIKE_COUNT: u64 = 100;
 /// Commit after this many seconds.
 pub const COMMIT_INTERVAL_SECONDS: u64 = 5;
 
-/// The option specs understood by `bo-import-websocket`.
-pub const SPECS: &[(&str, &str, bool)] = &[
-    ("verbose", "v", false),
-    ("debug", "d", false),
-    ("test", "t", false),
+/// The option specs understood by `bo-import-websocket` (help text mirrors
+/// `cli/imprt_websocket.py`).
+pub const SPECS: &[OptionSpec] = &[
+    spec("verbose", "v", false, "verbose output"),
+    spec("debug", "d", false, "debug output"),
+    spec("test", "t", false, "test connection only"),
 ];
 
 /// Parse a decoded websocket JSON message into a strike, using its `region`

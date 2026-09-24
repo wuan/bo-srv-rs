@@ -233,6 +233,10 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   accuracy does not match PROJ's etmerc output used by pyproj, so the grid
   factory uses the direct PROJ algorithm port in `geom.rs`, verified to
   `1e-12` against pyproj-generated reference values for all 7 regions.
+- **CLI option handling.** The tools use a small hand-written parser instead of
+  `optparse`; it mirrors `optparse` behaviour for `-h`/`--help` (prints the
+  usage/option summary, exits 0) and for unknown options or missing values
+  (prints an error, exits 2).
 - **No statsd in the CLI tools.** The Python importers report to a local
   statsd daemon; the Rust tools only log (metrics go through the same
   `Metrics`/plain-logging boundary as the service).
