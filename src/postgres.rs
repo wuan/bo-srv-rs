@@ -5,11 +5,36 @@
 //! connection-pool behaviour of the Python layer for the purposes of this
 //! port.  Queries are awaited directly by the caller; the executor never blocks
 //! a runtime worker thread.
+//!
+//! # Lazy / reconnecting mode
+//!
+//! [`PostgresExecutor::connect`] connected eagerly and propagated a connect
+//! failure to the caller; the `service` binary used it at startup and therefore
+//! **exited** whenever the database was unreachable.  The webservice instead
+//! builds the executor with [`PostgresExecutor::lazy`]: no connection is
+//! attempted at startup, and each request that needs the database
+//! (`query`/`execute`) lazily (re)connects on demand.
+//!
+//! * A failed connect/query returns an error *for that request only* — it never
+//!   panics, hangs or exits the process.
+//! * The failure is logged **once** (see [`FailureLog`]); repeated failures are
+//!   silent so a missing database cannot spam the log.  A successful request
+//!   re-arms the log, so a *later* outage is reported once again.
+//! * If the database comes back the next request transparently reconnects
+//!   (recovery without a restart).  A connection that dies while held is
+//!   detected via [`tokio_postgres::Client::is_closed`] and dropped so the
+//!   following request reconnects.
+//!
+//! The CLI tools keep using [`PostgresExecutor::connect`] (eager, error on
+//! failure), so their behaviour is unchanged.
 
 use std::error::Error;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use bytes::BytesMut;
 use chrono::{DateTime, NaiveDateTime, Utc};
+use tokio::sync::RwLock;
 use tokio_postgres::types::{IsNull, ToSql, Type};
 use tokio_postgres::Row as PgRow;
 
@@ -182,23 +207,156 @@ fn convert_row(row: &PgRow) -> Result<Row, Box<dyn Error + Sync + Send>> {
     Ok(Row::new(values))
 }
 
+/// First-occurrence-only failure log, shared by every request the executor
+/// serves (and, if desired, several executors).
+///
+/// A connect/query failure calls [`FailureLog::note_failure`]; only the first
+/// failure while the executor is "down" is logged.  [`FailureLog::note_success`]
+/// re-arms the log, so *one* line is emitted per outage (an outage that follows
+/// a recovery is reported again, once).  This keeps a missing database from
+/// spamming the log with a line per request.
+///
+/// The [`FailureLog::log_count`] counter is exposed so tests can assert the
+/// log-once behaviour without a capturing logger.
+#[derive(Debug, Default)]
+pub struct FailureLog {
+    /// `true` once the current outage has been logged (and not yet re-armed by
+    /// a success).
+    logged: AtomicBool,
+    /// How many times a failure has actually been logged.
+    log_count: AtomicUsize,
+}
+
+impl FailureLog {
+    pub fn new() -> Self {
+        FailureLog::default()
+    }
+
+    /// Claim the right to log the current failure.  Returns `true` exactly once
+    /// per outage (false while the outage has already been logged).
+    pub fn should_log(&self) -> bool {
+        !self.logged.swap(true, Ordering::SeqCst)
+    }
+
+    /// Record a failure; logs at WARN the first time (per outage).
+    pub fn note_failure(&self, error: &(dyn Error + 'static)) {
+        if self.should_log() {
+            self.log_count.fetch_add(1, Ordering::SeqCst);
+            log::warn!(
+                "database unavailable: {}",
+                crate::cli::format_error_chain(error)
+            );
+        }
+    }
+
+    /// A request succeeded: re-arm the log so a later outage is reported once
+    /// more.
+    pub fn note_success(&self) {
+        self.logged.store(false, Ordering::SeqCst);
+    }
+
+    /// Number of failures that were actually logged (for tests/metrics).
+    pub fn log_count(&self) -> usize {
+        self.log_count.load(Ordering::SeqCst)
+    }
+}
+
 /// [`QueryExecutor`] implementation over a tokio-postgres client.
 ///
 /// The async trait methods await the driver directly, so no runtime juggling or
 /// thread blocking is involved.
+///
+/// The client is held behind an [`RwLock`] because a webservice instance may
+/// start without a database: the slot is empty until the first request
+/// (re)connects it.  The read lock is only held long enough to clone the
+/// `Arc<Client>`; the query itself runs without the lock, so concurrent
+/// requests are not serialised.
 pub struct PostgresExecutor {
-    client: tokio_postgres::Client,
+    config: Config,
+    client: RwLock<Option<Arc<tokio_postgres::Client>>>,
+    failures: Arc<FailureLog>,
 }
 
 impl PostgresExecutor {
-    /// Connect asynchronously; call from within a Tokio runtime.
+    /// Connect eagerly; call from within a Tokio runtime.
+    ///
+    /// Returns an error when the database is unreachable.  This is the
+    /// constructor the CLI tools rely on; the webservice should use
+    /// [`PostgresExecutor::lazy`] instead.
     pub async fn connect(config: &Config) -> Result<Self, Box<dyn Error + Sync + Send>> {
+        let client = Self::connect_client(config).await?;
+        Ok(PostgresExecutor {
+            config: config.clone(),
+            client: RwLock::new(Some(client)),
+            failures: Arc::new(FailureLog::new()),
+        })
+    }
+
+    /// Build an executor that connects *lazily*: startup never touches the
+    /// database, and each request (re)connects on demand.  A missing or
+    /// unreachable database therefore cannot prevent the service from starting
+    /// or from answering requests (with a per-request fault).
+    pub fn lazy(config: &Config) -> Self {
+        PostgresExecutor {
+            config: config.clone(),
+            client: RwLock::new(None),
+            failures: Arc::new(FailureLog::new()),
+        }
+    }
+
+    /// The shared first-failure-only log (for tests and diagnostics).
+    pub fn failures(&self) -> &Arc<FailureLog> {
+        &self.failures
+    }
+
+    /// Open a fresh client and spawn its connection driver.
+    async fn connect_client(
+        config: &Config,
+    ) -> Result<Arc<tokio_postgres::Client>, Box<dyn Error + Sync + Send>> {
         let (client, connection) =
             tokio_postgres::connect(&config.db_connection_string(), tokio_postgres::NoTls).await?;
         tokio::spawn(async move {
             let _ = connection.await;
         });
-        Ok(PostgresExecutor { client })
+        Ok(Arc::new(client))
+    }
+
+    /// Return the live client, (re)connecting it on demand.
+    ///
+    /// When the slot is empty the write lock is taken: this makes the reconnect
+    /// single-flight, so a burst of requests while the database is down issues
+    /// one connect attempt, not one per request.  A failed connect leaves the
+    /// slot empty (the next request retries) and logs the first failure.
+    async fn current_client(&self) -> Result<Arc<tokio_postgres::Client>, Box<dyn Error + Sync + Send>> {
+        if let Some(client) = self.client.read().await.as_ref() {
+            return Ok(client.clone());
+        }
+
+        let mut guard = self.client.write().await;
+        // Another request may have connected while we waited for the lock.
+        if let Some(client) = guard.as_ref() {
+            return Ok(client.clone());
+        }
+        match Self::connect_client(&self.config).await {
+            Ok(client) => {
+                *guard = Some(client.clone());
+                self.failures.note_success();
+                Ok(client)
+            }
+            Err(error) => {
+                self.failures.note_failure(error.as_ref());
+                Err(error)
+            }
+        }
+    }
+
+    /// Forget the cached client after its connection died, so the next request
+    /// reconnects.  Only clears the slot if it still holds the same client.
+    async fn drop_dead_client(&self, dead: &Arc<tokio_postgres::Client>) {
+        let mut guard = self.client.write().await;
+        if guard.as_ref().is_some_and(|client| Arc::ptr_eq(client, dead)) {
+            *guard = None;
+        }
     }
 }
 
@@ -226,11 +384,22 @@ impl QueryExecutor for PostgresExecutor {
         let pg_params = Self::bind(params);
         let refs = Self::to_refs(&pg_params);
 
-        let rows = self
-            .client
-            .query(sql, &refs)
-            .await
-            .map_err(|e| -> Box<dyn Error + Send + Sync> { Box::new(e) })?;
+        let client = self.current_client().await?;
+        let rows = match client.query(sql, &refs).await {
+            Ok(rows) => {
+                self.failures.note_success();
+                rows
+            }
+            Err(error) => {
+                // A closed connection is a database outage: forget the client
+                // so the next request reconnects, and log the first occurrence.
+                if client.is_closed() {
+                    self.drop_dead_client(&client).await;
+                    self.failures.note_failure(&error);
+                }
+                return Err(Box::new(error));
+            }
+        };
 
         rows.iter().map(convert_row).collect()
     }
@@ -246,10 +415,20 @@ impl QueryExecutor for PostgresExecutor {
         let pg_params = Self::bind(params);
         let refs = Self::to_refs(&pg_params);
 
-        self.client
-            .execute(sql, &refs)
-            .await
-            .map_err(|e| -> Box<dyn Error + Send + Sync> { Box::new(e) })
+        let client = self.current_client().await?;
+        match client.execute(sql, &refs).await {
+            Ok(affected) => {
+                self.failures.note_success();
+                Ok(affected)
+            }
+            Err(error) => {
+                if client.is_closed() {
+                    self.drop_dead_client(&client).await;
+                    self.failures.note_failure(&error);
+                }
+                Err(Box::new(error))
+            }
+        }
     }
 }
 
@@ -370,5 +549,90 @@ fn pg_param_adapter_maps_values() {
         assert_eq!(encode(&Param::Text("abc".into()), &Type::TEXT).unwrap(), b"abc");
         let null = encode(&Param::Null, &Type::INT4).unwrap();
         assert!(null.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // lazy/reconnecting executor + first-failure-only logging
+    // -----------------------------------------------------------------
+
+    use crate::config::Config;
+    use std::net::TcpListener;
+
+    /// A config pointing at a TCP port nothing is listening on.  Binding an
+    /// ephemeral port and immediately dropping the listener reserves the port
+    /// for long enough that the connection attempt is refused.
+    fn config_for_dead_port() -> Config {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        drop(listener);
+        Config {
+            db_host: "127.0.0.1".into(),
+            db_port: port,
+            db_name: "blitzortung".into(),
+            db_user: "blitzortung".into(),
+            db_password: "blitzortung".into(),
+            ..Config::default()
+        }
+    }
+
+    /// The lazy executor never attempts a connection at construction time, so
+    /// building it cannot fail or block on a dead database.
+    #[tokio::test]
+    async fn lazy_executor_construction_does_not_connect() {
+        let executor = PostgresExecutor::lazy(&config_for_dead_port());
+        // No connect has happened yet, so nothing was logged and no client is
+        // cached.
+        assert_eq!(executor.failures().log_count(), 0);
+    }
+
+    /// A query against a dead database returns an error (not a panic/hang) and
+    /// leaves the client slot empty so the next request retries.
+    #[tokio::test]
+    async fn query_against_unreachable_database_errors_without_panicking() {
+        let executor = PostgresExecutor::lazy(&config_for_dead_port());
+        let error = executor.query("SELECT 1", &[]).await;
+        assert!(error.is_err(), "expected a connection error");
+        // The connection-refused path is a normal error, not a panic.
+        assert!(executor.client.read().await.is_none());
+    }
+
+    /// The first failed connect logs once; repeated failures while the database
+    /// stays down are silent.  A success re-arms the log so a *later* failure
+    /// is reported once more.
+    #[tokio::test]
+    async fn consecutive_failures_are_logged_once_until_a_success_rearms() {
+        let executor = PostgresExecutor::lazy(&config_for_dead_port());
+        for _ in 0..5 {
+            assert!(executor.query("SELECT 1", &[]).await.is_err());
+        }
+        assert_eq!(
+            executor.failures().log_count(),
+            1,
+            "only the first failure of an outage is logged"
+        );
+
+        // A success re-arms the tracker (simulated directly: there is no live
+        // database in this unit test).
+        executor.failures().note_success();
+        assert!(executor.query("SELECT 1", &[]).await.is_err());
+        assert_eq!(
+            executor.failures().log_count(),
+            2,
+            "a failure after a recovery is logged once more"
+        );
+        // ...and then stays quiet again.
+        assert!(executor.query("SELECT 1", &[]).await.is_err());
+        assert_eq!(executor.failures().log_count(), 2);
+    }
+
+    /// The tracker itself: `should_log` is true exactly once per outage.
+    #[test]
+    fn failure_log_claims_the_log_once() {
+        let log = FailureLog::new();
+        assert!(log.should_log());
+        assert!(!log.should_log());
+        assert!(!log.should_log());
+        log.note_success();
+        assert!(log.should_log());
     }
 }

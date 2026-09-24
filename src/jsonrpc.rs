@@ -20,7 +20,7 @@
 use serde_json::{json, Value};
 
 use crate::metrics::Metrics;
-use crate::service::{Request, Service};
+use crate::service::{Request, Service, ServiceError};
 
 /// txjsonrpc's generic failure code (`JSONRPC.FAILURE`), also used for any
 /// exception raised by a handler (the Python `TypeError` for a missing
@@ -298,13 +298,19 @@ fn resolve_args(method: &str, params: &Value) -> Result<Vec<Value>, ArgError> {
     Ok(args)
 }
 
-/// Invoke a JSON-RPC method on the service.  Returns the raw result value.
-async fn invoke<M: Metrics>(service: &Service<M>, request: &mut Request, method: &str, args: &[Value]) -> Value {
+/// Invoke a JSON-RPC method on the service.  Returns the raw result value, or
+/// a [`ServiceError`] that the caller renders as a JSON-RPC fault.
+async fn invoke<M: Metrics>(
+    service: &Service<M>,
+    request: &mut Request,
+    method: &str,
+    args: &[Value],
+) -> Result<Value, ServiceError> {
     match method {
-        "check" => service.check(),
-        "get_strikes" => service
+        "check" => Ok(service.check()),
+        "get_strikes" => Ok(service
             .get_strikes(request, &args[0], args.get(1).unwrap_or(&json!(0)))
-            .unwrap_or(Value::Null),
+            .unwrap_or(Value::Null)),
         "get_strikes_grid" => {
             service
                 .jsonrpc_get_strikes_grid(
@@ -446,13 +452,32 @@ async fn process_request<M: Metrics>(
         }
     };
 
-    let result = invoke(service, request, method, &args).await;
-    // The service records a blocked reason on the request when `is_forbidden`
-    // rejected a data request (the Python `BLOCKED` lines).
-    meta.outcome = Some(match request.blocked_reason.clone() {
-        Some(reason) => Outcome::Blocked(reason),
-        None => Outcome::Success,
-    });
+    let result = match invoke(service, request, method, &args).await {
+        Ok(result) => {
+            // The service records a blocked reason on the request when
+            // `is_forbidden` rejected a data request (the Python `BLOCKED`
+            // lines).
+            meta.outcome = Some(match request.blocked_reason.clone() {
+                Some(reason) => Outcome::Blocked(reason),
+                None => Outcome::Success,
+            });
+            result
+        }
+        Err(error) => {
+            // A service/database failure is answered with a fault envelope so
+            // the client sees an error instead of a hang, a crash or a silent
+            // null result.  `ServiceError` is the analogue of the Python
+            // handler raising an exception, which txjsonrpc renders as a
+            // FAILURE fault (8002).
+            let message = error.to_string();
+            let response = request_fault(envelope, &id, FAILURE, &message);
+            meta.outcome = Some(Outcome::Fault {
+                code: FAILURE,
+                message,
+            });
+            return dispatch_result(response, meta);
+        }
+    };
     let response = success_envelope(envelope, &id, &result);
     dispatch_result(response, meta)
 }
