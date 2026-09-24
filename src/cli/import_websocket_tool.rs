@@ -114,7 +114,10 @@ impl<'a> Importer<'a> {
     }
 
     /// Handle a single (already decoded) websocket payload.
-    fn on_message(&mut self, payload: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn on_message(
+        &mut self,
+        payload: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let message = decode(payload);
         log::debug!("message: {message}");
 
@@ -141,7 +144,7 @@ impl<'a> Importer<'a> {
         );
 
         if let Some(db) = self.db {
-            db.insert(&strike, region)?;
+            db.insert(&strike, region).await?;
         }
         self.strike_count += 1;
 
@@ -151,7 +154,7 @@ impl<'a> Importer<'a> {
         {
             log::info!("commit #{}", self.strike_count);
             if let Some(executor) = self.executor {
-                executor.commit()?;
+                executor.commit().await?;
             }
             self.strike_count = 0;
             self.last_commit = std::time::Instant::now();
@@ -209,13 +212,13 @@ async fn run_once(
         match message {
             Ok(Message::Text(payload)) => {
                 if !test {
-                    importer.on_message(&payload)?;
+                    importer.on_message(&payload).await?;
                 }
             }
             Ok(Message::Binary(payload)) => {
                 let text = String::from_utf8_lossy(&payload);
                 if !test {
-                    importer.on_message(&text)?;
+                    importer.on_message(&text).await?;
                 }
             }
             Ok(Message::Ping(payload)) => {
@@ -291,13 +294,13 @@ mod tests {
         assert!(strike_from_message("{\"lat\":1.0}").is_none());
     }
 
-    #[test]
-    fn importer_commits_on_test_mode_without_db() {
+    #[tokio::test]
+    async fn importer_commits_on_test_mode_without_db() {
         // Without a database the importer still counts and commits are no-ops.
         let mut importer = Importer::new(None, None);
         let message = "{\"time\":1650135893612088000,\"lat\":32.335748,\"lon\":-89.561516,\
                        \"alt\":0,\"mds\":100,\"region\":3}";
-        importer.on_message(message).unwrap();
+        importer.on_message(message).await.unwrap();
         assert_eq!(importer.strike_count, 1);
     }
 }

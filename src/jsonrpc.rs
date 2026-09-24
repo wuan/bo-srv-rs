@@ -299,51 +299,55 @@ fn resolve_args(method: &str, params: &Value) -> Result<Vec<Value>, ArgError> {
 }
 
 /// Invoke a JSON-RPC method on the service.  Returns the raw result value.
-fn invoke<M: Metrics>(service: &Service<M>, request: &mut Request, method: &str, args: &[Value]) -> Value {
+async fn invoke<M: Metrics>(service: &Service<M>, request: &mut Request, method: &str, args: &[Value]) -> Value {
     match method {
         "check" => service.check(),
         "get_strikes" => service
             .get_strikes(request, &args[0], args.get(1).unwrap_or(&json!(0)))
             .unwrap_or(Value::Null),
-        "get_strikes_grid" => service.jsonrpc_get_strikes_grid(
-            request,
-            &args[0],
-            &args[1],
-            &args[2],
-            &args[3],
-            &args[4],
-        ),
-        "get_strikes_raster" | "get_strokes_raster" => service.jsonrpc_get_strikes_raster(
-            request,
-            &args[0],
-            &args[1],
-            &args[2],
-            &args[3],
-        ),
-        "get_global_strikes_grid" => service.jsonrpc_get_global_strikes_grid(
-            request,
-            &args[0],
-            &args[1],
-            &args[2],
-            &args[3],
-        ),
-        "get_local_strikes_grid" => service.jsonrpc_get_local_strikes_grid(
-            request,
-            &args[0],
-            &args[1],
-            &args[2],
-            &args[3],
-            &args[4],
-            &args[5],
-            &args[6],
-        ),
+        "get_strikes_grid" => {
+            service
+                .jsonrpc_get_strikes_grid(
+                    request,
+                    &args[0],
+                    &args[1],
+                    &args[2],
+                    &args[3],
+                    &args[4],
+                )
+                .await
+        }
+        "get_strikes_raster" | "get_strokes_raster" => {
+            service
+                .jsonrpc_get_strikes_raster(request, &args[0], &args[1], &args[2], &args[3])
+                .await
+        }
+        "get_global_strikes_grid" => {
+            service
+                .jsonrpc_get_global_strikes_grid(request, &args[0], &args[1], &args[2], &args[3])
+                .await
+        }
+        "get_local_strikes_grid" => {
+            service
+                .jsonrpc_get_local_strikes_grid(
+                    request,
+                    &args[0],
+                    &args[1],
+                    &args[2],
+                    &args[3],
+                    &args[4],
+                    &args[5],
+                    &args[6],
+                )
+                .await
+        }
         _ => unreachable!("method checked by caller"),
     }
 }
 
 /// Process a single parsed JSON-RPC request object, returning the response and
 /// the access-log metadata.
-fn process_request<M: Metrics>(
+async fn process_request<M: Metrics>(
     service: &Service<M>,
     request: &mut Request,
     req: &Value,
@@ -442,7 +446,7 @@ fn process_request<M: Metrics>(
         }
     };
 
-    let result = invoke(service, request, method, &args);
+    let result = invoke(service, request, method, &args).await;
     // The service records a blocked reason on the request when `is_forbidden`
     // rejected a data request (the Python `BLOCKED` lines).
     meta.outcome = Some(match request.blocked_reason.clone() {
@@ -468,7 +472,7 @@ fn request_fault(envelope: Envelope, id: &Value, code: i64, message: &str) -> Va
 
 /// Process a JSON-RPC request body and return the serialized response body
 /// plus access-log metadata.
-pub fn process<M: Metrics>(service: &Service<M>, request: &mut Request, body: &str) -> DispatchResult {
+pub async fn process<M: Metrics>(service: &Service<M>, request: &mut Request, body: &str) -> DispatchResult {
     let parsed: Result<Value, serde_json::Error> = serde_json::from_str(body);
     let request_value = match parsed {
         Ok(v) => v,
@@ -490,12 +494,12 @@ pub fn process<M: Metrics>(service: &Service<M>, request: &mut Request, body: &s
             );
         }
     };
-    process_request(service, request, &request_value)
+    process_request(service, request, &request_value).await
 }
 
 /// Dispatch helper used by the transport.
-pub fn dispatch<M: Metrics>(service: &Service<M>, request: &mut Request, body: &str) -> DispatchResult {
-    process(service, request, body)
+pub async fn dispatch<M: Metrics>(service: &Service<M>, request: &mut Request, body: &str) -> DispatchResult {
+    process(service, request, body).await
 }
 
 #[cfg(test)]
@@ -509,6 +513,25 @@ mod tests {
 
     fn parse(body: &str) -> Value {
         serde_json::from_str(body).expect("valid JSON response")
+    }
+
+    /// Blocking test wrapper around the async [`super::dispatch`]: the tests
+    /// below are synchronous assertions over the dispatch result.
+    fn dispatch<M: Metrics>(service: &Service<M>, request: &mut Request, body: &str) -> DispatchResult {
+        block_on(super::dispatch(service, request, body))
+    }
+
+    /// Blocking test wrapper around the async [`super::process`].
+    fn process<M: Metrics>(service: &Service<M>, request: &mut Request, body: &str) -> DispatchResult {
+        block_on(super::process(service, request, body))
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
     }
 
     /// A request that passes the data-endpoint validation (valid Android UA

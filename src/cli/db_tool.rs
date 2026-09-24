@@ -243,7 +243,7 @@ pub fn resolve_area(options: &DbOptions) -> Option<Area> {
 /// `precision`, and print each strike; write the count/timing to `stderr`.
 /// `cli/db.py.fetch_strikes`: select strikes, round coordinates to
 /// `precision`, and return one rendered strike per line.
-pub fn fetch_strikes(
+pub async fn fetch_strikes(
     executor: &dyn QueryExecutor,
     options: &DbOptions,
     interval: &TimeInterval,
@@ -251,7 +251,7 @@ pub fn fetch_strikes(
     tz: chrono_tz::Tz,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let db = StrikeDb::new(executor, options.srid);
-    let strikes = db.select(interval, area, None)?;
+    let strikes = db.select(interval, area, None).await?;
 
     let precision_factor = 10f64.powi(options.precision);
     let mut lines = Vec::with_capacity(strikes.len());
@@ -267,14 +267,14 @@ pub fn fetch_strikes(
 
 /// `cli/db.py.fetch_strikes_grid`: select grid data and return the arcgrid or
 /// map text.
-pub fn fetch_strikes_grid(
+pub async fn fetch_strikes_grid(
     executor: &dyn QueryExecutor,
     options: &DbOptions,
     grid: &Grid,
     interval: &TimeInterval,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let db = StrikeDb::new(executor, options.srid);
-    let grid_data: GridData = db.select_grid(grid, 0, interval, None)?;
+    let grid_data: GridData = db.select_grid(grid, 0, interval, None).await?;
 
     if options.map {
         Ok(grid_data.to_map())
@@ -284,7 +284,7 @@ pub fn fetch_strikes_grid(
 }
 
 /// Entry point for the `bo-db` binary, given a connected executor.
-pub fn run(
+pub async fn run(
     executor: &dyn QueryExecutor,
     options: &DbOptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -298,13 +298,13 @@ pub fn run(
     let grid = prepare_grid_if_applicable(options, area.as_ref());
     if let Some(grid) = grid {
         let mut timer = Timer::new();
-        let output = fetch_strikes_grid(executor, options, &grid, &interval)?;
+        let output = fetch_strikes_grid(executor, options, &grid, &interval).await?;
         let select_time = timer.lap();
         println!("{output}");
         eprintln!("received grid data in {select_time:.3} seconds");
     } else {
         let mut timer = Timer::new();
-        let output = fetch_strikes(executor, options, &interval, area.as_ref(), tz)?;
+        let output = fetch_strikes(executor, options, &interval, area.as_ref(), tz).await?;
         let select_time = timer.lap();
         if !output.is_empty() {
             println!("{output}");
@@ -398,8 +398,8 @@ mod tests {
         assert_eq!(start, Utc.with_ymd_and_hms(2025, 1, 1, 10, 0, 0).unwrap());
     }
 
-    #[test]
-    fn fetch_strikes_prints_and_counts() {
+    #[tokio::test]
+    async fn fetch_strikes_prints_and_counts() {
         let mut mock = MockExecutor::new();
         mock.add_rows(
             "FROM strikes",
@@ -421,15 +421,15 @@ mod tests {
             Utc.with_ymd_and_hms(2025, 1, 1, 10, 0, 0).unwrap(),
             Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap(),
         );
-        let output = fetch_strikes(&mock, &options, &interval, None, chrono_tz::UTC).unwrap();
+        let output = fetch_strikes(&mock, &options, &interval, None, chrono_tz::UTC).await.unwrap();
         assert_eq!(output.lines().count(), 1);
         // The strike's coordinates are rounded to `precision` decimals and the
         // altitude/amplitude/error/count suffix matches `Strike.__str__`.
         assert!(output.starts_with("2025-01-01 11:00:00.000000000 10.1235 20.6543 100.0 10.5 250 5"));
     }
 
-    #[test]
-    fn fetch_strikes_grid_renders_arcgrid() {
+    #[tokio::test]
+    async fn fetch_strikes_grid_renders_arcgrid() {
         let mut mock = MockExecutor::new();
         mock.add_rows(
             "GROUP BY",
@@ -446,7 +446,7 @@ mod tests {
             Utc.with_ymd_and_hms(2025, 1, 1, 10, 0, 0).unwrap(),
             Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap(),
         );
-        let output = fetch_strikes_grid(&mock, &options, &grid, &interval).unwrap();
+        let output = fetch_strikes_grid(&mock, &options, &grid, &interval).await.unwrap();
         assert!(output.starts_with("NCOLS 1\nNROWS 1\nXLLCORNER 0.0000\nYLLCORNER 0.0000\nCELLSIZE 1.0000\nNODATA_VALUE 0\n3"));
     }
 

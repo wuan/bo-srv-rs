@@ -73,7 +73,7 @@ pub fn parse_start_date(value: &str) -> Option<DateTime<Utc>> {
 /// `imprt.import_strikes_for`: import one region into the database.
 ///
 /// Returns the number of strikes inserted.
-pub fn import_strikes_for<T: Transport>(
+pub async fn import_strikes_for<T: Transport>(
     executor: &dyn QueryExecutor,
     transport: &T,
     region: u32,
@@ -85,7 +85,7 @@ pub fn import_strikes_for<T: Transport>(
     let db = StrikeDb::new(executor, 4326);
 
     let timer = Timer::new();
-    let mut latest_time = db.get_latest_time(Some(region as i64))?;
+    let mut latest_time = db.get_latest_time(Some(region as i64)).await?;
     log::debug!(
         "latest time for region {region}: {} ({:.03}s)",
         latest_time
@@ -119,11 +119,11 @@ pub fn import_strikes_for<T: Transport>(
         strike_count += 1;
 
         if strike_batch.len() >= STRIKE_BATCH_SIZE {
-            db.insert_many(&strike_batch, Some(region as i64))?;
+            db.insert_many(&strike_batch, Some(region as i64)).await?;
             strike_batch.clear();
 
             if strike_count % STRIKE_GROUP_SIZE == 0 {
-                executor.commit()?;
+                executor.commit().await?;
                 let elapsed = start_time.elapsed().as_secs_f64().max(f64::EPSILON);
                 log::info!(
                     "commit #{} ({:.1}/s) for region {}",
@@ -137,10 +137,10 @@ pub fn import_strikes_for<T: Transport>(
     }
 
     if !strike_batch.is_empty() {
-        db.insert_many(&strike_batch, Some(region as i64))?;
+        db.insert_many(&strike_batch, Some(region as i64)).await?;
     }
     if strike_count > 0 {
-        executor.commit()?;
+        executor.commit().await?;
     }
 
     let insert_time = std::time::Instant::now();
@@ -159,7 +159,7 @@ pub fn import_strikes_for<T: Transport>(
 /// `imprt.import_strikes`: iterate all regions, retrying connection errors.
 ///
 /// Returns the total number of strikes and the accumulated error count.
-pub fn import_strikes<T: Transport>(
+pub async fn import_strikes<T: Transport>(
     executor: &dyn QueryExecutor,
     transport: &T,
     regions: &[u32],
@@ -183,7 +183,9 @@ pub fn import_strikes<T: Transport>(
                 start_time,
                 is_update,
                 deadline,
-            ) {
+            )
+            .await
+            {
                 Ok(count) => {
                     total_strikes += count;
                     break;
@@ -191,7 +193,7 @@ pub fn import_strikes<T: Transport>(
                 Err(_) => {
                     log::warn!("import failed: retry {retry} region {region}");
                     error_count += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(RETRY_SLEEP_MILLIS));
+                    tokio::time::sleep(std::time::Duration::from_millis(RETRY_SLEEP_MILLIS)).await;
                 }
             }
         }
@@ -311,13 +313,13 @@ mod tests {
         assert_eq!(parsed, Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap());
     }
 
-    #[test]
-    fn import_strikes_for_inserts_new_strikes() {
+    #[tokio::test]
+    async fn import_strikes_for_inserts_new_strikes() {
         let now = Utc::now();
         // Latest DB time is older than the log entry, so the strike is new.
         let mut mock = executor_with_latest(Some((now - Duration::hours(2), 0)));
         let transport = StubTransport::new(vec![strike_line(now - Duration::minutes(30))], 0);
-        let count = import_strikes_for(&mock, &transport, 1, None, false, None).unwrap();
+        let count = import_strikes_for(&mock, &transport, 1, None, false, None).await.unwrap();
         assert_eq!(count, 1);
         assert_eq!(mock.execution_count(), 1);
         assert_eq!(mock.commit_count(), 1);
@@ -327,18 +329,18 @@ mod tests {
         let _ = &mut mock;
     }
 
-    #[test]
-    fn import_strikes_for_no_strikes_does_not_commit() {
+    #[tokio::test]
+    async fn import_strikes_for_no_strikes_does_not_commit() {
         let mut mock = executor_with_latest(None);
         let transport = StubTransport::new(vec![], 0);
-        let count = import_strikes_for(&mock, &transport, 1, None, false, None).unwrap();
+        let count = import_strikes_for(&mock, &transport, 1, None, false, None).await.unwrap();
         assert_eq!(count, 0);
         assert_eq!(mock.commit_count(), 0);
         let _ = &mut mock;
     }
 
-    #[test]
-    fn import_strikes_retries_on_connection_error() {
+    #[tokio::test]
+    async fn import_strikes_retries_on_connection_error() {
         let now = Utc::now();
         // Two DB latest-time queries: the failed attempt and the retry.
         let mut mock = MockExecutor::new();
@@ -352,19 +354,19 @@ mod tests {
             );
         }
         let transport = StubTransport::new(vec![strike_line(now - Duration::minutes(30))], 1);
-        let (strikes, errors) = import_strikes(&mock, &transport, &[1], None, true, false);
+        let (strikes, errors) = import_strikes(&mock, &transport, &[1], None, true, false).await;
         assert_eq!(errors, 1);
         assert_eq!(strikes, 1);
         let _ = &mut mock;
     }
 
-    #[test]
-    fn import_strikes_defaults_start_to_update_window() {
+    #[tokio::test]
+    async fn import_strikes_defaults_start_to_update_window() {
         // With no DB row and `is_update`, the provider default (now - 6h) is
         // replaced by now - 30min.
         let mut mock = executor_with_latest(None);
         let transport = StubTransport::new(vec![], 0);
-        let count = import_strikes_for(&mock, &transport, 1, None, true, None).unwrap();
+        let count = import_strikes_for(&mock, &transport, 1, None, true, None).await.unwrap();
         assert_eq!(count, 0);
         let _ = &mut mock;
     }

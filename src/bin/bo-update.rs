@@ -59,12 +59,17 @@ fn main() {
     let url_strikes = update_tool::parse_strikes_from_text(&body);
     log::info!("Fetched {} strikes from URL", url_strikes.len());
 
-    let (_runtime, executor) = match connect_postgres(&config) {
+    let (runtime, executor) = match connect_postgres(&config) {
         Ok(pair) => pair,
         Err(error) => exit_with(&describe_error("failed to connect to database", error.as_ref()), 1),
     };
 
-    match update_tool::update_strikes(&executor, &url_strikes, update_options.hours, now) {
+    match runtime.block_on(update_tool::update_strikes(
+        &executor,
+        &url_strikes,
+        update_options.hours,
+        now,
+    )) {
         Ok(result) => {
             log::info!("Import completed: {} new strikes inserted", result.inserted);
         }

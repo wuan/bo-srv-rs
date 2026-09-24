@@ -89,8 +89,13 @@ impl MockExecutor {
     }
 }
 
+#[async_trait::async_trait]
 impl QueryExecutor for MockExecutor {
-    fn query(&self, sql: &str, params: &[Param]) -> Result<Vec<Row>, Box<dyn std::error::Error + Send + Sync>> {
+    async fn query(
+        &self,
+        sql: &str,
+        params: &[Param],
+    ) -> Result<Vec<Row>, Box<dyn std::error::Error + Send + Sync>> {
         let mut inner = self.inner.lock().unwrap();
         inner.calls.push((sql.to_string(), params.to_vec()));
 
@@ -109,7 +114,7 @@ impl QueryExecutor for MockExecutor {
         }
     }
 
-    fn execute(
+    async fn execute(
         &self,
         sql: &str,
         params: &[Param],
@@ -132,12 +137,12 @@ impl QueryExecutor for MockExecutor {
         Ok(1)
     }
 
-    fn commit(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn commit(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.inner.lock().unwrap().commit_count += 1;
         Ok(())
     }
 
-    fn rollback(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn rollback(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.inner.lock().unwrap().rollback_count += 1;
         Ok(())
     }
@@ -148,20 +153,20 @@ mod tests {
     use super::*;
     use crate::executor::Value;
 
-    #[test]
-    fn returns_rows_and_records_calls() {
+    #[tokio::test]
+    async fn returns_rows_and_records_calls() {
         let mut mock = MockExecutor::new();
         mock.add_rows("SELECT", vec![Row::new(vec![Value::Int(1)])]);
-        let rows = mock.query("SELECT 1", &[]).unwrap();
+        let rows = mock.query("SELECT 1", &[]).await.unwrap();
         assert_eq!(rows[0].get_i64(0), Some(1));
         assert_eq!(mock.call_count(), 1);
         assert_eq!(mock.calls()[0].0, "SELECT 1");
     }
 
-    #[test]
-    fn returns_error() {
+    #[tokio::test]
+    async fn returns_error() {
         let mut mock = MockExecutor::new();
         mock.add_error("SELECT", "boom");
-        assert!(mock.query("SELECT 1", &[]).is_err());
+        assert!(mock.query("SELECT 1", &[]).await.is_err());
     }
 }

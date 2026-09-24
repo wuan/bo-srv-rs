@@ -29,7 +29,7 @@ fn main() {
     let start_time = import_tool::resolve_start_time(&import_options);
 
     let config = Config::from_env();
-    let (_runtime, executor) = match connect_postgres(&config) {
+    let (runtime, executor) = match connect_postgres(&config) {
         Ok(pair) => pair,
         Err(error) => exit_with(&describe_error("failed to connect to database", error.as_ref()), 1),
     };
@@ -38,13 +38,13 @@ fn main() {
     // `HttpFileTransport` default is 60s); the overall per-region budget is
     // enforced cooperatively in `import_strikes`.
     let transport = HttpFileTransport::with_timeout(&config, std::time::Duration::from_secs(30));
-    let (strikes, errors) = import_tool::import_strikes(
+    let (strikes, errors) = runtime.block_on(import_tool::import_strikes(
         &executor,
         &transport,
         import_tool::REGIONS,
         start_time,
         import_options.no_timeout,
         import_options.update,
-    );
+    ));
     log::info!("imported {strikes} strikes (error count {errors})");
 }
