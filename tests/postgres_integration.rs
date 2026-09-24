@@ -1,63 +1,34 @@
-//! Live PostgreSQL integration tests (opt-in).
+//! Live PostgreSQL integration tests against an ephemeral PostGIS container.
 //!
-//! These are ignored by default because they need a running PostgreSQL with
-//! the PostGIS `strikes` schema.  Run them with, e.g.:
+//! The container and its canonical `strikes` schema are provided by
+//! [`support::test_db`], which mirrors the Python project's testcontainers
+//! fixture.  Docker must be running; no pre-provisioned database or
+//! `DATABASE_URL` is required.
+//!
+//! They are opt-in (the `db-integration` feature) so the default `cargo test`
+//! needs no Docker:
 //!
 //! ```sh
-//! export DATABASE_URL="host=127.0.0.1 port=5433 dbname=blitzortung user=blitzortung password=blitzortung"
-//! cargo test --test postgres_integration -- --ignored --nocapture
+//! cargo test --features db-integration --test postgres_integration -- --nocapture
 //! ```
 //!
 //! They are the regression guard for the parameter-encoding bugs found against
 //! the real server (0x00 / UTF8 errors, int2 deserialization, ambiguous
 //! `ST_Transform` and `ST_MakePoint` placeholders).
 
-use bo_service::config::Config;
+mod support;
+
 use bo_service::data::Timestamp;
 use bo_service::db::StrikeDb;
-use bo_service::postgres::PostgresExecutor;
 use bo_service::query::TimeInterval;
-
-/// Build a [`Config`] from `DATABASE_URL` (a libpq keyword/value string).
-fn config_from_env() -> Config {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let mut config = Config::default();
-    for pair in url.split_whitespace() {
-        if let Some((key, value)) = pair.split_once('=') {
-            let value = value.trim_matches('\'').to_string();
-            match key {
-                "host" => config.db_host = value,
-                "port" => config.db_port = value,
-                "dbname" => config.db_name = value,
-                "user" => config.db_user = value,
-                "password" => config.db_password = value,
-                _ => {}
-            }
-        }
-    }
-    config
-}
-
-fn runtime_and_executor() -> (tokio::runtime::Runtime, PostgresExecutor) {
-    let config = config_from_env();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let executor = runtime
-        .block_on(PostgresExecutor::connect(&config))
-        .expect("connect");
-    (runtime, executor)
-}
 
 /// The default `bo-db` select must run against the real server without a
 /// parameter-encoding error (regression for the `0x00`/UTF8 failure from the
 /// ambiguous `ST_Transform(geog::geometry, $1)` placeholder), and its rows
 /// must deserialize (regression for the `int2` -> `i32` failure).
 #[test]
-#[ignore = "requires a live PostgreSQL with the strikes schema (set DATABASE_URL)"]
 fn default_select_executes_and_deserializes() {
-    let (runtime, executor) = runtime_and_executor();
+    let (runtime, executor) = support::test_db().runtime_and_executor();
     runtime.block_on(async {
         let db = StrikeDb::new(&executor, 4326);
         let now = chrono::Utc::now();
@@ -72,10 +43,9 @@ fn default_select_executes_and_deserializes() {
 
 /// `bo-db --grid` must run (ambiguous `ST_Transform` + float casts).
 #[test]
-#[ignore = "requires a live PostgreSQL with the strikes schema (set DATABASE_URL)"]
 fn grid_query_executes() {
     use bo_service::geom::Grid;
-    let (runtime, executor) = runtime_and_executor();
+    let (runtime, executor) = support::test_db().runtime_and_executor();
     runtime.block_on(async {
         let db = StrikeDb::new(&executor, 4326);
         let now = chrono::Utc::now();
@@ -91,9 +61,8 @@ fn grid_query_executes() {
 
 /// `select_strike_keys` (`bo-update` de-duplication) must run.
 #[test]
-#[ignore = "requires a live PostgreSQL with the strikes schema (set DATABASE_URL)"]
 fn select_strike_keys_executes() {
-    let (runtime, executor) = runtime_and_executor();
+    let (runtime, executor) = support::test_db().runtime_and_executor();
     runtime.block_on(async {
         let db = StrikeDb::new(&executor, 4326);
         let now = chrono::Utc::now();
@@ -106,9 +75,8 @@ fn select_strike_keys_executes() {
 
 /// `get_latest_time` (`bo-import` start point) must run (`region=$1::smallint`).
 #[test]
-#[ignore = "requires a live PostgreSQL with the strikes schema (set DATABASE_URL)"]
 fn get_latest_time_executes() {
-    let (runtime, executor) = runtime_and_executor();
+    let (runtime, executor) = support::test_db().runtime_and_executor();
     runtime.block_on(async {
         let db = StrikeDb::new(&executor, 4326);
         let latest = db
@@ -120,13 +88,11 @@ fn get_latest_time_executes() {
 }
 
 /// Inserts must round-trip (regression for the ambiguous `ST_MakePoint`
-/// placeholder and the int2 column bindings).  Uses a transaction-free insert
-/// of a single strike at a far-future timestamp and is safe to re-run.
+/// placeholder and the int2 column bindings) and be readable back.
 #[test]
-#[ignore = "requires a live PostgreSQL with the strikes schema (set DATABASE_URL)"]
 fn insert_many_round_trips() {
     use bo_service::data::Strike;
-    let (runtime, executor) = runtime_and_executor();
+    let (runtime, executor) = support::test_db().runtime_and_executor();
 
     let strike = Strike::new(
         None,
@@ -147,5 +113,15 @@ fn insert_many_round_trips() {
             .await
             .expect("insert must succeed");
         assert_eq!(count, 1);
+
+        // The inserted strike is within the last hour, so a region select must
+        // see at least this one row.
+        let now = chrono::Utc::now();
+        let interval = TimeInterval::new(now - chrono::Duration::hours(1), now);
+        let rows = db
+            .select(&interval, None, Some(1))
+            .await
+            .expect("select after insert must succeed");
+        assert!(rows.iter().any(|s| (s.x - 8.91).abs() < 1e-6));
     });
 }

@@ -28,6 +28,17 @@ path = "src/bin/bo-update.rs"
 name = "bo-import-websocket"
 path = "src/bin/bo-import-websocket.rs"
 
+[features]
+# Opt-in database integration tests (`tests/postgres_integration.rs`): they
+# start an ephemeral PostGIS container with testcontainers, so Docker is
+# required. Gated so the default `cargo test` (and the Docker-less coverage
+# job) do not depend on a running Docker daemon.
+db-integration = []
+
+[[test]]
+name = "postgres_integration"
+required-features = ["db-integration"]
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
@@ -56,3 +67,9 @@ flate2 = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+# Ephemeral PostGIS container for the database integration suite. The
+# `blocking` feature enables `SyncRunner`, so the fixture can start the
+# container without a Tokio runtime (the executor is then driven by the test's
+# own `runtime.block_on`).
+testcontainers = { version = "0.27", features = ["blocking"] }
+testcontainers-modules = { version = "0.15", features = ["postgres"] }

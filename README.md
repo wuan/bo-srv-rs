@@ -25,14 +25,18 @@ cargo build
 cargo test
 ```
 
-The live PostgreSQL integration tests (`tests/postgres_integration.rs`) are
-ignored by default; run them against a database with the PostGIS `strikes`
-schema:
+The live PostgreSQL integration tests (`tests/postgres_integration.rs`) start an
+ephemeral PostGIS [testcontainer](https://github.com/testcontainers/testcontainers-rs)
+and apply the canonical `tests/schema/strikes.sql` (mirroring the Python
+project's test suite), so no pre-provisioned database or `DATABASE_URL` is
+needed. They are opt-in because they require a running Docker daemon:
 
 ```sh
-export DATABASE_URL="host=127.0.0.1 port=5433 dbname=blitzortung user=blitzortung password=blitzortung"
-cargo test --test postgres_integration -- --ignored --nocapture
+cargo test --features db-integration --test postgres_integration -- --nocapture
 ```
+
+Set `BLITZORTUNG_TEST_POSTGIS_IMAGE` to override the default
+`imresamu/postgis:16-3.5` image.
 
 ## Run
 
