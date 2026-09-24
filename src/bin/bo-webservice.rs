@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
-//! cargo run --manifest-path rust/bo-service/Cargo.toml
+//! cargo run --bin bo-webservice
 //! ```
 //!
 //! Configuration (see [`bo_service::config`]): the `--port`/`--protocol` CLI
@@ -53,10 +53,10 @@ fn build_metrics(config: &Config) -> std::sync::Arc<dyn Metrics> {
     }
 }
 
-/// Command-line options for the `service` binary.
+/// Command-line options for the `bo-webservice` binary.
 #[derive(Parser, Debug)]
 #[command(
-    name = "service",
+    name = "bo-webservice",
     about = "Blitzortung JSON-RPC webservice",
     version
 )]

@@ -98,7 +98,7 @@ jobs:
         run: |
           . "$HOME/.cargo/env" 
           cargo build --release
-          for bin in service bo-db bo-import bo-update bo-import-websocket; do
+          for bin in bo-webservice bo-db bo-import bo-update bo-import-websocket; do
             echo "== $bin =="
             ldd "target/release/$bin"
           done
@@ -106,9 +106,9 @@ jobs:
       - name: Upload Release
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: bo-service
+          name: bo-webservice
           path: |
-            target/release/service
+            target/release/bo-webservice
             target/release/bo-db
             target/release/bo-import
             target/release/bo-update

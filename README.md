@@ -16,8 +16,8 @@ The checked-in Rust toolchain is broken on this machine; use the stable one:
 
 ```sh
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
-cargo build --manifest-path rust/bo-service/Cargo.toml
-cargo test  --manifest-path rust/bo-service/Cargo.toml
+cargo build
+cargo test
 ```
 
 The live PostgreSQL integration tests (`tests/postgres_integration.rs`) are
@@ -33,13 +33,13 @@ cargo test --test postgres_integration -- --ignored --nocapture
 
 ```sh
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
-cargo run --manifest-path rust/bo-service/Cargo.toml
+cargo run --bin bo-webservice
 
 # override the listening port (also: -p)
-cargo run --manifest-path rust/bo-service/Cargo.toml -- --port 8300
+cargo run --bin bo-webservice -- --port 8300
 ```
 
-The `service` binary accepts `-p, --port <PORT>` and `--protocol <http|lsp>`
+The `bo-webservice` binary accepts `-p, --port <PORT>` and `--protocol <http|lsp>`
 (plus `-h/--help` and `-V/--version`).  Both settings resolve with the
 precedence **CLI > env > config file > default**:
 
@@ -72,7 +72,7 @@ The original LSP-style `Content-Length` framing on a raw TCP socket is still
 available for other consumers/tests:
 
 ```sh
-cargo run --manifest-path rust/bo-service/Cargo.toml -- --protocol lsp
+cargo run --bin bo-webservice -- --protocol lsp
 # or: BO_SERVICE_PROTOCOL=lsp
 ```
 
