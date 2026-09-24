@@ -85,6 +85,29 @@ The PostgreSQL schema is the normal blitzortung one; the service only reads
 `strikes` rows (the `strikes` table with a `geog` geography column, a
 `"timestamp"` column, and a `region` column).
 
+## Logging
+
+The service logs one **access line per JSON-RPC request** through the `log`
+crate, mirroring the Python `base.py` `log.msg` lines (method + a compact,
+size-bounded params summary + client + user agent + handler duration):
+
+```text
+INFO  bo_service::transport] get_strikes_grid({"minute_length":60,...}) id=1 client=127.0.0.1 ua=bo-android-190 17.5ms
+WARN  bo_service::transport] get_strikes_grid(...) BLOCKED (invalid user agent "Mozilla/5.0") id=2 client=127.0.0.1 ua=Mozilla/5.0 0.1ms
+WARN  bo_service::transport] nope([]) fault -32601 "function nope not found" id=3 client=127.0.0.1 ua=bo-android-190 0.0ms
+```
+
+* Success and faults are `INFO`; a fault carries the JSON-RPC code/message.
+* Rejected data requests log an explicit `BLOCKED` line at `WARN` with the
+  reason (blocked IP, invalid user agent, bad content type, referer, or an
+  out-of-range grid baseline).
+* Request **bodies/credentials are never logged**; only the method, id, and a
+  params summary truncated to 160 characters.
+
+The level defaults to `INFO` so these lines are visible out of the box;
+override with `RUST_LOG` (e.g. `RUST_LOG=debug`, or `RUST_LOG=warn` to hide the
+access lines).
+
 ## Protocol
 
 Requests and responses both use LSP-style framing:
