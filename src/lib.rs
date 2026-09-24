@@ -32,6 +32,7 @@ pub mod dataimport;
 pub mod db;
 pub mod executor;
 pub mod geom;
+pub mod http;
 pub mod jsonrpc;
 pub mod mock;
 pub mod postgres;
