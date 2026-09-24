@@ -232,6 +232,13 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   not reproduced.  A single tokio-postgres client replaces the connection
   pool (`connection_count` is accepted for compatibility; the multiplexed
   client serves all connections).
+- **DB queries are safe inside the Tokio runtime.** The service (multi-thread
+  runtime) calls DB queries from async handler tasks; `query`/`execute` use
+  `tokio::task::block_in_place` when already inside a runtime, so they no
+  longer panic with `Cannot start a runtime from within a runtime`.  Each
+  in-flight query still occupies one worker thread (`block_in_place`), so very
+  high concurrency (more blocking queries than worker threads) stalls until a
+  worker frees up — an async query path would be needed to remove that ceiling.
 - **Blocks data requests with no headers.** The Twisted service also blocks
   them (invalid user agent), but over plain TCP the Rust transport reads the
   validation headers from the frame header block, so a bare frame is treated
