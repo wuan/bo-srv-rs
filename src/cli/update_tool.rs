@@ -7,7 +7,7 @@
 use chrono::{DateTime, Duration, Utc};
 
 use crate::builder::Strike as StrikeBuilder;
-use crate::cli::Options;
+use crate::cli::{spec, OptionSpec, Options};
 use crate::data::Strike;
 use crate::db::{HashableStrikeKey, StrikeDb, StrikeKey};
 use crate::executor::QueryExecutor;
@@ -133,12 +133,12 @@ pub fn last_strikes_url(start_time: DateTime<Utc>) -> String {
     )
 }
 
-/// The option specs understood by `bo-update`.
-pub const SPECS: &[(&str, &str, bool)] = &[
-    ("hours", "", true),
-    ("verbose", "v", false),
-    ("debug", "d", false),
-    ("no-lock", "", false),
+/// The option specs understood by `bo-update` (help text mirrors `cli/update.py`).
+pub const SPECS: &[OptionSpec] = &[
+    spec("hours", "", true, "Number of hours to look back (default: 1)"),
+    spec("verbose", "v", false, "Enable verbose logging"),
+    spec("debug", "d", false, "Enable debug logging"),
+    spec("no-lock", "", false, "Skip file locking (use with caution)"),
 ];
 
 /// Build the `bo-update` options from the parsed command line.

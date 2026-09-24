@@ -13,6 +13,33 @@ pub mod update_tool;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// A single command-line option: long name, optional short name, whether it
+/// takes a value, and the help text shown by `-h`/`--help`.
+///
+/// Construct with [`spec`] for the common cases.
+#[derive(Debug, Clone, Copy)]
+pub struct OptionSpec {
+    pub long: &'static str,
+    pub short: &'static str,
+    pub takes_value: bool,
+    pub help: &'static str,
+}
+
+/// Build an [`OptionSpec`] (`short` may be `""` for a long-only option).
+pub const fn spec(
+    long: &'static str,
+    short: &'static str,
+    takes_value: bool,
+    help: &'static str,
+) -> OptionSpec {
+    OptionSpec {
+        long,
+        short,
+        takes_value,
+        help,
+    }
+}
+
 /// A parsed command line: long/short options plus positional arguments.
 #[derive(Debug, Default)]
 pub struct Options {
@@ -21,13 +48,39 @@ pub struct Options {
     positional: Vec<String>,
 }
 
+/// Exit code used for command-line errors (matches Python `optparse`, which
+/// calls `parser.error()` -> `sys.exit(2)`).
+pub const USAGE_ERROR_EXIT_CODE: i32 = 2;
+
+/// The non-success outcomes of [`Options::try_parse`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum ParseOutcome {
+    /// `-h`/`--help` was requested (exit 0).
+    Help,
+    /// The command line was invalid (exit 2); the string is the error message.
+    Error(String),
+}
+
 impl Options {
-    /// Parse `args` against a list of specs.
+    /// Parse `args` against a list of specs, handling `-h`/`--help` and
+    /// rejecting unknown options the way Python's `optparse` does.
     ///
-    /// Each spec is `(long_name, short_name, takes_value)`.  `--long value`,
-    /// `--long=value`, `-s value` and `-s=value` are accepted; flags may be
-    /// repeated but the last occurrence wins.
-    pub fn parse(args: &[String], specs: &[(&str, &str, bool)]) -> Self {
+    /// `-h`/`--help` prints the usage/option summary and exits 0.  An unknown
+    /// option or a missing value prints an error to stderr and exits 2.
+    /// `--long value`, `--long=value`, `-s value` and `-s=value` are accepted;
+    /// flags may be repeated but the last occurrence wins.
+    pub fn parse(program: &str, args: &[String], specs: &[OptionSpec]) -> Self {
+        match Options::try_parse(args, specs) {
+            Ok(options) => options,
+            Err(ParseOutcome::Help) => print_help_and_exit(program, specs),
+            Err(ParseOutcome::Error(message)) => usage_error(program, specs, &message),
+        }
+    }
+
+    /// Pure parser core: returns the parsed options or the desired outcome
+    /// (`Help` or a usage `Error`).  Kept separate from [`Options::parse`] so
+    /// the behaviour can be unit tested without exiting the process.
+    pub fn try_parse(args: &[String], specs: &[OptionSpec]) -> Result<Self, ParseOutcome> {
         let mut options = Options::default();
         let mut index = 0;
         while index < args.len() {
@@ -35,15 +88,16 @@ impl Options {
             if arg == "--" {
                 options.positional.extend_from_slice(&args[index + 1..]);
                 break;
+            } else if arg == "--help" || arg == "-h" {
+                return Err(ParseOutcome::Help);
             } else if let Some(rest) = arg.strip_prefix("--") {
                 let (name, inline_value) = match rest.split_once('=') {
                     Some((name, value)) => (name, Some(value.to_string())),
                     None => (rest, None),
                 };
-                if let Some((long, _, takes_value)) = specs.iter().find(|(long, _, _)| *long == name) {
-                    options.apply(long, *takes_value, inline_value, args, &mut index);
-                } else {
-                    eprintln!("unknown option: --{name}");
+                match specs.iter().find(|s| s.long == name) {
+                    Some(found) => options.apply(found, inline_value, args, &mut index)?,
+                    None => return Err(ParseOutcome::Error(format!("no such option: --{name}"))),
                 }
             } else if let Some(rest) = arg.strip_prefix('-') {
                 if rest.is_empty() {
@@ -53,12 +107,9 @@ impl Options {
                         Some((name, value)) => (name, Some(value.to_string())),
                         None => (rest, None),
                     };
-                    if let Some((long, _, takes_value)) =
-                        specs.iter().find(|(_, short, _)| *short == name)
-                    {
-                        options.apply(long, *takes_value, inline_value, args, &mut index);
-                    } else {
-                        eprintln!("unknown option: -{name}");
+                    match specs.iter().find(|s| s.short == name) {
+                        Some(found) => options.apply(found, inline_value, args, &mut index)?,
+                        None => return Err(ParseOutcome::Error(format!("no such option: -{name}"))),
                     }
                 }
             } else {
@@ -66,33 +117,36 @@ impl Options {
             }
             index += 1;
         }
-        options
+        Ok(options)
     }
 
     fn apply(
         &mut self,
-        long: &str,
-        takes_value: bool,
+        found: &OptionSpec,
         inline_value: Option<String>,
         args: &[String],
         index: &mut usize,
-    ) {
-        if takes_value {
-            let value = inline_value.or_else(|| {
-                if *index + 1 < args.len() {
-                    *index += 1;
-                    Some(args[*index].clone())
-                } else {
-                    eprintln!("missing value for option --{long}");
-                    None
+    ) -> Result<(), ParseOutcome> {
+        if found.takes_value {
+            let value = match inline_value {
+                Some(value) => value,
+                None => {
+                    if *index + 1 < args.len() {
+                        *index += 1;
+                        args[*index].clone()
+                    } else {
+                        return Err(ParseOutcome::Error(format!(
+                            "--{} option requires an argument",
+                            found.long
+                        )));
+                    }
                 }
-            });
-            if let Some(value) = value {
-                self.values.insert(long.to_string(), value);
-            }
+            };
+            self.values.insert(found.long.to_string(), value);
         } else {
-            self.flags.insert(long.to_string(), true);
+            self.flags.insert(found.long.to_string(), true);
         }
+        Ok(())
     }
 
     /// A string option value (empty when unset).
@@ -116,6 +170,63 @@ impl Options {
     pub fn flag(&self, name: &str) -> bool {
         self.flags.get(name).copied().unwrap_or(false)
     }
+}
+
+/// Render the `optparse`-style help text for `program`.
+///
+/// Layout matches Python's `optparse`:
+///
+/// ```text
+/// Usage: <program> [options]
+///
+/// Options:
+///   -h, --help            show this help message and exit
+///   --startdate=STARTDATE
+///                         start date for data retrieval
+/// ```
+pub fn render_help(program: &str, specs: &[OptionSpec]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Usage: {program} [options]\n\nOptions:\n"));
+
+    // The implicit help option, like `optparse.OptionParser`.
+    let mut entries: Vec<(String, String)> = vec![(
+        "-h, --help".to_string(),
+        "show this help message and exit".to_string(),
+    )];
+    for s in specs {
+        let flag = if s.takes_value {
+            let metavar = s.long.to_uppercase().replace('-', "_");
+            if s.short.is_empty() {
+                format!("--{}={}", s.long, metavar)
+            } else {
+                format!("-{}, --{}={}", s.short, s.long, metavar)
+            }
+        } else if s.short.is_empty() {
+            format!("--{}", s.long)
+        } else {
+            format!("-{}, --{}", s.short, s.long)
+        };
+        entries.push((flag, s.help.to_string()));
+    }
+
+    let width = entries.iter().map(|(flag, _)| flag.len()).max().unwrap_or(0);
+    for (flag, help) in entries {
+        out.push_str(&format!("  {flag:<width$}  {help}\n", width = width));
+    }
+    out
+}
+
+/// Print the help text and exit 0 (`optparse -h`).
+fn print_help_and_exit(program: &str, specs: &[OptionSpec]) -> ! {
+    print!("{}", render_help(program, specs));
+    std::process::exit(0)
+}
+
+/// Print an `optparse`-style usage error to stderr and exit 2.
+fn usage_error(program: &str, specs: &[OptionSpec], message: &str) -> ! {
+    eprint!("{}", render_help(program, specs));
+    eprintln!("{program}: error: {message}");
+    std::process::exit(USAGE_ERROR_EXIT_CODE)
 }
 
 /// Build a Tokio runtime and connect a [`PostgresExecutor`] to the configured
@@ -311,19 +422,21 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
-    const SPECS: &[(&str, &str, bool)] = &[
-        ("startdate", "", true),
-        ("verbose", "v", false),
-        ("debug", "d", false),
-        ("precision", "", true),
+    const SPECS: &[OptionSpec] = &[
+        spec("startdate", "", true, "start date for data retrieval"),
+        spec("verbose", "v", false, "verbose output"),
+        spec("debug", "d", false, "debug output"),
+        spec("precision", "", true, "precision of coordinates"),
     ];
+
+    /// Parse without exiting the process (test helper).
+    fn parse(items: &[&str]) -> Options {
+        Options::try_parse(&args(items), SPECS).expect("parse ok")
+    }
 
     #[test]
     fn parses_long_and_short_options() {
-        let options = Options::parse(
-            &args(&["--startdate", "20250101", "-v", "--precision=2"]),
-            SPECS,
-        );
+        let options = parse(&["--startdate", "20250101", "-v", "--precision=2"]);
         assert_eq!(options.value("startdate"), Some("20250101"));
         assert!(options.flag("verbose"));
         assert_eq!(options.parse_or("precision", 4), 2);
@@ -332,15 +445,72 @@ mod tests {
 
     #[test]
     fn parses_short_equals() {
-        let options = Options::parse(&args(&["-d"]), SPECS);
+        let options = parse(&["-d"]);
         assert!(options.flag("debug"));
     }
 
     #[test]
     fn defaults_are_used_when_absent() {
-        let options = Options::parse(&args(&[]), SPECS);
+        let options = parse(&[]);
         assert_eq!(options.parse_or("precision", 4), 4);
         assert_eq!(options.value("startdate"), None);
+    }
+
+    #[test]
+    fn help_flag_is_reported_for_h_and_long_help() {
+        assert_eq!(
+            Options::try_parse(&args(&["-h"]), SPECS).unwrap_err(),
+            ParseOutcome::Help
+        );
+        assert_eq!(
+            Options::try_parse(&args(&["--help"]), SPECS).unwrap_err(),
+            ParseOutcome::Help
+        );
+        // `-h` wins even when combined with other options.
+        assert_eq!(
+            Options::try_parse(&args(&["--startdate", "20250101", "--help"]), SPECS).unwrap_err(),
+            ParseOutcome::Help
+        );
+    }
+
+    #[test]
+    fn unknown_option_is_an_error() {
+        assert_eq!(
+            Options::try_parse(&args(&["--bogus"]), SPECS).unwrap_err(),
+            ParseOutcome::Error("no such option: --bogus".to_string())
+        );
+        assert_eq!(
+            Options::try_parse(&args(&["-z"]), SPECS).unwrap_err(),
+            ParseOutcome::Error("no such option: -z".to_string())
+        );
+    }
+
+    #[test]
+    fn missing_value_is_an_error() {
+        assert_eq!(
+            Options::try_parse(&args(&["--startdate"]), SPECS).unwrap_err(),
+            ParseOutcome::Error("--startdate option requires an argument".to_string())
+        );
+    }
+
+    #[test]
+    fn usage_error_exit_code_matches_optparse() {
+        assert_eq!(USAGE_ERROR_EXIT_CODE, 2);
+    }
+
+    #[test]
+    fn render_help_matches_optparse_layout() {
+        let help = render_help("bo-db", SPECS);
+        assert!(help.starts_with("Usage: bo-db [options]\n\nOptions:\n"));
+        // The implicit help entry is listed first, like optparse.
+        assert!(help.contains("-h, --help"));
+        assert!(help.contains("show this help message and exit"));
+        // Value options render as `--name=METAVAR`.
+        assert!(help.contains("--startdate=STARTDATE"));
+        assert!(help.contains("start date for data retrieval"));
+        // Short flags render as `-v, --verbose`.
+        assert!(help.contains("-d, --debug"));
+        assert!(help.contains("precision of coordinates"));
     }
 
     #[test]

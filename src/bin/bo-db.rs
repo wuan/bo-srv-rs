@@ -15,7 +15,7 @@ use bo_service::config::Config;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let options = Options::parse(&args, db_tool::SPECS);
+    let options = Options::parse("bo-db", &args, db_tool::SPECS);
     let db_options = db_tool::DbOptions::from_options(&options);
 
     // Validate the time zone before touching the database, like

@@ -20,7 +20,7 @@ use bo_service::postgres::PostgresExecutor;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let options = Options::parse(&args, import_websocket_tool::SPECS);
+    let options = Options::parse("bo-import-websocket", &args, import_websocket_tool::SPECS);
     let ws_options = import_websocket_tool::WebsocketOptions::from_options(&options);
     init_logging(ws_options.verbose, ws_options.debug);
 

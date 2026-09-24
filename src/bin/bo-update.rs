@@ -14,7 +14,7 @@ use bo_service::config::Config;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let options = Options::parse(&args, update_tool::SPECS);
+    let options = Options::parse("bo-update", &args, update_tool::SPECS);
     let update_options = update_tool::UpdateOptions::from_options(&options);
     init_logging(update_options.verbose, update_options.debug);
 
