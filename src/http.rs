@@ -20,6 +20,7 @@
 //! unsupported methods get `405 Method Not Allowed`.
 
 use std::io;
+use std::io::Write;
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -33,6 +34,9 @@ use crate::transport::{log_access, request_from_headers};
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 /// Maximum accepted request body (the strike data can be sizable).
 const MAX_BODY_BYTES: usize = 256 * 1024 * 1024;
+/// Below this uncompressed size the service skips gzip
+/// (`txjsonrpc_ng.web.render.Renderer.handle_compression`).
+pub const COMPRESSION_THRESHOLD: usize = 1000;
 
 /// A parsed HTTP request head plus its body.
 #[derive(Debug, Clone)]
@@ -194,20 +198,50 @@ fn wants_keep_alive(req: &HttpRequest) -> bool {
     }
 }
 
+/// Gzip-compress a response body (`txjsonrpc_ng.web.render` uses
+/// `gzip.GzipFile`, i.e. the gzip container, not raw deflate).
+fn gzip_encode(body: &[u8]) -> Option<Vec<u8>> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(body).ok()?;
+    encoder.finish().ok()
+}
+
+/// Apply the response compression policy and return `(content_encoding, body)`:
+/// gzip when the client advertised it (and was not downgraded by
+/// `fix_bad_accept_header`) and the body is at least
+/// [`COMPRESSION_THRESHOLD`] bytes, identity otherwise.
+pub(crate) fn encode_body(mut payload: Vec<u8>, accepts_gzip: bool) -> (Option<&'static str>, Vec<u8>) {
+    if accepts_gzip && payload.len() >= COMPRESSION_THRESHOLD {
+        if let Some(compressed) = gzip_encode(&payload) {
+            payload = compressed;
+            return (Some("gzip"), payload);
+        }
+    }
+    (None, payload)
+}
+
 /// Build the HTTP response bytes for a JSON-RPC body.
 fn build_response(
     status: &str,
     content_type: &str,
     body: &[u8],
+    content_encoding: Option<&str>,
     keep_alive: bool,
     include_body: bool,
 ) -> Vec<u8> {
     let connection = if keep_alive { "keep-alive" } else { "close" };
+    let encoding_header = content_encoding
+        .map(|encoding| format!("Content-Encoding: {encoding}\r\n"))
+        .unwrap_or_default();
     let mut out = Vec::with_capacity(body.len() + 128);
     out.extend_from_slice(
         format!(
             "HTTP/1.1 {status}\r\n\
              Content-Type: {content_type}\r\n\
+             {encoding_header}\
              Content-Length: {}\r\n\
              Connection: {connection}\r\n\r\n",
             body.len()
@@ -239,6 +273,7 @@ async fn handle_connection<M: Metrics>(stream: TcpStream, service: Arc<Service<M
                         "400 Bad Request",
                         "application/json",
                         body.as_bytes(),
+                        None,
                         false,
                         true,
                     ))
@@ -257,6 +292,7 @@ async fn handle_connection<M: Metrics>(stream: TcpStream, service: Arc<Service<M
                     "405 Method Not Allowed",
                     "application/json",
                     b"{\"error\":\"method not allowed\"}",
+                    None,
                     keep_alive,
                     request.method != "HEAD",
                 ))
@@ -294,14 +330,32 @@ async fn handle_connection<M: Metrics>(stream: TcpStream, service: Arc<Service<M
             _ => ("application/json", raw_body.into_bytes()),
         };
 
+        // Compression is decided after dispatch so the handler's
+        // `fix_bad_accept_header` (old Android clients) is already applied.
+        let (content_encoding, payload) = encode_body(payload, service_request.accepts_gzip());
+
         if request.method == "HEAD" {
             // Headers only, but advertise the real body length.
             write_half
-                .write_all(&build_response("200 OK", content_type, &payload, keep_alive, false))
+                .write_all(&build_response(
+                    "200 OK",
+                    content_type,
+                    &payload,
+                    content_encoding,
+                    keep_alive,
+                    false,
+                ))
                 .await?;
         } else {
             write_half
-                .write_all(&build_response("200 OK", content_type, &payload, keep_alive, true))
+                .write_all(&build_response(
+                    "200 OK",
+                    content_type,
+                    &payload,
+                    content_encoding,
+                    keep_alive,
+                    true,
+                ))
                 .await?;
         }
         write_half.flush().await?;
@@ -372,10 +426,11 @@ mod tests {
     #[test]
     fn response_has_valid_http_status_and_headers() {
         let body = br#"{"jsonrpc":"2.0","id":1,"result":null}"#;
-        let response = build_response("200 OK", "application/json", body, true, true);
+        let response = build_response("200 OK", "application/json", body, None, true, true);
         let text = String::from_utf8(response).unwrap();
         assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text}");
         assert!(text.contains("Content-Type: application/json\r\n"));
+        assert!(!text.contains("Content-Encoding"));
         assert!(text.contains(&format!("Content-Length: {}\r\n", body.len())));
         assert!(text.contains("Connection: keep-alive\r\n"));
         assert!(text.ends_with("result\":null}"));
@@ -384,9 +439,52 @@ mod tests {
     #[test]
     fn head_response_omits_body_but_keeps_length() {
         let body = b"12345";
-        let response = build_response("200 OK", "application/json", body, true, false);
+        let response = build_response("200 OK", "application/json", body, None, true, false);
         let text = String::from_utf8(response).unwrap();
         assert!(text.contains("Content-Length: 5\r\n"));
         assert!(text.ends_with("\r\n\r\n"));
+    }
+
+    /// gzip is applied only when requested and the body is large enough
+    /// (`Renderer.handle_compression`).
+    #[test]
+    fn encode_body_applies_gzip_only_when_requested_and_large() {
+        let large = vec![b'x'; COMPRESSION_THRESHOLD];
+        let (encoding, body) = encode_body(large.clone(), true);
+        assert_eq!(encoding, Some("gzip"));
+        assert!(body.len() < large.len());
+
+        // Small bodies stay uncompressed even when gzip is accepted.
+        let (encoding, body) = encode_body(b"{}".to_vec(), true);
+        assert_eq!(encoding, None);
+        assert_eq!(body, b"{}");
+
+        // Clients that did not advertise gzip never get it.
+        let (encoding, body) = encode_body(large.clone(), false);
+        assert_eq!(encoding, None);
+        assert_eq!(body, large);
+    }
+
+    /// The compressed payload must round-trip back to the original bytes.
+    #[test]
+    fn gzip_payload_round_trips() {
+        let large = vec![b'a'; 4096];
+        let (encoding, compressed) = encode_body(large.clone(), true);
+        assert_eq!(encoding, Some("gzip"));
+
+        let mut decoder = flate2::read::GzDecoder::new(compressed.as_slice());
+        let mut decoded = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+        assert_eq!(decoded, large);
+    }
+
+    /// `Content-Encoding: gzip` is advertised when the body is compressed.
+    #[test]
+    fn response_declares_content_encoding_when_compressed() {
+        let body = b"compressed";
+        let response = build_response("200 OK", "application/json", body, Some("gzip"), true, true);
+        let text = String::from_utf8(response).unwrap();
+        assert!(text.contains("Content-Encoding: gzip\r\n"), "{text}");
+        assert!(text.contains(&format!("Content-Length: {}\r\n", body.len())));
     }
 }
