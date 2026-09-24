@@ -60,10 +60,10 @@ pub enum DbError {
 impl std::fmt::Display for DbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            // Include the full causal chain: tokio-postgres displays server
-            // errors as the bare "db error", so the useful message only
-            // appears via `source()`.
-            DbError::Executor(e) => write!(f, "{}", crate::cli::format_error_chain(e.as_ref())),
+            // The chain is expanded once by `cli::format_error_chain` (which
+            // walks `source()`); keep this Display concise so the error is not
+            // rendered twice with a nested "db error".
+            DbError::Executor(e) => write!(f, "{e}"),
             DbError::Column(name) => write!(f, "invalid or missing column: {name}"),
         }
     }
@@ -118,8 +118,11 @@ impl<'a> StrikeDb<'a> {
 
         for (index, strike) in strikes.iter().enumerate() {
             let base = index * 9;
+            // `ST_MakePoint` is overloaded for float8/float4, so cast the
+            // coordinates explicitly (the remaining placeholders are typed by
+            // the INSERT column list).
             placeholders.push(format!(
-                "(${}, ${}, ST_MakePoint(${}, ${}), ${}, ${}, ${}, ${}, ${})",
+                "(${}, ${}, ST_MakePoint(${}::double precision, ${}::double precision), ${}, ${}, ${}, ${}, ${})",
                 base + 1,
                 base + 2,
                 base + 3,
@@ -176,7 +179,7 @@ impl<'a> StrikeDb<'a> {
     pub fn get_latest_time(&self, region: Option<i64>) -> Result<Option<Timestamp>, DbError> {
         let sql = match region {
             Some(_) => {
-                "SELECT \"timestamp\", nanoseconds FROM strikes WHERE region=$1 \
+                "SELECT \"timestamp\", nanoseconds FROM strikes WHERE region=$1::smallint \
                  ORDER BY \"timestamp\" DESC, nanoseconds DESC LIMIT 1"
             }
             None => {
@@ -370,8 +373,8 @@ mod tests {
         assert_eq!(executions.len(), 1);
         let (sql, params) = &executions[0];
         assert!(sql.starts_with("INSERT INTO strikes"));
-        assert!(sql.contains("ST_MakePoint($3, $4)"));
-        assert!(sql.contains("ST_MakePoint($12, $13)"));
+        assert!(sql.contains("ST_MakePoint($3::double precision, $4::double precision)"));
+        assert!(sql.contains("ST_MakePoint($12::double precision, $13::double precision)"));
         assert_eq!(params.len(), 18);
         assert!(matches!(params[0], Param::Timestamp(_)));
         assert_eq!(params[1], Param::Int(123)); // nanoseconds

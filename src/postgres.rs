@@ -146,7 +146,12 @@ fn convert_row(row: &PgRow) -> Result<Row, Box<dyn Error + Sync + Send>> {
     let mut values = Vec::with_capacity(row.len());
     for i in 0..row.len() {
         let ty = row.columns()[i].type_();
-        let value = if *ty == Type::INT2 || *ty == Type::INT4 {
+        // Read each integer width with its own Rust type: tokio-postgres
+        // rejects `i32` for an `int2` column ("cannot convert between the Rust
+        // type `i32` and the Postgres type `int2`").
+        let value = if *ty == Type::INT2 {
+            Value::Int(i64::from(row.try_get::<_, i16>(i)?))
+        } else if *ty == Type::INT4 {
             Value::Int(i64::from(row.try_get::<_, i32>(i)?))
         } else if *ty == Type::INT8 {
             Value::Int(row.try_get::<_, i64>(i)?)
