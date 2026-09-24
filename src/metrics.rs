@@ -25,6 +25,7 @@ pub mod name {
     pub const DATA_AREA: &str = "data_area";
     pub const SIZE: &str = "size";
     pub const POOL_WAIT: &str = "pool_wait";
+    pub const TOTAL: &str = "total";
 }
 
 /// `StatsDMetrics.name`: join the metric components with `.`.
@@ -125,6 +126,18 @@ pub trait Metrics: Send + Sync {
         let millis = ((wait_seconds * 1000.0) as i64).max(1) as u64;
         self.timing(&metric_name(&[name::DB, name::POOL_WAIT]), millis);
     }
+
+    /// `TimingState.log_timing('<grid>.total')`: report how long a grid
+    /// request took from the start of the producer to the fully built
+    /// response, as a timing in milliseconds clamped to at least 1ms (the
+    /// Python `get_milliseconds`).
+    ///
+    /// `grid` is the grid metric name: `strikes_grid` for the region and local
+    /// flavours, `global_strikes_grid` for the global one.
+    fn for_grid_total(&self, grid: &str, elapsed_seconds: f64) {
+        let millis = ((elapsed_seconds * 1000.0) as i64).max(1) as u64;
+        self.timing(&metric_name(&[grid, name::TOTAL]), millis);
+    }
 }
 
 /// Metrics that drop everything.
@@ -170,6 +183,10 @@ impl Metrics for std::sync::Arc<dyn Metrics> {
 
     fn for_db_pool_wait(&self, wait_seconds: f64) {
         (**self).for_db_pool_wait(wait_seconds);
+    }
+
+    fn for_grid_total(&self, grid: &str, elapsed_seconds: f64) {
+        (**self).for_grid_total(grid, elapsed_seconds);
     }
 }
 
@@ -329,6 +346,7 @@ mod tests {
         metrics.for_local_strikes(60, 5, 0.0);
         metrics.for_histogram(0.0, 0);
         metrics.for_db_pool_wait(0.01);
+        metrics.for_grid_total(name::STRIKES_GRID, 0.01);
     }
 
     #[test]
@@ -417,6 +435,20 @@ mod tests {
             vec![
                 "db.pool_wait:12|ms".to_string(),
                 "db.pool_wait:1|ms".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn for_grid_total_reports_milliseconds_and_never_zero() {
+        let metrics = RecordingMetrics::new();
+        metrics.for_grid_total(name::STRIKES_GRID, 0.0175);
+        metrics.for_grid_total(name::GLOBAL_STRIKES_GRID, 0.0);
+        assert_eq!(
+            metrics.lines(),
+            vec![
+                "strikes_grid.total:17|ms".to_string(),
+                "global_strikes_grid.total:1|ms".to_string(),
             ]
         );
     }

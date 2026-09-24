@@ -174,7 +174,9 @@ plain StatsD lines (`<name>:<value>|<type>`), e.g.:
 org.blitzortung.service.strikes_grid.total_count:1|c
 org.blitzortung.service.strikes_grid.total_count.<region>:1|c
 org.blitzortung.service.strikes_grid.cache_hits:0.5|g
+org.blitzortung.service.strikes_grid.total:17|ms
 org.blitzortung.service.global_strikes_grid.total_count:1|c
+org.blitzortung.service.global_strikes_grid.total:23|ms
 org.blitzortung.service.local_strikes_grid.data_area.<area>:1|c
 org.blitzortung.service.histogram.cache_hits:0.75|g
 org.blitzortung.service.histogram.size:4|g
@@ -185,11 +187,15 @@ The metric names and counts match the Python implementation exactly:
 
 | Handler | Metrics |
 | --- | --- |
-| `get_strikes_grid` | `strikes_grid.total_count` (+ `.<region>`), `strikes_grid.cache_hits` gauge; at a 10-minute length also `strikes_grid.bg_count` (+ `.<region>`) |
-| `get_global_strikes_grid` | `strikes_grid.total_count`, `global_strikes_grid.total_count`, `global_strikes_grid.cache_hits` gauge; at 10 minutes also both `bg_count`s |
-| `get_local_strikes_grid` | `strikes_grid.total_count`, `local_strikes_grid.total_count`, `local_strikes_grid.data_area.<area>`, `local_strikes_grid.cache_hits` gauge; at 10 minutes also both `bg_count`s |
+| `get_strikes_grid` | `strikes_grid.total_count` (+ `.<region>`), `strikes_grid.cache_hits` gauge, `strikes_grid.total` timing (>= 1ms); at a 10-minute length also `strikes_grid.bg_count` (+ `.<region>`) |
+| `get_global_strikes_grid` | `strikes_grid.total_count`, `global_strikes_grid.total_count`, `global_strikes_grid.cache_hits` gauge, `global_strikes_grid.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
+| `get_local_strikes_grid` | `strikes_grid.total_count`, `local_strikes_grid.total_count`, `local_strikes_grid.data_area.<area>`, `local_strikes_grid.cache_hits` gauge, `strikes_grid.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
 | histogram cache | `histogram.cache_hits` gauge, `histogram.size` gauge |
 | DB pool wait | `db.pool_wait` timing in milliseconds (at least `1`) |
+
+The `*_total` timings measure how long a cache-miss grid producer took from
+building its query to the fully assembled response (a cache hit records no
+timing, matching `StrikeGridState.log_timing`/`GlobalStrikeGridQuery`).
 
 StatsD is fire-and-forget: if the socket cannot be created the service logs a
 warning and continues with metrics disabled, and a missing/failing daemon never

@@ -252,6 +252,7 @@ impl<M: Metrics> Service<M> {
         region: i64,
         count_threshold: i64,
     ) -> Result<Value, ServiceError> {
+        let started = std::time::Instant::now();
         let grid = match GridFactory::for_region(region as u32) {
             Some(factory) => factory.get_for(grid_baselength as f64),
             None => GridFactory::global().get_for(grid_baselength as f64),
@@ -276,7 +277,11 @@ impl<M: Metrics> Service<M> {
                 }
             },
         )?;
-        Ok(Self::build_grid_response(grid_data, histogram, &grid, &time_interval))
+        let response = Self::build_grid_response(grid_data, histogram, &grid, &time_interval);
+        // `StrikeGridQuery.build_grid_response` records the total grid time
+        // once the response is fully built (a cache miss only).
+        self.metrics.for_grid_total(crate::metrics::name::STRIKES_GRID, started.elapsed().as_secs_f64());
+        Ok(response)
     }
 
     /// `get_global_strikes_grid` producer (cached inside `global_strikes_grid`).
@@ -287,6 +292,7 @@ impl<M: Metrics> Service<M> {
         minute_offset: i64,
         count_threshold: i64,
     ) -> Result<Value, ServiceError> {
+        let started = std::time::Instant::now();
         let grid = GridFactory::global().get_for(grid_baselength as f64);
         let time_interval = create_time_interval(minute_length, minute_offset);
         let (grid_data, histogram) = tokio::try_join!(
@@ -305,7 +311,11 @@ impl<M: Metrics> Service<M> {
                 }
             },
         )?;
-        Ok(Self::build_grid_response(grid_data, histogram, &grid, &time_interval))
+        let response = Self::build_grid_response(grid_data, histogram, &grid, &time_interval);
+        // `GlobalStrikeGridQuery.build_grid_response` records the total grid
+        // time once the response is fully built (a cache miss only).
+        self.metrics.for_grid_total(crate::metrics::name::GLOBAL_STRIKES_GRID, started.elapsed().as_secs_f64());
+        Ok(response)
     }
 
     /// `get_local_strikes_grid` producer (cached inside `local_strikes_grid`).
@@ -320,6 +330,7 @@ impl<M: Metrics> Service<M> {
         count_threshold: i64,
         data_area: i64,
     ) -> Result<Value, ServiceError> {
+        let started = std::time::Instant::now();
         let local_grid = LocalGrid {
             data_area,
             x,
@@ -343,7 +354,12 @@ impl<M: Metrics> Service<M> {
                 }
             },
         )?;
-        Ok(Self::build_grid_response(grid_data, histogram, &grid, &time_interval))
+        let response = Self::build_grid_response(grid_data, histogram, &grid, &time_interval);
+        // `StrikeGridQuery.build_grid_response` records the total grid time
+        // once the response is fully built (a cache miss only); local grids
+        // share the `strikes_grid` metric name.
+        self.metrics.for_grid_total(crate::metrics::name::STRIKES_GRID, started.elapsed().as_secs_f64());
+        Ok(response)
     }
 
     /// Run the grid SQL and shape the rows (`StrikeGridQuery.create` /
@@ -1253,13 +1269,15 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         assert_eq!(service.cache().strikes(0).get_size(), 1);
         assert!((service.cache().strikes(0).get_ratio() - 0.5).abs() < 1e-9);
         // metrics recorded after each call: the histogram of the (30-minute)
-        // grid query, then the three strikes-grid lines.
+        // grid query, the total timing of the cache-miss producer, then the
+        // three strikes-grid lines.
         let recorded = service.metrics.lines();
         assert_eq!(
             recorded,
             vec![
                 "histogram.cache_hits:0|g".to_string(),
                 "histogram.size:1|g".to_string(),
+                "strikes_grid.total:1|ms".to_string(),
                 "strikes_grid.total_count:1|c".to_string(),
                 "strikes_grid.total_count.1:1|c".to_string(),
                 "strikes_grid.cache_hits:0|g".to_string(),
@@ -1310,7 +1328,13 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
             ])],
         );
         mock.add_rows("-extract( epoch", vec![]);
-        let service = Service::new(Arc::new(mock));
+        let metrics = crate::metrics::RecordingMetrics::new();
+        let service: Service<crate::metrics::RecordingMetrics> = Service::with_parts(
+            Arc::new(mock),
+            ServiceCache::new(),
+            metrics,
+            HashSet::new(),
+        );
         let mut req = req_with("5.6.7.8");
         let response = service
             .jsonrpc_get_global_strikes_grid(
@@ -1331,6 +1355,18 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         assert_eq!(rows[0][0], json!(0));
         assert_eq!(rows[0][1], json!(-2));
         assert_eq!(rows[0][2], json!(4));
+        // the global producer records the global total timing
+        assert_eq!(
+            service.metrics.lines(),
+            vec![
+                "histogram.cache_hits:0|g".to_string(),
+                "histogram.size:1|g".to_string(),
+                "global_strikes_grid.total:1|ms".to_string(),
+                "strikes_grid.total_count:1|c".to_string(),
+                "global_strikes_grid.total_count:1|c".to_string(),
+                "global_strikes_grid.cache_hits:0|g".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1346,7 +1382,13 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
             ])],
         );
         mock.add_rows("-extract( epoch", vec![]);
-        let service = Service::new(Arc::new(mock));
+        let metrics = crate::metrics::RecordingMetrics::new();
+        let service: Service<crate::metrics::RecordingMetrics> = Service::with_parts(
+            Arc::new(mock),
+            ServiceCache::new(),
+            metrics,
+            HashSet::new(),
+        );
         let mut req = req_with("5.6.7.8");
         let response = service
             .jsonrpc_get_local_strikes_grid(
@@ -1368,6 +1410,20 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         let rows = obj["r"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][2], json!(4));
+        // the local producer shares the `strikes_grid` metric name, so it
+        // records `strikes_grid.total` as well.
+        assert_eq!(
+            service.metrics.lines(),
+            vec![
+                "histogram.cache_hits:0|g".to_string(),
+                "histogram.size:1|g".to_string(),
+                "strikes_grid.total:1|ms".to_string(),
+                "strikes_grid.total_count:1|c".to_string(),
+                "local_strikes_grid.total_count:1|c".to_string(),
+                "local_strikes_grid.data_area.5:1|c".to_string(),
+                "local_strikes_grid.cache_hits:0|g".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
