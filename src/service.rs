@@ -258,25 +258,18 @@ impl<M: Metrics> Service<M> {
             None => GridFactory::global().get_for(grid_baselength as f64),
         };
         let time_interval = create_time_interval(minute_length, minute_offset);
-        // The grid query and the histogram query are independent: run them
-        // concurrently and join before shaping the response.
-        let (grid_data, histogram) = tokio::try_join!(
-            self.run_grid_query(&grid, &time_interval, Some(region), count_threshold, false),
-            // `base.get_histogram`: empty below the histogram threshold.
-            async {
-                if minute_length > HISTOGRAM_MINUTE_THRESHOLD {
-                    self.get_histogram(
-                        &time_interval,
-                        None,
-                        Some(&grid),
-                        &histogram_cache_key(minute_length, minute_offset, Some(&grid)),
-                    )
-                    .await
-                } else {
-                    Ok(vec![])
-                }
-            },
-        )?;
+        let (grid_data, histogram) = self
+            .run_grid_with_histogram(
+                &grid,
+                &time_interval,
+                Some(region),
+                count_threshold,
+                false,
+                minute_length,
+                Some(&grid),
+                &histogram_cache_key(minute_length, minute_offset, Some(&grid)),
+            )
+            .await?;
         let response = Self::build_grid_response(grid_data, histogram, &grid, &time_interval);
         // `StrikeGridQuery.build_grid_response` records the total grid time
         // once the response is fully built (a cache miss only).
@@ -295,22 +288,18 @@ impl<M: Metrics> Service<M> {
         let started = std::time::Instant::now();
         let grid = GridFactory::global().get_for(grid_baselength as f64);
         let time_interval = create_time_interval(minute_length, minute_offset);
-        let (grid_data, histogram) = tokio::try_join!(
-            self.run_grid_query(&grid, &time_interval, None, count_threshold, true),
-            async {
-                if minute_length > HISTOGRAM_MINUTE_THRESHOLD {
-                    self.get_histogram(
-                        &time_interval,
-                        None,
-                        None,
-                        &histogram_cache_key(minute_length, minute_offset, None),
-                    )
-                    .await
-                } else {
-                    Ok(vec![])
-                }
-            },
-        )?;
+        let (grid_data, histogram) = self
+            .run_grid_with_histogram(
+                &grid,
+                &time_interval,
+                None,
+                count_threshold,
+                true,
+                minute_length,
+                None,
+                &histogram_cache_key(minute_length, minute_offset, None),
+            )
+            .await?;
         let response = Self::build_grid_response(grid_data, histogram, &grid, &time_interval);
         // `GlobalStrikeGridQuery.build_grid_response` records the total grid
         // time once the response is fully built (a cache miss only).
@@ -338,28 +327,55 @@ impl<M: Metrics> Service<M> {
         };
         let grid = local_grid.grid_factory().get_for(grid_baselength as f64);
         let time_interval = create_time_interval(minute_length, minute_offset);
-        let (grid_data, histogram) = tokio::try_join!(
-            self.run_grid_query(&grid, &time_interval, None, count_threshold, false),
-            async {
-                if minute_length > HISTOGRAM_MINUTE_THRESHOLD {
-                    self.get_histogram(
-                        &time_interval,
-                        None,
-                        Some(&grid),
-                        &histogram_cache_key(minute_length, minute_offset, Some(&grid)),
-                    )
-                    .await
-                } else {
-                    Ok(vec![])
-                }
-            },
-        )?;
+        let (grid_data, histogram) = self
+            .run_grid_with_histogram(
+                &grid,
+                &time_interval,
+                None,
+                count_threshold,
+                false,
+                minute_length,
+                Some(&grid),
+                &histogram_cache_key(minute_length, minute_offset, Some(&grid)),
+            )
+            .await?;
         let response = Self::build_grid_response(grid_data, histogram, &grid, &time_interval);
         // `StrikeGridQuery.build_grid_response` records the total grid time
         // once the response is fully built (a cache miss only); local grids
         // share the `strikes_grid` metric name.
         self.metrics.for_grid_total(crate::metrics::name::STRIKES_GRID, started.elapsed().as_secs_f64());
         Ok(response)
+    }
+
+    /// Run a grid query together with its histogram and return both results.
+    ///
+    /// The two queries are independent, so they are joined before the caller
+    /// shapes the response.  `base.get_histogram`: the histogram is empty
+    /// below [`HISTOGRAM_MINUTE_THRESHOLD`].  The histogram envelope and cache
+    /// key are passed in because the global grid has neither.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_grid_with_histogram(
+        &self,
+        grid: &Grid,
+        time_interval: &TimeInterval,
+        region: Option<i64>,
+        count_threshold: i64,
+        global: bool,
+        minute_length: i64,
+        histogram_envelope: Option<&Grid>,
+        histogram_key: &str,
+    ) -> Result<(Vec<Value>, Vec<Value>), ServiceError> {
+        tokio::try_join!(
+            self.run_grid_query(grid, time_interval, region, count_threshold, global),
+            async {
+                if minute_length > HISTOGRAM_MINUTE_THRESHOLD {
+                    self.get_histogram(time_interval, None, histogram_envelope, histogram_key)
+                        .await
+                } else {
+                    Ok(vec![])
+                }
+            },
+        )
     }
 
     /// Run the grid SQL and shape the rows (`StrikeGridQuery.create` /
