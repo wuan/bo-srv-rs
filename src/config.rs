@@ -16,6 +16,8 @@
 //! * `BO_DB_USER` (default `blitzortung`)
 //! * `BO_DB_PASSWORD` (default `""`)
 //! * `BO_DB_CONNECTION_COUNT` (default `3`)
+//! * `BO_BLITZORTUNG_USERNAME` (default `""`) — `[auth] username`
+//! * `BO_BLITZORTUNG_PASSWORD` (default `""`) — `[auth] password`
 
 /// Parsed service configuration.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +30,12 @@ pub struct Config {
     pub db_password: String,
     /// `Config.get_db_connection_count`, default 3 (the txpostgres default).
     pub db_connection_count: u32,
+    /// HTTP basic-auth username for the protected Blitzortung data feeds
+    /// (`Config.get_username`, `[auth] username`).
+    pub auth_username: String,
+    /// HTTP basic-auth password for the protected Blitzortung data feeds
+    /// (`Config.get_password`, `[auth] password`).
+    pub auth_password: String,
 }
 
 impl Default for Config {
@@ -40,6 +48,8 @@ impl Default for Config {
             db_user: "blitzortung".into(),
             db_password: String::new(),
             db_connection_count: 3,
+            auth_username: String::new(),
+            auth_password: String::new(),
         }
     }
 }
@@ -82,6 +92,16 @@ impl Config {
                         }
                     }
                 }
+                if let Some(section) = ini.get("auth") {
+                    config.auth_username = section
+                        .get("username")
+                        .cloned()
+                        .unwrap_or(config.auth_username);
+                    config.auth_password = section
+                        .get("password")
+                        .cloned()
+                        .unwrap_or(config.auth_password);
+                }
             }
         }
 
@@ -110,8 +130,24 @@ impl Config {
                 config.db_connection_count = count;
             }
         }
+        if let Some(v) = lookup("BO_BLITZORTUNG_USERNAME") {
+            config.auth_username = v;
+        }
+        if let Some(v) = lookup("BO_BLITZORTUNG_PASSWORD") {
+            config.auth_password = v;
+        }
 
         config
+    }
+
+    /// `Config.get_username`: the HTTP basic-auth username from `[auth]`.
+    pub fn username(&self) -> &str {
+        &self.auth_username
+    }
+
+    /// `Config.get_password`: the HTTP basic-auth password from `[auth]`.
+    pub fn password(&self) -> &str {
+        &self.auth_password
     }
 
     /// The PostgreSQL connection string used by tokio-postgres, built like
@@ -273,6 +309,47 @@ mod tests {
         std::env::set_current_dir(original).unwrap();
         assert_eq!(config.port, 6060);
         assert_eq!(config.db_host, "local");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ini_file_config_reads_auth_section() {
+        let dir = ini_dir("auth-ini");
+        let path = dir.join("config.ini");
+        std::fs::write(
+            &path,
+            "[db]\nhost = db.local\n[auth]\nusername = alice\npassword = s3cret\n",
+        )
+        .unwrap();
+
+        let config = Config::from_env_with(|k| {
+            if k == "BO_CONFIG" {
+                Some(path.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        });
+        assert_eq!(config.username(), "alice");
+        assert_eq!(config.password(), "s3cret");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn env_overrides_auth_section() {
+        let dir = ini_dir("auth-env");
+        let path = dir.join("config.ini");
+        std::fs::write(&path, "[auth]\nusername = alice\npassword = fromfile\n").unwrap();
+
+        let config = Config::from_env_with(|k| match k {
+            "BO_CONFIG" => Some(path.to_string_lossy().into_owned()),
+            "BO_BLITZORTUNG_USERNAME" => Some("bob".into()),
+            "BO_BLITZORTUNG_PASSWORD" => Some("fromenv".into()),
+            _ => None,
+        });
+        assert_eq!(config.username(), "bob");
+        assert_eq!(config.password(), "fromenv");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

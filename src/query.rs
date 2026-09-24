@@ -10,7 +10,82 @@
 use chrono::{DateTime, Utc};
 
 use crate::executor::Param;
-use crate::geom::Grid;
+use crate::geom::{Envelope, Grid};
+
+/// Region condition used by the strike select/grid queries
+/// (`query_builder.REGION_CONDITION`).
+pub const REGION_CONDITION: &str = "region = %(region)s";
+
+/// A query area (port of the shapely geometry argument accepted by
+/// `db.Strike.select(geometry=...)`).
+///
+/// The Python implementation always adds a bounding-box pre-filter
+/// (`ST_GeomFromWKB(envelope) && geog`) and additionally an `ST_Intersects`
+/// test when the geometry is not equal to its own envelope.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Area {
+    /// WKB of the geometry envelope, used for the `&& geog` pre-filter.
+    pub envelope_wkb: Vec<u8>,
+    /// WKB of the full geometry, used for `ST_Intersects` when the geometry is
+    /// not already its envelope.
+    pub geometry_wkb: Option<Vec<u8>>,
+}
+
+impl Area {
+    /// Build an area from an envelope (bounding-box only).
+    pub fn from_envelope(envelope: &Envelope) -> Self {
+        Area {
+            envelope_wkb: envelope.as_wkb_polygon(),
+            geometry_wkb: None,
+        }
+    }
+
+    /// Build an area from a full polygon (ring exterior + holes); the envelope
+    /// is derived from the exterior ring.
+    pub fn from_polygon(rings: &[Vec<[f64; 2]>]) -> Option<Self> {
+        let exterior = rings.first()?;
+        if exterior.is_empty() {
+            return None;
+        }
+        let mut x_min = f64::INFINITY;
+        let mut x_max = f64::NEG_INFINITY;
+        let mut y_min = f64::INFINITY;
+        let mut y_max = f64::NEG_INFINITY;
+        for p in exterior {
+            x_min = x_min.min(p[0]);
+            x_max = x_max.max(p[0]);
+            y_min = y_min.min(p[1]);
+            y_max = y_max.max(p[1]);
+        }
+        let envelope = Envelope::new(x_min, x_max, y_min, y_max);
+        // A ring is its own envelope when (ignoring the closing repeat) it is
+        // exactly the four envelope corners.
+        let mut corners: Vec<[f64; 2]> = exterior.clone();
+        if corners.len() > 1 && corners.first() == corners.last() {
+            corners.pop();
+        }
+        let expected_corners = [
+            [x_min, y_min],
+            [x_min, y_max],
+            [x_max, y_min],
+            [x_max, y_max],
+        ];
+        let is_envelope = rings.len() == 1
+            && corners.len() == 4
+            && corners.iter().all(|p| expected_corners.contains(p))
+            && expected_corners
+                .iter()
+                .all(|corner| corners.iter().any(|p| p == corner));
+        Some(Area {
+            envelope_wkb: envelope.as_wkb_polygon(),
+            geometry_wkb: if is_envelope {
+                None
+            } else {
+                Some(crate::wkb::polygon(rings))
+            },
+        })
+    }
+}
 
 /// Time interval (equivalent of `db.query.TimeInterval`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -233,6 +308,89 @@ fn add_time_interval(q: Query, time_interval: &TimeInterval) -> Query {
         .condition("\"timestamp\" < %(end_time)s")
         .param("end_time", Param::Timestamp(time_interval.end));
     qq
+}
+
+/// `query.Query.add_geometry`: bounding-box pre-filter plus an `ST_Intersects`
+/// condition when the geometry is not already its own envelope.
+fn add_geometry(q: Query, area: &Area) -> Query {
+    let mut qq = q
+        .condition("ST_GeomFromWKB(%(envelope)s, %(srid)s) && geog")
+        .param("envelope", Param::Bytea(area.envelope_wkb.clone()));
+    if let Some(geometry) = &area.geometry_wkb {
+        qq = qq
+            .condition(
+                "ST_Intersects(ST_GeomFromWKB(%(geometry)s, %(srid)s), \
+                 ST_Transform(geog::geometry, %(srid)s))",
+            )
+            .param("geometry", Param::Bytea(geometry.clone()));
+    }
+    qq
+}
+
+/// Add the time interval, optional region and optional geometry conditions to
+/// a strike select query.
+fn add_select_conditions(
+    q: Query,
+    time_interval: &TimeInterval,
+    area: Option<&Area>,
+    region: Option<i64>,
+) -> Query {
+    let mut qq = add_time_interval(q, time_interval);
+    if let Some(region) = region {
+        qq = qq
+            .condition(REGION_CONDITION)
+            .param("region", Param::Int(region));
+    }
+    if let Some(area) = area {
+        qq = add_geometry(qq, area);
+    }
+    qq
+}
+
+/// `blitzortung.db.query_builder.Strike.select_query`: select columns, time
+/// interval, optional region/geometry, `ORDER BY id`.
+pub fn select_query(
+    time_interval: &TimeInterval,
+    area: Option<&Area>,
+    region: Option<i64>,
+    srid: i64,
+) -> Query {
+    let q = Query::new("strikes")
+        .set_columns(&[
+            "id",
+            "\"timestamp\"",
+            "nanoseconds",
+            "ST_X(ST_Transform(geog::geometry, %(srid)s)) AS x",
+            "ST_Y(ST_Transform(geog::geometry, %(srid)s)) AS y",
+            "altitude",
+            "amplitude",
+            "error2d",
+            "stationcount",
+        ])
+        .param("srid", Param::Int(srid));
+    let q = add_select_conditions(q, time_interval, area, region);
+    q.order_by("id", false)
+}
+
+/// `blitzortung.db.query_builder.Strike.select_key_query`: the fields needed
+/// to identify a strike (`"timestamp", nanoseconds, x, y, error2d`), used by
+/// `bo-update` for de-duplication.
+pub fn select_key_query(
+    time_interval: &TimeInterval,
+    area: Option<&Area>,
+    region: Option<i64>,
+    srid: i64,
+) -> Query {
+    let q = Query::new("strikes")
+        .set_columns(&[
+            "\"timestamp\"",
+            "nanoseconds",
+            "ST_X(ST_Transform(geog::geometry, %(srid)s)) AS x",
+            "ST_Y(ST_Transform(geog::geometry, %(srid)s)) AS y",
+            "error2d",
+        ])
+        .param("srid", Param::Int(srid));
+    add_select_conditions(q, time_interval, area, region)
 }
 
 /// `blitzortung.db.query_builder.Strike.select_query` as used by the
@@ -524,6 +682,89 @@ mod tests {
         // region is the tenth distinct parameter
         assert_eq!(sql.matches("$10").count(), 1);
         assert_eq!(q.parameters().len(), 10);
+    }
+
+    #[test]
+    fn select_query_matches_python() {
+        let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
+        let q = select_query(&interval, None, None, 4326);
+        let expected = "SELECT id, \"timestamp\", nanoseconds, \
+             ST_X(ST_Transform(geog::geometry, %(srid)s)) AS x, \
+             ST_Y(ST_Transform(geog::geometry, %(srid)s)) AS y, \
+             altitude, amplitude, error2d, stationcount \
+             FROM strikes WHERE \"timestamp\" >= %(start_time)s AND \"timestamp\" < %(end_time)s \
+             ORDER BY id";
+        assert_eq!(q.to_sql(), expected);
+    }
+
+    #[test]
+    fn select_key_query_matches_python() {
+        let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
+        let q = select_key_query(&interval, None, None, 4326);
+        let expected = "SELECT \"timestamp\", nanoseconds, \
+             ST_X(ST_Transform(geog::geometry, %(srid)s)) AS x, \
+             ST_Y(ST_Transform(geog::geometry, %(srid)s)) AS y, error2d \
+             FROM strikes WHERE \"timestamp\" >= %(start_time)s AND \"timestamp\" < %(end_time)s";
+        assert_eq!(q.to_sql(), expected);
+        assert_eq!(q.parameters().len(), 3);
+    }
+
+    #[test]
+    fn select_key_query_with_region() {
+        let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
+        let q = select_key_query(&interval, None, Some(7), 4326);
+        assert!(q.to_sql().contains("region = %(region)s"));
+        assert!(matches!(q.parameters().last(), Some(Param::Int(7))));
+    }
+
+    #[test]
+    fn select_query_with_envelope_area_adds_bbox_only() {
+        let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
+        let area = Area::from_envelope(&Envelope::new(10.0, 12.0, 50.0, 52.0));
+        let q = select_query(&interval, Some(&area), None, 4326);
+        let sql = q.to_sql();
+        assert!(sql.contains("ST_GeomFromWKB(%(envelope)s, %(srid)s) && geog"));
+        assert!(!sql.contains("ST_Intersects"));
+        assert!(q.parameters().iter().any(|p| matches!(p, Param::Bytea(_))));
+    }
+
+    #[test]
+    fn select_query_with_polygon_area_adds_intersects() {
+        let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
+        let area = Area::from_polygon(&[vec![
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 2.0],
+            [0.0, 0.0],
+        ]])
+        .unwrap();
+        let q = select_query(&interval, Some(&area), None, 4326);
+        let sql = q.to_sql();
+        assert!(sql.contains("ST_Intersects(ST_GeomFromWKB(%(geometry)s"));
+        // two bytea params: envelope and geometry
+        let bytea = q
+            .parameters()
+            .iter()
+            .filter(|p| matches!(p, Param::Bytea(_)))
+            .count();
+        assert_eq!(bytea, 2);
+    }
+
+    #[test]
+    fn select_query_area_matching_envelope_skips_intersects() {
+        let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
+        let area = Area::from_polygon(&[vec![
+            [0.0, 0.0],
+            [0.0, 2.0],
+            [2.0, 2.0],
+            [2.0, 0.0],
+            [0.0, 0.0],
+        ]])
+        .unwrap();
+        assert!(area.geometry_wkb.is_none());
+        let q = select_query(&interval, Some(&area), None, 4326);
+        assert!(!q.to_sql().contains("ST_Intersects"));
     }
 
     #[test]

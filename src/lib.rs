@@ -24,7 +24,10 @@
 
 pub mod cache;
 pub mod metrics;
+pub mod builder;
 pub mod config;
+pub mod data;
+pub mod db;
 pub mod executor;
 pub mod geom;
 pub mod jsonrpc;

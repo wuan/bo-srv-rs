@@ -131,13 +131,24 @@ impl PostgresExecutor {
     }
 }
 
-impl QueryExecutor for PostgresExecutor {
-    fn query(&self, sql: &str, params: &[Param]) -> Result<Vec<Row>, Box<dyn std::error::Error + Send + Sync>> {
-        let pg_params: Vec<PgParam<'_>> = params.iter().map(PgParam::from_param).collect();
-        let refs: Vec<&(dyn ToSql + Sync)> = pg_params
+impl PostgresExecutor {
+    /// Bind the crate parameters into tokio-postgres `ToSql` references.
+    fn bind(params: &[Param]) -> Vec<PgParam<'_>> {
+        params.iter().map(PgParam::from_param).collect()
+    }
+
+    fn to_refs<'a>(pg_params: &'a [PgParam<'a>]) -> Vec<&'a (dyn ToSql + Sync)> {
+        pg_params
             .iter()
             .map(|p| p as &(dyn ToSql + Sync))
-            .collect();
+            .collect()
+    }
+}
+
+impl QueryExecutor for PostgresExecutor {
+    fn query(&self, sql: &str, params: &[Param]) -> Result<Vec<Row>, Box<dyn std::error::Error + Send + Sync>> {
+        let pg_params = Self::bind(params);
+        let refs = Self::to_refs(&pg_params);
 
         let rows = self
             .handle
@@ -145,6 +156,22 @@ impl QueryExecutor for PostgresExecutor {
             .map_err(|e| -> Box<dyn Error + Send + Sync> { Box::new(e) })?;
 
         rows.iter().map(convert_row).collect()
+    }
+
+    /// Execute a write statement.  Each statement runs in its own implicit
+    /// transaction (tokio-postgres autocommit), which matches the observable
+    /// behaviour of the Python tools' batched `insert_many` + `commit`.
+    fn execute(
+        &self,
+        sql: &str,
+        params: &[Param],
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        let pg_params = Self::bind(params);
+        let refs = Self::to_refs(&pg_params);
+
+        self.handle
+            .block_on(self.client.execute(sql, &refs))
+            .map_err(|e| -> Box<dyn Error + Send + Sync> { Box::new(e) })
     }
 }
 
