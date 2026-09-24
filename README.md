@@ -18,6 +18,15 @@ cargo build --manifest-path rust/bo-service/Cargo.toml
 cargo test  --manifest-path rust/bo-service/Cargo.toml
 ```
 
+The live PostgreSQL integration tests (`tests/postgres_integration.rs`) are
+ignored by default; run them against a database with the PostGIS `strikes`
+schema:
+
+```sh
+export DATABASE_URL="host=127.0.0.1 port=5433 dbname=blitzortung user=blitzortung password=blitzortung"
+cargo test --test postgres_integration -- --ignored --nocapture
+```
+
 ## Run
 
 ```sh
@@ -245,6 +254,16 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   but preserve the Python long/short option names and defaults.  `clap`
   provides `-h`/`--help` and `-V`/`--version` (exit 0) and exits non-zero (2)
   on unknown options or invalid values.
+- **Explicit parameter casts for tokio-postgres.** PostgreSQL cannot infer the
+  type of some placeholders (e.g. `ST_Transform(geog::geometry, $1)` is
+  ambiguous between the `integer` and `text` overloads; `ST_MakePoint($1, $2)`
+  between `float8` and `float4`), and defaults them to `text`.  tokio-postgres
+  then sends the numeric value in binary form and the server rejects the NUL
+  byte with `invalid byte sequence for encoding "UTF8": 0x00` (psycopg2 is
+  unaffected because it sends text).  The PostgreSQL rendering therefore adds
+  explicit casts (`$1::integer`, `$2::timestamptz`, `$3::smallint`,
+  `ST_MakePoint($1::double precision, ...)`); the psycopg2-form SQL from
+  `Query::to_sql()` is unchanged and stays byte-for-byte Python-identical.
 - **CLI error reporting.** Database errors print the full causal chain
   (`cli::format_error_chain`), including the server-side `severity`/`message`/
   `detail`/`hint` from `tokio_postgres::Error::as_db_error()`, instead of
