@@ -471,12 +471,10 @@ impl GridData {
         let mut maximum = 0;
         let mut total = 0;
         for row in matrix {
-            for cell in row {
-                if let Some(cell) = cell {
-                    total += cell.count;
-                    if maximum < cell.count {
-                        maximum = cell.count;
-                    }
+            for cell in row.iter().flatten() {
+                total += cell.count;
+                if maximum < cell.count {
+                    maximum = cell.count;
                 }
             }
         }

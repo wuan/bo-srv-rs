@@ -126,8 +126,7 @@ impl Strike {
     /// * `dev;lateral_error`,
     /// * `sta;station_count;mcg;station,ids`.
     pub fn from_line(&mut self, line: &str) -> Result<&mut Self, BuilderError> {
-        self.try_from_line(line)
-            .map_err(|message| BuilderError(message))
+        self.try_from_line(line).map_err(BuilderError)
     }
 
     fn try_from_line(&mut self, line: &str) -> Result<&mut Self, String> {

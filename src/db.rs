@@ -14,6 +14,40 @@ use crate::round::py_round;
 /// lateral_error)` (`db.Strike._create_strike_key` / `update.create_strike_key`).
 pub type StrikeKey = (i64, f64, f64, Option<i64>);
 
+/// A hashable/sortable form of [`StrikeKey`] (float coordinates compared by
+/// their bit pattern; the values are rounded to four decimals beforehand, so
+/// bit equality matches value equality).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HashableStrikeKey {
+    pub timestamp: i64,
+    pub x: u64,
+    pub y: u64,
+    pub lateral_error: Option<i64>,
+}
+
+impl From<StrikeKey> for HashableStrikeKey {
+    fn from(key: StrikeKey) -> Self {
+        HashableStrikeKey {
+            timestamp: key.0,
+            x: key.1.to_bits(),
+            y: key.2.to_bits(),
+            lateral_error: key.3,
+        }
+    }
+}
+
+impl HashableStrikeKey {
+    /// Build directly from a [`Strike`].
+    pub fn from_strike(strike: &Strike) -> Self {
+        HashableStrikeKey {
+            timestamp: strike.timestamp.value(),
+            x: crate::round::py_round(strike.x, 4).to_bits(),
+            y: crate::round::py_round(strike.y, 4).to_bits(),
+            lateral_error: strike.lateral_error,
+        }
+    }
+}
+
 /// Errors returned by the strike table helpers.
 #[derive(Debug)]
 pub enum DbError {
