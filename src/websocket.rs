@@ -12,6 +12,7 @@ use std::collections::HashMap;
 /// The algorithm mirrors the Python implementation byte-for-code-point: the
 /// table starts at `o = 256`, `c` tracks the first character of the previous
 /// expansion, and `f` the previous expansion itself.
+#[allow(clippy::explicit_counter_loop)]
 pub fn decode(data: &str) -> String {
     if data.is_empty() {
         return String::new();
@@ -25,6 +26,8 @@ pub fn decode(data: &str) -> String {
     let mut c: char = first;
     let mut f: String = first.to_string();
     let mut g: String = f.clone();
+    // `o` is the dictionary insertion pointer (Python's `o`); it advances by
+    // one per expanded code.
     let mut o: u32 = h;
 
     for character in chars {

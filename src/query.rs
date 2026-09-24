@@ -29,6 +29,9 @@ pub struct Area {
     /// WKB of the full geometry, used for `ST_Intersects` when the geometry is
     /// not already its envelope.
     pub geometry_wkb: Option<Vec<u8>>,
+    /// The bounding-box bounds `(x_min, y_min, x_max, y_max)` corresponding to
+    /// `envelope_wkb` (`area.envelope.bounds`).
+    pub bounds: (f64, f64, f64, f64),
 }
 
 impl Area {
@@ -37,6 +40,7 @@ impl Area {
         Area {
             envelope_wkb: envelope.as_wkb_polygon(),
             geometry_wkb: None,
+            bounds: (envelope.x_min, envelope.y_min, envelope.x_max, envelope.y_max),
         }
     }
 
@@ -83,6 +87,7 @@ impl Area {
             } else {
                 Some(crate::wkb::polygon(rings))
             },
+            bounds: (x_min, y_min, x_max, y_max),
         })
     }
 }
@@ -325,6 +330,70 @@ fn add_geometry(q: Query, area: &Area) -> Query {
             .param("geometry", Param::Bytea(geometry.clone()));
     }
     qq
+}
+
+/// Parse a WKT polygon (the only geometry form the CLI tools need) into an
+/// [`Area`].  Supports `POLYGON ((x y, ...), (hole...))` and `POLYGON EMPTY`.
+///
+/// Returns `None` when the text is not a polygon or is malformed, matching the
+/// Python CLI's error handling (`shapely.wkt.loads` failure).
+pub fn parse_wkt_polygon(wkt: &str) -> Option<Area> {
+    let trimmed = wkt.trim();
+    let upper = trimmed.to_ascii_uppercase();
+    if !upper.starts_with("POLYGON") {
+        return None;
+    }
+    let body = trimmed[7..].trim();
+    if body.eq_ignore_ascii_case("EMPTY") {
+        return None;
+    }
+    let body = body.strip_prefix('(')?.strip_suffix(')')?;
+
+    let mut rings: Vec<Vec<[f64; 2]>> = Vec::new();
+    // Split on the ring separator `),(`.
+    let mut depth = 0usize;
+    let mut current = String::new();
+    for ch in body.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                if depth == 1 {
+                    current.clear();
+                    continue;
+                }
+                current.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    rings.push(parse_wkt_ring(&current)?);
+                    continue;
+                }
+                current.push(ch);
+            }
+            _ => current.push(ch),
+        }
+    }
+    Area::from_polygon(&rings)
+}
+
+fn parse_wkt_ring(ring: &str) -> Option<Vec<[f64; 2]>> {
+    let mut points = Vec::new();
+    for pair in ring.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let mut coords = pair.split_whitespace();
+        let x: f64 = coords.next()?.parse().ok()?;
+        let y: f64 = coords.next()?.parse().ok()?;
+        points.push([x, y]);
+    }
+    if points.is_empty() {
+        None
+    } else {
+        Some(points)
+    }
 }
 
 /// Add the time interval, optional region and optional geometry conditions to
@@ -765,6 +834,34 @@ mod tests {
         assert!(area.geometry_wkb.is_none());
         let q = select_query(&interval, Some(&area), None, 4326);
         assert!(!q.to_sql().contains("ST_Intersects"));
+    }
+
+    #[test]
+    fn parse_wkt_polygon_envelope() {
+        let area = parse_wkt_polygon("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))").unwrap();
+        assert!(area.geometry_wkb.is_none(), "square is its own envelope");
+    }
+
+    #[test]
+    fn parse_wkt_polygon_non_envelope() {
+        let area = parse_wkt_polygon("POLYGON((0 0, 2 0, 1 1, 0 2, 0 0))").unwrap();
+        assert!(area.geometry_wkb.is_some());
+    }
+
+    #[test]
+    fn parse_wkt_polygon_with_hole() {
+        let area = parse_wkt_polygon(
+            "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0),(1 1, 2 1, 2 2, 1 2, 1 1))",
+        )
+        .unwrap();
+        assert!(area.geometry_wkb.is_some());
+    }
+
+    #[test]
+    fn parse_wkt_rejects_non_polygon() {
+        assert!(parse_wkt_polygon("POINT(0 0)").is_none());
+        assert!(parse_wkt_polygon("POLYGON EMPTY").is_none());
+        assert!(parse_wkt_polygon("not wkt").is_none());
     }
 
     #[test]

@@ -54,12 +54,30 @@ impl<'a, T: Transport> StrikesBlitzortungDataProvider<'a, T> {
         latest_strike: Option<DateTime<Utc>>,
         region: u32,
     ) -> Result<Vec<Strike>, ImportError> {
+        self.get_strikes_since_with_deadline(latest_strike, region, None)
+    }
+
+    /// Same as [`Self::get_strikes_since`] but stops downloading further log
+    /// files once `deadline` has passed (the Rust equivalent of the Python
+    /// per-region `stopit.SignalTimeout`).
+    pub fn get_strikes_since_with_deadline(
+        &self,
+        latest_strike: Option<DateTime<Utc>>,
+        region: u32,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Vec<Strike>, ImportError> {
         let latest_strike = latest_strike
             .unwrap_or_else(|| Utc::now() - Duration::hours(6));
         log::debug!("import strikes since {latest_strike}");
 
         let mut strikes = Vec::new();
         for url_path in self.url_path_generator.get_paths(latest_strike, None) {
+            if let Some(deadline) = deadline {
+                if std::time::Instant::now() > deadline {
+                    log::warn!("stopping import for region {region}: time budget exceeded");
+                    break;
+                }
+            }
             let target_url = self.data_url.build_path(
                 &format!("Protected/Strikes_{{region}}/{url_path}"),
                 BlitzortungDataPath::DEFAULT_HOST_NAME,

@@ -39,7 +39,15 @@ dbname = blitzortung
 username = blitzortung
 password = secret
 connection_count = 3
+
+[auth]
+username = <blitzortung.org account>
+password = <blitzortung.org password>
 ```
+
+The `[auth]` section holds the HTTP basic-auth credentials for the protected
+data feeds (`data.blitzortung.org`), mirroring `Config.get_username()` /
+`Config.get_password()`.
 
 Environment variables supplement/override the file (explicit env vars win):
 
@@ -53,6 +61,8 @@ Environment variables supplement/override the file (explicit env vars win):
 | `BO_DB_USER` | `blitzortung` | database user |
 | `BO_DB_PASSWORD` | *(empty)* | database password |
 | `BO_DB_CONNECTION_COUNT` | `3` | desired pool size (informational; see below) |
+| `BO_BLITZORTUNG_USERNAME` | *(empty)* | `[auth]` username |
+| `BO_BLITZORTUNG_PASSWORD` | *(empty)* | `[auth]` password |
 
 The PostgreSQL schema is the normal blitzortung one; the service only reads
 `strikes` rows (the `strikes` table with a `geog` geography column, a
@@ -152,7 +162,47 @@ histogram bins (empty when `minute_length <= 10`).
 - `geom` — the grid/envelope machinery and a UTM converter ported from
   PROJ's Poder/Engsager (`etmerc`) implementation, used by the grid factory
 - `round` — CPython-compatible `round()` and `%.Nf` formatting
-- `wkb` — WKB encoding of the grid envelope ring
+- `wkb` — WKB encoding of the grid envelope ring / polygons
+- `data` — `Timestamp` (nanosecond precision), `Strike` and `GridData`
+  (arcgrid/map output), ported from `blitzortung/data.py`
+- `builder` — `Strike.from_line` (protected logs) and `Strike.from_json`
+- `db` — `StrikeDb` (insert_many/get_latest_time/select/select_strike_keys/
+  select_grid) over the `QueryExecutor` trait
+- `dataimport` — protected-log URL paths, HTTP/file transports and the strike
+  provider
+- `websocket` — the Blitzortung live-message `decode()` decompressor
+- `util` — `Timer`, `round_time` and `time_intervals`
+- `cli` — shared CLI helpers (arg parsing, time zones, file locking) and the
+  tool implementations
+
+## CLI tools
+
+Four binaries are ported from the Python `blitzortung/cli` package:
+
+| Binary | Python source | Purpose |
+| --- | --- | --- |
+| `bo-db` | `cli/db.py` | Query strikes as text or a grid (arcgrid/ascii map) |
+| `bo-insert` | `cli/imprt.py` | Import protected ten-minute strike logs |
+| `bo-update` | `cli/update.py` | Import recent strikes from `last_strikes.php` |
+| `bo-insert-websocket` | `cli/imprt_websocket.py` | Live websocket strike import |
+
+```sh
+export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
+
+# last hour, UTC, text output
+cargo run --bin bo-db
+# explicit interval and area, ECDF-like grid
+cargo run --bin bo-db -- --startdate 20250101 --starttime 1200 \
+  --enddate 20250101 --endtime 1300 --area "POLYGON((8 45,10 45,10 47,8 47,8 45))" \
+  --grid 0.1 --map
+
+# import from data.blitzortung.org (needs [auth] credentials)
+cargo run --bin bo-insert -- --startdate 20250101
+cargo run --bin bo-insert -- --update        # now - 30min window
+cargo run --bin bo-update -- --hours 2
+cargo run --bin bo-insert-websocket -- -v
+cargo run --bin bo-insert-websocket -- -t    # connection test, no DB writes
+```
 
 ## Documented differences from the Python implementation
 
@@ -182,3 +232,16 @@ histogram bins (empty when `minute_length <= 10`).
   accuracy does not match PROJ's etmerc output used by pyproj, so the grid
   factory uses the direct PROJ algorithm port in `geom.rs`, verified to
   `1e-12` against pyproj-generated reference values for all 7 regions.
+- **No statsd in the CLI tools.** The Python importers report to a local
+  statsd daemon; the Rust tools only log (metrics go through the same
+  `Metrics`/plain-logging boundary as the service).
+- **Per-region timeout is cooperative.** Python wraps each `bo-insert` region
+  in `stopit.SignalTimeout(300)`; the Rust port checks the deadline between log
+  downloads and uses a 30 second per-request HTTP timeout.
+- **Write transactions.** `QueryExecutor::execute` runs each statement in its
+  own implicit transaction (tokio-postgres autocommit); `commit()`/`rollback()`
+  are accepted for compatibility (`insert_many` is already a single
+  multi-value `INSERT`).
+- **Streaming vs. buffered downloads.** The Python provider yields strikes
+  lazily while streaming each log; the Rust provider collects the lines for a
+  region into memory before inserting.

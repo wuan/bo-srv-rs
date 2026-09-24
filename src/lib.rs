@@ -23,6 +23,7 @@
 //! executor is provided in the [`mock`] module.
 
 pub mod cache;
+pub mod cli;
 pub mod metrics;
 pub mod builder;
 pub mod config;
