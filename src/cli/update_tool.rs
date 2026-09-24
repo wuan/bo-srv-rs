@@ -56,7 +56,7 @@ pub struct UpdateResult {
 ///
 /// `now` is injected for testability.  Returns `Err` on a database failure
 /// (after rolling back), matching the Python behaviour.
-pub fn update_strikes(
+pub async fn update_strikes(
     executor: &dyn QueryExecutor,
     url_strikes: &[Strike],
     hours: i64,
@@ -67,7 +67,8 @@ pub fn update_strikes(
 
     let db = StrikeDb::new(executor, 4326);
     let existing: std::collections::HashSet<HashableStrikeKey> = db
-        .select_strike_keys(&interval, None, None)?
+        .select_strike_keys(&interval, None, None)
+        .await?
         .into_iter()
         .map(HashableStrikeKey::from)
         .collect();
@@ -103,11 +104,11 @@ pub fn update_strikes(
     );
 
     if !new_strikes.is_empty() {
-        if let Err(error) = db.insert_many(&new_strikes, None) {
-            executor.rollback()?;
+        if let Err(error) = db.insert_many(&new_strikes, None).await {
+            executor.rollback().await?;
             return Err(error.into());
         }
-        executor.commit()?;
+        executor.commit().await?;
         log::info!("Successfully inserted {} new strikes", new_strikes.len());
     } else {
         log::info!("No new strikes to insert");
@@ -231,35 +232,35 @@ mod tests {
         assert_eq!(strikes[0].lateral_error, Some(20));
     }
 
-    #[test]
-    fn update_inserts_new_strikes() {
+    #[tokio::test]
+    async fn update_inserts_new_strikes() {
         let now = utc(2025, 1, 1, 12, 0, 0);
         let mut mock = empty_keys_executor();
         let strikes = vec![
             strike_at(now - Duration::minutes(30), 10.5, 20.5, None),
             strike_at(now - Duration::minutes(30), 11.5, 21.5, None),
         ];
-        let result = update_strikes(&mock, &strikes, 1, now).unwrap();
+        let result = update_strikes(&mock, &strikes, 1, now).await.unwrap();
         assert_eq!(result.inserted, 2);
         assert_eq!(mock.execution_count(), 1);
         assert_eq!(mock.commit_count(), 1);
         let _ = &mut mock;
     }
 
-    #[test]
-    fn update_skips_too_new_strikes() {
+    #[tokio::test]
+    async fn update_skips_too_new_strikes() {
         let now = utc(2025, 1, 1, 12, 0, 0);
         let mut mock = empty_keys_executor();
         let strikes = vec![strike_at(now - Duration::seconds(59), 10.5, 20.5, None)];
-        let result = update_strikes(&mock, &strikes, 1, now).unwrap();
+        let result = update_strikes(&mock, &strikes, 1, now).await.unwrap();
         assert_eq!(result.inserted, 0);
         assert_eq!(mock.execution_count(), 0);
         assert_eq!(mock.commit_count(), 0);
         let _ = &mut mock;
     }
 
-    #[test]
-    fn update_skips_duplicates() {
+    #[tokio::test]
+    async fn update_skips_duplicates() {
         let now = utc(2025, 1, 1, 12, 0, 0);
         let existing = strike_at(now - Duration::minutes(30), 10.5, 20.5, None);
         let mut mock = MockExecutor::new();
@@ -274,33 +275,33 @@ mod tests {
             ])],
         );
         let strikes = vec![strike_at(now - Duration::minutes(30), 10.5, 20.5, None)];
-        let result = update_strikes(&mock, &strikes, 1, now).unwrap();
+        let result = update_strikes(&mock, &strikes, 1, now).await.unwrap();
         assert_eq!(result.inserted, 0);
         assert_eq!(mock.execution_count(), 0);
         let _ = &mut mock;
     }
 
-    #[test]
-    fn update_filters_by_time_interval() {
+    #[tokio::test]
+    async fn update_filters_by_time_interval() {
         let now = utc(2025, 1, 1, 12, 0, 0);
         let mut mock = empty_keys_executor();
         let strikes = vec![
             strike_at(now - Duration::minutes(30), 10.5, 20.5, None),
             strike_at(now - Duration::hours(2), 11.5, 21.5, None),
         ];
-        let result = update_strikes(&mock, &strikes, 1, now).unwrap();
+        let result = update_strikes(&mock, &strikes, 1, now).await.unwrap();
         assert_eq!(result.inserted, 1);
         let _ = &mut mock;
     }
 
-    #[test]
-    fn update_rolls_back_on_insert_error() {
+    #[tokio::test]
+    async fn update_rolls_back_on_insert_error() {
         let now = utc(2025, 1, 1, 12, 0, 0);
         let mut mock = MockExecutor::new();
         mock.add_rows("FROM strikes", vec![]);
         mock.add_error("INSERT INTO strikes", "database error");
         let strikes = vec![strike_at(now - Duration::minutes(30), 10.5, 20.5, None)];
-        let result = update_strikes(&mock, &strikes, 1, now);
+        let result = update_strikes(&mock, &strikes, 1, now).await;
         assert!(result.is_err());
         assert_eq!(mock.rollback_count(), 1);
     }
@@ -317,13 +318,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn update_params_use_region_fallback() {
+    #[tokio::test]
+    async fn update_params_use_region_fallback() {
         // insert_many with region None must fall back to strike region / 1.
         let now = utc(2025, 1, 1, 12, 0, 0);
         let mut mock = empty_keys_executor();
         let strikes = vec![strike_at(now - Duration::minutes(30), 10.5, 20.5, None)];
-        update_strikes(&mock, &strikes, 1, now).unwrap();
+        update_strikes(&mock, &strikes, 1, now).await.unwrap();
         let (_, params) = &mock.executions()[0];
         assert_eq!(params[5], Param::Int(1));
         let _ = &mut mock;

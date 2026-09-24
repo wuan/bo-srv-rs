@@ -105,7 +105,7 @@ impl<'a> StrikeDb<'a> {
     /// `region` pins every strike to the same region (the `bo-import` case);
     /// when it is `None` each strike's own region is used, falling back to 1
     /// (the `bo-update` case).
-    pub fn insert_many(&self, strikes: &[Strike], region: Option<i64>) -> Result<usize, DbError> {
+    pub async fn insert_many(&self, strikes: &[Strike], region: Option<i64>) -> Result<usize, DbError> {
         if strikes.is_empty() {
             return Ok(0);
         }
@@ -164,19 +164,19 @@ impl<'a> StrikeDb<'a> {
         }
 
         sql.push_str(&placeholders.join(", "));
-        self.executor.execute(&sql, &params)?;
+        self.executor.execute(&sql, &params).await?;
         Ok(strikes.len())
     }
 
     /// `Strike.insert`: insert a single strike (used by the websocket importer).
-    pub fn insert(&self, strike: &Strike, region: i64) -> Result<(), DbError> {
-        self.insert_many(std::slice::from_ref(strike), Some(region))?;
+    pub async fn insert(&self, strike: &Strike, region: i64) -> Result<(), DbError> {
+        self.insert_many(std::slice::from_ref(strike), Some(region)).await?;
         Ok(())
     }
 
     /// `Strike.get_latest_time`: the newest `(timestamp, nanoseconds)` for a
     /// region, or `None` when the table has no matching row.
-    pub fn get_latest_time(&self, region: Option<i64>) -> Result<Option<Timestamp>, DbError> {
+    pub async fn get_latest_time(&self, region: Option<i64>) -> Result<Option<Timestamp>, DbError> {
         let sql = match region {
             Some(_) => {
                 "SELECT \"timestamp\", nanoseconds FROM strikes WHERE region=$1::smallint \
@@ -191,7 +191,7 @@ impl<'a> StrikeDb<'a> {
             Some(region) => vec![Param::Int(region)],
             None => Vec::new(),
         };
-        let rows = self.executor.query(sql, &params)?;
+        let rows = self.executor.query(sql, &params).await?;
         match rows.first() {
             None => Ok(None),
             Some(row) => {
@@ -208,7 +208,7 @@ impl<'a> StrikeDb<'a> {
 
     /// `Strike.select`: build and run the select query, mapping rows into
     /// [`Strike`] objects (`db.mapper.Strike.create_object`).
-    pub fn select(
+    pub async fn select(
         &self,
         time_interval: &TimeInterval,
         area: Option<&Area>,
@@ -217,12 +217,13 @@ impl<'a> StrikeDb<'a> {
         let query = query::select_query(time_interval, area, region, self.srid);
         let rows = self
             .executor
-            .query(&query.to_postgres(), &query.parameters())?;
+            .query(&query.to_postgres(), &query.parameters())
+            .await?;
         rows.iter().map(|row| self.map_strike(row)).collect()
     }
 
     /// `Strike.select_strike_keys`: the de-duplication keys for the interval.
-    pub fn select_strike_keys(
+    pub async fn select_strike_keys(
         &self,
         time_interval: &TimeInterval,
         area: Option<&Area>,
@@ -231,7 +232,8 @@ impl<'a> StrikeDb<'a> {
         let query = query::select_key_query(time_interval, area, region, self.srid);
         let rows = self
             .executor
-            .query(&query.to_postgres(), &query.parameters())?;
+            .query(&query.to_postgres(), &query.parameters())
+            .await?;
         rows.iter()
             .map(|row| {
                 let datetime = row
@@ -260,7 +262,7 @@ impl<'a> StrikeDb<'a> {
 
     /// `Strike.select_grid`: run the grid query and build a [`GridData`]
     /// (`db.grid_result.build_grid_result`).
-    pub fn select_grid(
+    pub async fn select_grid(
         &self,
         grid: &Grid,
         count_threshold: i64,
@@ -270,7 +272,8 @@ impl<'a> StrikeDb<'a> {
         let query = query::grid_query(grid, time_interval, region, count_threshold);
         let rows = self
             .executor
-            .query(&query.to_postgres(), &query.parameters())?;
+            .query(&query.to_postgres(), &query.parameters())
+            .await?;
 
         let x_bin_count = grid.x_bin_count();
         let y_bin_count = grid.y_bin_count();
@@ -360,13 +363,14 @@ mod tests {
         )
     }
 
-    #[test]
-    fn insert_many_builds_multi_value_insert() {
+    #[tokio::test]
+    async fn insert_many_builds_multi_value_insert() {
         let mut mock = MockExecutor::new();
         mock.add_rows("SELECT", vec![]);
         let db = StrikeDb::new(&mock, 4326);
         let count = db
             .insert_many(&[strike(1.0, 2.0), strike(3.0, 4.0)], Some(1))
+            .await
             .unwrap();
         assert_eq!(count, 2);
         let executions = mock.executions();
@@ -381,38 +385,38 @@ mod tests {
         assert_eq!(params[5], Param::Int(1)); // region
     }
 
-    #[test]
-    fn insert_many_uses_strike_region_when_unset() {
+    #[tokio::test]
+    async fn insert_many_uses_strike_region_when_unset() {
         let mut mock = MockExecutor::new();
         mock.add_rows("SELECT", vec![]);
         let db = StrikeDb::new(&mock, 4326);
         let mut s = strike(1.0, 2.0);
         s.region = Some(9);
-        db.insert_many(&[s], None).unwrap();
+        db.insert_many(&[s], None).await.unwrap();
         let (_, params) = &mock.executions()[0];
         assert_eq!(params[5], Param::Int(9));
     }
 
-    #[test]
-    fn insert_many_falls_back_to_region_one() {
+    #[tokio::test]
+    async fn insert_many_falls_back_to_region_one() {
         let mut mock = MockExecutor::new();
         mock.add_rows("SELECT", vec![]);
         let db = StrikeDb::new(&mock, 4326);
-        db.insert_many(&[strike(1.0, 2.0)], None).unwrap();
+        db.insert_many(&[strike(1.0, 2.0)], None).await.unwrap();
         let (_, params) = &mock.executions()[0];
         assert_eq!(params[5], Param::Int(1));
     }
 
-    #[test]
-    fn insert_many_empty_is_noop() {
+    #[tokio::test]
+    async fn insert_many_empty_is_noop() {
         let mock = MockExecutor::new();
         let db = StrikeDb::new(&mock, 4326);
-        assert_eq!(db.insert_many(&[], Some(1)).unwrap(), 0);
+        assert_eq!(db.insert_many(&[], Some(1)).await.unwrap(), 0);
         assert_eq!(mock.execution_count(), 0);
     }
 
-    #[test]
-    fn get_latest_time_reads_row() {
+    #[tokio::test]
+    async fn get_latest_time_reads_row() {
         let mut mock = MockExecutor::new();
         mock.add_rows(
             "ORDER BY \"timestamp\" DESC",
@@ -422,7 +426,7 @@ mod tests {
             ])],
         );
         let db = StrikeDb::new(&mock, 4326);
-        let latest = db.get_latest_time(Some(1)).unwrap().unwrap();
+        let latest = db.get_latest_time(Some(1)).await.unwrap().unwrap();
         assert_eq!(latest.nanosecond, 700);
         assert_eq!(latest.datetime.unwrap(), ts(2025, 1, 1, 12, 0, 0));
         let (sql, params) = &mock.calls()[0];
@@ -430,16 +434,16 @@ mod tests {
         assert_eq!(params[0], Param::Int(1));
     }
 
-    #[test]
-    fn get_latest_time_no_row_is_none() {
+    #[tokio::test]
+    async fn get_latest_time_no_row_is_none() {
         let mut mock = MockExecutor::new();
         mock.add_rows("ORDER BY", vec![]);
         let db = StrikeDb::new(&mock, 4326);
-        assert!(db.get_latest_time(None).unwrap().is_none());
+        assert!(db.get_latest_time(None).await.unwrap().is_none());
     }
 
-    #[test]
-    fn select_maps_rows_to_strikes() {
+    #[tokio::test]
+    async fn select_maps_rows_to_strikes() {
         let mut mock = MockExecutor::new();
         mock.add_rows(
             "FROM strikes",
@@ -457,7 +461,7 @@ mod tests {
         );
         let db = StrikeDb::new(&mock, 4326);
         let interval = TimeInterval::new(ts(2025, 1, 1, 0, 0, 0), ts(2025, 1, 1, 1, 0, 0));
-        let strikes = db.select(&interval, None, None).unwrap();
+        let strikes = db.select(&interval, None, None).await.unwrap();
         assert_eq!(strikes.len(), 1);
         assert_eq!(strikes[0].id, Some(42));
         assert_eq!(strikes[0].x, 8.910987);
@@ -466,8 +470,8 @@ mod tests {
         assert_eq!(strikes[0].timestamp.nanosecond, 700);
     }
 
-    #[test]
-    fn select_strike_keys_returns_keys() {
+    #[tokio::test]
+    async fn select_strike_keys_returns_keys() {
         let mut mock = MockExecutor::new();
         mock.add_rows(
             "FROM strikes",
@@ -481,13 +485,13 @@ mod tests {
         );
         let db = StrikeDb::new(&mock, 4326);
         let interval = TimeInterval::new(ts(2025, 1, 1, 0, 0, 0), ts(2025, 1, 1, 1, 0, 0));
-        let keys = db.select_strike_keys(&interval, None, None).unwrap();
+        let keys = db.select_strike_keys(&interval, None, None).await.unwrap();
         let expected_ts = Timestamp::new(ts(2025, 1, 1, 12, 0, 0), 123).value();
         assert_eq!(keys, vec![(expected_ts, 8.911, 44.2833, Some(6830))]);
     }
 
-    #[test]
-    fn select_grid_builds_grid_data() {
+    #[tokio::test]
+    async fn select_grid_builds_grid_data() {
         let mut mock = MockExecutor::new();
         // grid with x_bin_count 2, y_bin_count 2
         mock.add_rows(
@@ -511,7 +515,7 @@ mod tests {
         let grid = Grid::new(0.0, 2.0, 0.0, 2.0, 1.0, 1.0);
         let db = StrikeDb::new(&mock, 4326);
         let interval = TimeInterval::new(ts(2025, 1, 1, 0, 0, 0), ts(2025, 1, 1, 1, 0, 0));
-        let data = db.select_grid(&grid, 0, &interval, None).unwrap();
+        let data = db.select_grid(&grid, 0, &interval, None).await.unwrap();
         // rx=0, ry=2 => y_index = 2 - 2 = 0
         assert_eq!(data.get(0, 0).unwrap().count, 5);
         assert_eq!(data.get(0, 1), None);

@@ -1,20 +1,19 @@
 //! Regression test for the "server freezes under load" report.
 //!
-//! Root cause: `ObjectCache::get_result` held a `std::sync::Mutex` across the
-//! producer (the database query).  The producers block their calling thread
-//! (`PostgresExecutor` uses `block_in_place` + `block_on`), and every other
+//! History: `ObjectCache::get_result` once held a `std::sync::Mutex` across the
+//! producer (the database query).  With a synchronous executor, every other
 //! request missing the same key parked a runtime worker thread on
-//! `Mutex::lock`.  Tokio compensates for the one thread inside `block_in_place`
-//! but cannot compensate for threads parked in a synchronous mutex wait, so
-//! once the number of waiters reached the worker-thread count every worker was
-//! consumed, the lock holder could not proceed, and the service froze until a
-//! restart.  A cold-cache burst (many clients hitting the same key at once)
-//! triggered it immediately.
+//! `Mutex::lock`, so once the waiters reached the worker-thread count the lock
+//! holder could not proceed and the service froze until a restart.
 //!
-//! The fix computes the payload without holding the cache lock.  This test
-//! drives the real HTTP transport on a multi-thread runtime (the production
-//! configuration) with a cold cache and many concurrent clients; it froze
-//! permanently before the fix.
+//! The service now awaits asynchronous queries and the cache stores the
+//! **in-flight computation** for a key, so concurrent misses share one producer
+//! instead of contending on a lock.  This test drives the real HTTP transport
+//! on a multi-thread runtime with a cold cache and many concurrent clients; it
+//! froze permanently before the fix.
+//!
+//! It also asserts the single-flight property: the producer runs a small,
+//! bounded number of times (not once per client).
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -26,30 +25,23 @@ use bo_service::executor::{Param, QueryExecutor, Row};
 use bo_service::http;
 use bo_service::service::Service;
 
-/// Executor that reproduces `PostgresExecutor`'s blocking pattern: it awaits a
-/// timer on the serving runtime via `block_in_place` + `Handle::block_on`.  The
-/// delay simulates database latency.
-struct BlockingExecutor {
+/// Executor that simulates database latency asynchronously.  `delay` stands in
+/// for a real query round-trip.
+struct SlowExecutor {
     delay: Duration,
     queries: Arc<AtomicUsize>,
 }
 
-impl QueryExecutor for BlockingExecutor {
-    fn query(
+#[async_trait::async_trait]
+impl QueryExecutor for SlowExecutor {
+    async fn query(
         &self,
         _sql: &str,
         _params: &[Param],
     ) -> Result<Vec<Row>, Box<dyn std::error::Error + Send + Sync>> {
         self.queries.fetch_add(1, Ordering::SeqCst);
-        let delay = self.delay;
-        let handle = tokio::runtime::Handle::current();
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::block_in_place(|| {
-                handle.block_on(async { tokio::time::sleep(delay).await });
-            });
-        } else {
-            handle.block_on(async { tokio::time::sleep(delay).await });
-        }
+        // Simulate database latency: purely async now, no thread blocking.
+        tokio::time::sleep(self.delay).await;
         Ok(Vec::new())
     }
 }
@@ -113,19 +105,19 @@ fn post(port: u16, id: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// A cold-cache burst of concurrent data requests must be answered.  Before the
-/// fix the server froze permanently (all clients timed out, only the first
-/// query ever ran).
+/// A cold-cache burst of concurrent data requests must be answered, and the
+/// expensive grid+histogram producer must run only once (single-flight) rather
+/// than once per client.
 #[test]
 fn cold_cache_burst_does_not_freeze_the_server() {
     let queries = Arc::new(AtomicUsize::new(0));
-    let port = server(BlockingExecutor {
+    let port = server(SlowExecutor {
         delay: Duration::from_millis(50),
         queries: queries.clone(),
     });
 
-    // More clients than worker threads (4) so the mutex waiters exhausted the
-    // pool before the fix.
+    // More clients than worker threads (4) so the old mutex waiters exhausted
+    // the pool before the fix.
     let clients = 48usize;
     let started = Instant::now();
     let mut handles = Vec::new();
@@ -148,8 +140,11 @@ fn cold_cache_burst_does_not_freeze_the_server() {
         elapsed < Duration::from_secs(15),
         "burst took too long (possible freeze): {elapsed:?}"
     );
+    // The grid producer (2 queries: grid + histogram) is coalesced across the
+    // burst; allow a little slack for the histogram sub-producer.
     assert!(
-        queries.load(Ordering::SeqCst) >= 2,
-        "the grid producer must have run its queries"
+        queries.load(Ordering::SeqCst) <= 4,
+        "the producer should be coalesced, not run per client (ran {} times)",
+        queries.load(Ordering::SeqCst)
     );
 }

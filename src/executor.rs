@@ -96,9 +96,19 @@ impl Row {
 ///
 /// The methods mirror what the Python service layer uses from the connection
 /// pool (`connection.runQuery(sql, params)`).
+///
+/// The trait is **asynchronous**: the service handlers `.await` database work
+/// instead of parking a runtime worker thread on it.  This removes the
+/// synchronous-executor throughput ceiling and lets the cache coalesce
+/// concurrent in-flight queries (see [`crate::cache::ObjectCache`]).
+#[async_trait::async_trait]
 pub trait QueryExecutor: Send + Sync {
     /// Run a query returning rows.
-    fn query(&self, sql: &str, params: &[Param]) -> Result<Vec<Row>, Box<dyn std::error::Error + Send + Sync>>;
+    async fn query(
+        &self,
+        sql: &str,
+        params: &[Param],
+    ) -> Result<Vec<Row>, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Execute a statement that does not return rows (INSERT/UPDATE/DDL) and
     /// report the number of affected rows.
@@ -106,7 +116,7 @@ pub trait QueryExecutor: Send + Sync {
     /// The default implementation rejects the call so existing executor
     /// implementations remain valid; the write-capable implementations used by
     /// the CLI tools (`postgres` and `mock`) override it.
-    fn execute(
+    async fn execute(
         &self,
         _sql: &str,
         _params: &[Param],
@@ -115,36 +125,41 @@ pub trait QueryExecutor: Send + Sync {
     }
 
     /// Commit the current transaction (no-op by default).
-    fn commit(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn commit(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
     /// Roll back the current transaction (no-op by default).
-    fn rollback(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn rollback(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 }
 
 /// Blanket implementation so `&E where E: QueryExecutor` also works.
+#[async_trait::async_trait]
 impl<T: QueryExecutor + ?Sized> QueryExecutor for &T {
-    fn query(&self, sql: &str, params: &[Param]) -> Result<Vec<Row>, Box<dyn std::error::Error + Send + Sync>> {
-        (**self).query(sql, params)
+    async fn query(
+        &self,
+        sql: &str,
+        params: &[Param],
+    ) -> Result<Vec<Row>, Box<dyn std::error::Error + Send + Sync>> {
+        (**self).query(sql, params).await
     }
 
-    fn execute(
+    async fn execute(
         &self,
         sql: &str,
         params: &[Param],
     ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-        (**self).execute(sql, params)
+        (**self).execute(sql, params).await
     }
 
-    fn commit(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        (**self).commit()
+    async fn commit(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        (**self).commit().await
     }
 
-    fn rollback(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        (**self).rollback()
+    async fn rollback(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        (**self).rollback().await
     }
 }
 

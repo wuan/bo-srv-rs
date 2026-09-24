@@ -232,22 +232,26 @@ histogram bins (empty when `minute_length <= 10`).
   Old Android clients (`<= 177`) never receive gzip because
   `fix_bad_accept_header` strips their `Accept-Encoding` first.
 - Results are cached in a `ServiceCache` (short TTL 20 s, long 60 s, local
-  caps 100/400, cleanup 300 s) keyed like the Python producer args.  Producers
-  run **without** the cache lock held, so a blocking database query on a cache
-  miss cannot park other requests on the mutex and freeze the runtime under a
-  cold-cache request burst (see `cache.rs` `get_result`).
+  caps 100/400, cleanup 300 s) keyed like the Python producer args.  A miss
+  stores the **in-flight computation**: the first request claims the key and
+  runs the (async) producer, and concurrent requests for the same key await the
+  same shared cell ("single-flight").  This removes the duplicate cold-cache
+  query burst and the lock contention that used to freeze the runtime (see
+  `cache.rs` `get_result`).
 
 ## Architecture
 
 - `config` — `blitzortung.conf` loading (`.` then `/etc/`) + env overrides;
   make_dsn-compatible connection-string quoting
-- `executor` — the `QueryExecutor` trait (`query(sql, params) -> rows`) that
-  the service layer depends on
-- `mock` — in-memory executor for tests (no PostgreSQL needed)
+- `executor` — the **async** `QueryExecutor` trait (`async fn query(sql,
+  params) -> rows`) the service layer awaits; `async-trait` keeps it usable as
+  `Arc<dyn QueryExecutor>`
+- `mock` — in-memory, async executor for tests (no PostgreSQL needed)
 - `postgres` — production executor over tokio-postgres (single shared client;
-  tokio-postgres multiplexes queries over its connection)
-- `cache` — `ObjectCache` (TTL + optional LRU size) and the `ServiceCache`
-  layout
+  tokio-postgres multiplexes queries over its connection).  Queries are awaited
+  directly, so the executor never blocks a runtime worker thread
+- `cache` — `ObjectCache` (TTL + optional LRU size + in-flight single-flight
+  coalescing) and the `ServiceCache` layout
 - `query` — SQL generation matching `blitzortung/db/query.py` /
   `query_builder.py` byte-for-byte in psycopg2 `%(name)s` form and converted
   to `$1..$N` positional parameters
@@ -317,13 +321,13 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   not reproduced.  A single tokio-postgres client replaces the connection
   pool (`connection_count` is accepted for compatibility; the multiplexed
   client serves all connections).
-- **DB queries are safe inside the Tokio runtime.** The service (multi-thread
-  runtime) calls DB queries from async handler tasks; `query`/`execute` use
-  `tokio::task::block_in_place` when already inside a runtime, so they no
-  longer panic with `Cannot start a runtime from within a runtime`.  Each
-  in-flight query still occupies one worker thread (`block_in_place`), so very
-  high concurrency (more blocking queries than worker threads) stalls until a
-  worker frees up — an async query path would be needed to remove that ceiling.
+- **Async database path.** `QueryExecutor` is asynchronous (`async fn
+  query`/`execute`) and the service handlers `.await` it, so a slow query never
+  pins a runtime worker thread and concurrency is not capped by the worker
+  count.  The cache coalesces concurrent misses for the same key onto one
+  in-flight computation, so a cold-cache burst runs the producer once instead
+  of once per request.  The synchronous CLI tools drive the same async code by
+  `block_on`-ing it at their `main` boundary.
 - **Blocks data requests with no headers.** The Twisted service also blocks
   them (invalid user agent), but over plain TCP the Rust transport reads the
   validation headers from the frame header block, so a bare frame is treated

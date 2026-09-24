@@ -316,7 +316,7 @@ async fn handle_connection<M: Metrics>(stream: TcpStream, service: Arc<Service<M
         let mut service_request = request_from_headers(&request.headers, peer_ip.clone());
 
         let started = std::time::Instant::now();
-        let result = crate::jsonrpc::dispatch(&service, &mut service_request, &content);
+        let result = crate::jsonrpc::dispatch(&service, &mut service_request, &content).await;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         log_access(&service_request, &result.meta, elapsed_ms);
 

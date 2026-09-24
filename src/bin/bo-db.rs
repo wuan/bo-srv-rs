@@ -26,12 +26,12 @@ fn main() {
     }
 
     let config = Config::from_env();
-    let (_runtime, executor) = match connect_postgres(&config) {
+    let (runtime, executor) = match connect_postgres(&config) {
         Ok(pair) => pair,
         Err(error) => exit_with(&describe_error("failed to connect to database", error.as_ref()), 1),
     };
 
-    if let Err(error) = db_tool::run(&executor, &db_options) {
+    if let Err(error) = runtime.block_on(db_tool::run(&executor, &db_options)) {
         exit_with(&describe_error("error", error.as_ref()), 1);
     }
 }

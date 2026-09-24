@@ -57,12 +57,14 @@ fn runtime_and_executor() -> (tokio::runtime::Runtime, PostgresExecutor) {
 #[test]
 #[ignore = "requires a live PostgreSQL with the strikes schema (set DATABASE_URL)"]
 fn default_select_executes_and_deserializes() {
-    let (_runtime, executor) = runtime_and_executor();
-    let db = StrikeDb::new(&executor, 4326);
-    let now = chrono::Utc::now();
-    let interval = TimeInterval::new(now - chrono::Duration::hours(24), now);
-    let strikes = db.select(&interval, None, None).expect("select must succeed");
-    println!("selected {} strikes", strikes.len());
+    let (runtime, executor) = runtime_and_executor();
+    runtime.block_on(async {
+        let db = StrikeDb::new(&executor, 4326);
+        let now = chrono::Utc::now();
+        let interval = TimeInterval::new(now - chrono::Duration::hours(24), now);
+        let strikes = db.select(&interval, None, None).await.expect("select must succeed");
+        println!("selected {} strikes", strikes.len());
+    });
 }
 
 /// `bo-db --grid` must run (ambiguous `ST_Transform` + float casts).
@@ -70,37 +72,45 @@ fn default_select_executes_and_deserializes() {
 #[ignore = "requires a live PostgreSQL with the strikes schema (set DATABASE_URL)"]
 fn grid_query_executes() {
     use bo_service::geom::Grid;
-    let (_runtime, executor) = runtime_and_executor();
-    let db = StrikeDb::new(&executor, 4326);
-    let now = chrono::Utc::now();
-    let interval = TimeInterval::new(now - chrono::Duration::hours(24), now);
-    // A bounded envelope (a full -180..180 envelope makes PostGIS reject the
-// geography ring as antipodal, unrelated to parameter encoding).
-    let grid = Grid::new(-20.0, 30.0, 30.0, 60.0, 1.0, 1.0);
-    db.select_grid(&grid, 0, &interval, None)
-        .expect("grid query must succeed");
+    let (runtime, executor) = runtime_and_executor();
+    runtime.block_on(async {
+        let db = StrikeDb::new(&executor, 4326);
+        let now = chrono::Utc::now();
+        let interval = TimeInterval::new(now - chrono::Duration::hours(24), now);
+        // A bounded envelope (a full -180..180 envelope makes PostGIS reject the
+        // geography ring as antipodal, unrelated to parameter encoding).
+        let grid = Grid::new(-20.0, 30.0, 30.0, 60.0, 1.0, 1.0);
+        db.select_grid(&grid, 0, &interval, None)
+            .await
+            .expect("grid query must succeed");
+    });
 }
 
 /// `select_strike_keys` (`bo-update` de-duplication) must run.
 #[test]
 #[ignore = "requires a live PostgreSQL with the strikes schema (set DATABASE_URL)"]
 fn select_strike_keys_executes() {
-    let (_runtime, executor) = runtime_and_executor();
-    let db = StrikeDb::new(&executor, 4326);
-    let now = chrono::Utc::now();
-    let interval = TimeInterval::new(now - chrono::Duration::hours(24), now);
-    db.select_strike_keys(&interval, None, None)
-        .expect("select_strike_keys must succeed");
+    let (runtime, executor) = runtime_and_executor();
+    runtime.block_on(async {
+        let db = StrikeDb::new(&executor, 4326);
+        let now = chrono::Utc::now();
+        let interval = TimeInterval::new(now - chrono::Duration::hours(24), now);
+        db.select_strike_keys(&interval, None, None)
+            .await
+            .expect("select_strike_keys must succeed");
+    });
 }
 
 /// `get_latest_time` (`bo-import` start point) must run (`region=$1::smallint`).
 #[test]
 #[ignore = "requires a live PostgreSQL with the strikes schema (set DATABASE_URL)"]
 fn get_latest_time_executes() {
-    let (_runtime, executor) = runtime_and_executor();
-    let db = StrikeDb::new(&executor, 4326);
-    let latest = db.get_latest_time(Some(1)).expect("get_latest_time must succeed");
-    println!("latest: {latest:?}");
+    let (runtime, executor) = runtime_and_executor();
+    runtime.block_on(async {
+        let db = StrikeDb::new(&executor, 4326);
+        let latest = db.get_latest_time(Some(1)).await.expect("get_latest_time must succeed");
+        println!("latest: {latest:?}");
+    });
 }
 
 /// Inserts must round-trip (regression for the ambiguous `ST_MakePoint`
@@ -110,8 +120,7 @@ fn get_latest_time_executes() {
 #[ignore = "requires a live PostgreSQL with the strikes schema (set DATABASE_URL)"]
 fn insert_many_round_trips() {
     use bo_service::data::Strike;
-    let (_runtime, executor) = runtime_and_executor();
-    let db = StrikeDb::new(&executor, 4326);
+    let (runtime, executor) = runtime_and_executor();
 
     let strike = Strike::new(
         None,
@@ -125,8 +134,12 @@ fn insert_many_round_trips() {
         vec![],
         Some(1),
     );
-    let count = db
-        .insert_many(std::slice::from_ref(&strike), Some(1))
-        .expect("insert must succeed");
-    assert_eq!(count, 1);
+    runtime.block_on(async {
+        let db = StrikeDb::new(&executor, 4326);
+        let count = db
+            .insert_many(std::slice::from_ref(&strike), Some(1))
+            .await
+            .expect("insert must succeed");
+        assert_eq!(count, 1);
+    });
 }

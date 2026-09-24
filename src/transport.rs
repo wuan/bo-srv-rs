@@ -211,7 +211,7 @@ async fn handle_connection<M: Metrics>(
         let body = String::from_utf8_lossy(&frame);
 
         let started = std::time::Instant::now();
-        let result = crate::jsonrpc::dispatch(&service, &mut request, &body);
+        let result = crate::jsonrpc::dispatch(&service, &mut request, &body).await;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         log_access(&request, &result.meta, elapsed_ms);
 

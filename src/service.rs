@@ -47,7 +47,9 @@ pub const HISTOGRAM_BIN_SIZE: i64 = 5;
 
 /// Errors that abort a request (the Python counterparts errback the Twisted
 /// deferred; the JSON-RPC layer renders them as a fault envelope).
-#[derive(Debug)]
+///
+/// `Clone` so a cached error can be handed to every waiting request.
+#[derive(Debug, Clone)]
 pub enum ServiceError {
     /// A database (or mock) query failed.
     Database(String),
@@ -242,7 +244,7 @@ impl<M: Metrics> Service<M> {
     }
 
     /// `get_strikes_grid` producer (cached inside `strikes_grid`).
-    fn get_strikes_grid(
+    async fn get_strikes_grid(
         &self,
         minute_length: i64,
         grid_baselength: i64,
@@ -255,14 +257,15 @@ impl<M: Metrics> Service<M> {
             None => GridFactory::global().get_for(grid_baselength as f64),
         };
         let time_interval = create_time_interval(minute_length, minute_offset);
-        let grid_data = self.run_grid_query(&grid, &time_interval, Some(region), count_threshold, false)?;
+        let grid_data = self.run_grid_query(&grid, &time_interval, Some(region), count_threshold, false).await?;
         let histogram = if minute_length > HISTOGRAM_MINUTE_THRESHOLD {
             self.get_histogram(
                 &time_interval,
                 None,
                 Some(&grid),
                 &histogram_cache_key(minute_length, minute_offset, Some(&grid)),
-            )?
+            )
+            .await?
         } else {
             vec![]
         };
@@ -270,7 +273,7 @@ impl<M: Metrics> Service<M> {
     }
 
     /// `get_global_strikes_grid` producer (cached inside `global_strikes_grid`).
-    fn get_global_strikes_grid(
+    async fn get_global_strikes_grid(
         &self,
         minute_length: i64,
         grid_baselength: i64,
@@ -279,14 +282,15 @@ impl<M: Metrics> Service<M> {
     ) -> Result<Value, ServiceError> {
         let grid = GridFactory::global().get_for(grid_baselength as f64);
         let time_interval = create_time_interval(minute_length, minute_offset);
-        let grid_data = self.run_grid_query(&grid, &time_interval, None, count_threshold, true)?;
+        let grid_data = self.run_grid_query(&grid, &time_interval, None, count_threshold, true).await?;
         let histogram = if minute_length > HISTOGRAM_MINUTE_THRESHOLD {
             self.get_histogram(
                 &time_interval,
                 None,
                 None,
                 &histogram_cache_key(minute_length, minute_offset, None),
-            )?
+            )
+            .await?
         } else {
             vec![]
         };
@@ -295,7 +299,7 @@ impl<M: Metrics> Service<M> {
 
     /// `get_local_strikes_grid` producer (cached inside `local_strikes_grid`).
     #[allow(clippy::too_many_arguments)]
-    fn get_local_strikes_grid(
+    async fn get_local_strikes_grid(
         &self,
         x: i64,
         y: i64,
@@ -312,14 +316,15 @@ impl<M: Metrics> Service<M> {
         };
         let grid = local_grid.grid_factory().get_for(grid_baselength as f64);
         let time_interval = create_time_interval(minute_length, minute_offset);
-        let grid_data = self.run_grid_query(&grid, &time_interval, None, count_threshold, false)?;
+        let grid_data = self.run_grid_query(&grid, &time_interval, None, count_threshold, false).await?;
         let histogram = if minute_length > HISTOGRAM_MINUTE_THRESHOLD {
             self.get_histogram(
                 &time_interval,
                 None,
                 Some(&grid),
                 &histogram_cache_key(minute_length, minute_offset, Some(&grid)),
-            )?
+            )
+            .await?
         } else {
             vec![]
         };
@@ -328,7 +333,7 @@ impl<M: Metrics> Service<M> {
 
     /// Run the grid SQL and shape the rows (`StrikeGridQuery.create` /
     /// `GlobalStrikeGridQuery.create` plus `db.grid_result.build_grid_result`).
-    fn run_grid_query(
+    async fn run_grid_query(
         &self,
         grid: &Grid,
         time_interval: &TimeInterval,
@@ -344,13 +349,14 @@ impl<M: Metrics> Service<M> {
         let rows = self
             .executor
             .query(&query.to_postgres(), &query.parameters())
+            .await
             .map_err(|e| ServiceError::Database(e.to_string()))?;
         Ok(build_grid_rows(&rows, grid, time_interval.end, global))
     }
 
     /// `base.get_histogram`: run (or fetch from the histogram cache) the
     /// histogram bins for `time_interval`.
-    fn get_histogram(
+    async fn get_histogram(
         &self,
         time_interval: &TimeInterval,
         region: Option<i64>,
@@ -358,26 +364,31 @@ impl<M: Metrics> Service<M> {
         cache_key: &str,
     ) -> Result<Vec<Value>, ServiceError> {
         let key = format!("histogram_query|{cache_key}");
+        // The producer is async and may be shared with concurrent callers; the
+        // cache stores the in-flight computation (single-flight).
         let result = self
             .cache
             .histogram
-            .get_result(&key, || {
+            .get_result(&key, || async {
                 let query = histogram_query(time_interval, HISTOGRAM_BIN_SIZE, region, envelope);
                 let rows = self
                     .executor
                     .query(&query.to_postgres(), &query.parameters())
-                    .map_err(|e| ServiceError::Database(e.to_string()))?;
-                build_histogram(&rows, time_interval.minutes(), HISTOGRAM_BIN_SIZE).map(Value::Array)
+                    .await
+                    .map_err(|e| cache_error(ServiceError::Database(e.to_string())))?;
+                build_histogram(&rows, time_interval.minutes(), HISTOGRAM_BIN_SIZE)
+                    .map(Value::Array)
+                    .map_err(cache_error)
             })
-            .map(|value| match value {
-                Value::Array(bins) => Ok(bins),
-                // The histogram cache only ever stores arrays.
-                _ => Ok(vec![]),
-            })
-            .unwrap_or_else(Err);
+            .await;
         self.metrics
             .for_histogram(self.cache.histogram.get_ratio(), self.cache.histogram.get_size());
-        result
+        match result {
+            Ok(Value::Array(bins)) => Ok(bins),
+            // The histogram cache only ever stores arrays.
+            Ok(_) => Ok(vec![]),
+            Err(error) => Err(service_error(error)),
+        }
     }
 
     /// `StrikeGridQuery.build_grid_response` / `GlobalStrikeGridQuery.build_grid_response`
@@ -457,7 +468,7 @@ impl Service<crate::metrics::NoopMetrics> {
 impl<M: Metrics> Service<M> {
     /// `jsonrpc_get_strikes_grid` (also the target of the ``*_raster`` aliases).
     #[allow(clippy::too_many_arguments)]
-    pub fn jsonrpc_get_strikes_grid(
+    pub async fn jsonrpc_get_strikes_grid(
         &self,
         request: &mut Request,
         minute_length: &Value,
@@ -499,9 +510,13 @@ impl<M: Metrics> Service<M> {
         let response = self
             .cache
             .strikes(minute_offset)
-            .get_result(&cache_key, || {
+            .get_result(&cache_key, || async {
                 self.get_strikes_grid(minute_length, grid_base_length, minute_offset, region, count_threshold)
+                    .await
+                    .map_err(cache_error)
             })
+            .await
+            .map_err(service_error)
             .unwrap_or(Value::Null);
         let _ = request.fix_bad_accept_header();
 
@@ -511,7 +526,7 @@ impl<M: Metrics> Service<M> {
     }
 
     /// `jsonrpc_get_strikes_raster` / `jsonrpc_get_strokes_raster`.
-    pub fn jsonrpc_get_strikes_raster(
+    pub async fn jsonrpc_get_strikes_raster(
         &self,
         request: &mut Request,
         minute_length: &Value,
@@ -527,10 +542,11 @@ impl<M: Metrics> Service<M> {
             region,
             &json!(0),
         )
+        .await
     }
 
     /// `jsonrpc_get_global_strikes_grid`.
-    pub fn jsonrpc_get_global_strikes_grid(
+    pub async fn jsonrpc_get_global_strikes_grid(
         &self,
         request: &mut Request,
         minute_length: &Value,
@@ -570,9 +586,13 @@ let client = request.request_client();
         let response = self
             .cache
             .global_strikes(minute_offset)
-            .get_result(&cache_key, || {
+            .get_result(&cache_key, || async {
                 self.get_global_strikes_grid(minute_length, grid_base_length, minute_offset, count_threshold)
+                    .await
+                    .map_err(cache_error)
             })
+            .await
+            .map_err(service_error)
             .unwrap_or(Value::Null);
         let _ = request.fix_bad_accept_header();
 
@@ -584,7 +604,7 @@ let client = request.request_client();
 
     /// `jsonrpc_get_local_strikes_grid`.
     #[allow(clippy::too_many_arguments)]
-    pub fn jsonrpc_get_local_strikes_grid(
+    pub async fn jsonrpc_get_local_strikes_grid(
         &self,
         request: &mut Request,
         x: &Value,
@@ -643,11 +663,15 @@ let client = request.request_client();
         let response = self
             .cache
             .local_strikes(minute_offset)
-            .get_result(&cache_key, || {
+            .get_result(&cache_key, || async {
                 self.get_local_strikes_grid(
                     x, y, grid_base_length, minute_length, minute_offset, count_threshold, data_area,
                 )
+                .await
+                .map_err(cache_error)
             })
+            .await
+            .map_err(service_error)
             .unwrap_or(Value::Null);
 
         let _ = (original_grid_base_length, minute_offset);
@@ -663,6 +687,23 @@ let client = request.request_client();
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// Erase a [`ServiceError`] into the cache's shared error type.
+fn cache_error(error: ServiceError) -> crate::cache::CacheError {
+    std::sync::Arc::new(error)
+}
+
+/// Recover a [`ServiceError`] from a cached (type-erased) error.
+///
+/// The cache only ever stores `ServiceError`s produced by this module, so the
+/// downcast succeeds; a non-`ServiceError` (impossible in practice) is wrapped
+/// as a database error so no error is silently swallowed.
+fn service_error(error: crate::cache::CacheError) -> ServiceError {
+    match error.downcast_ref::<ServiceError>() {
+        Some(service_error) => service_error.clone(),
+        None => ServiceError::Database(error.to_string()),
+    }
+}
 
 /// `blitzortung.util.force_range(lower_limit, value, upper_limit)`.
 fn force_range(lower_limit: i64, value: i64, upper_limit: i64) -> i64 {
@@ -1150,8 +1191,8 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         assert_eq!(obj["dt"].as_i64().unwrap(), 1800);
     }
 
-    #[test]
-    fn jsonrpc_get_strikes_grid_serves_cached_and_reports_ratio() {
+    #[tokio::test]
+    async fn jsonrpc_get_strikes_grid_serves_cached_and_reports_ratio() {
         let mut mock = MockExecutor::new();
         // region 1 grid row within range
         mock.add_rows(
@@ -1173,22 +1214,26 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         );
         let mut req = req_with("5.6.7.8");
 
-        let _response = service.jsonrpc_get_strikes_grid(
-            &mut req,
-            &json!(30),
-            &json!(10_000),
-            &json!(0),
-            &json!(1),
-            &json!(0),
-        );
-        let _response = service.jsonrpc_get_strikes_grid(
-            &mut req,
-            &json!(30),
-            &json!(10_000),
-            &json!(0),
-            &json!(1),
-            &json!(0),
-        );
+        let _response = service
+            .jsonrpc_get_strikes_grid(
+                &mut req,
+                &json!(30),
+                &json!(10_000),
+                &json!(0),
+                &json!(1),
+                &json!(0),
+            )
+            .await;
+        let _response = service
+            .jsonrpc_get_strikes_grid(
+                &mut req,
+                &json!(30),
+                &json!(10_000),
+                &json!(0),
+                &json!(1),
+                &json!(0),
+            )
+            .await;
         // second call hits the cache: second query count is 1, ratio 0.5
         assert_eq!(service.cache().strikes(0).get_size(), 1);
         assert!((service.cache().strikes(0).get_ratio() - 0.5).abs() < 1e-9);
@@ -1204,32 +1249,35 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         assert_eq!(recorded[0].1, 1);
     }
 
-    #[test]
-    fn jsonrpc_get_strikes_grid_blocks_by_default() {
+    #[tokio::test]
+    async fn jsonrpc_get_strikes_grid_blocks_by_default() {
         let service = Service::new(Arc::new(MockExecutor::new()));
         let mut req = Request::default();
-        let response =
-            service.jsonrpc_get_strikes_grid(&mut req, &json!(60), &json!(10_000), &json!(0), &json!(1), &json!(0));
+        let response = service
+            .jsonrpc_get_strikes_grid(&mut req, &json!(60), &json!(10_000), &json!(0), &json!(1), &json!(0))
+            .await;
         assert_eq!(response, json!({}));
     }
 
-    #[test]
-    fn jsonrpc_get_global_strikes_grid_blocks_below_25000() {
+    #[tokio::test]
+    async fn jsonrpc_get_global_strikes_grid_blocks_below_25000() {
         let service = Service::new(Arc::new(MockExecutor::new()));
         let mut req = req_with("5.6.7.8");
         // gbl 10000 < 25000 is forbidden for the global endpoint
-        let response = service.jsonrpc_get_global_strikes_grid(
-            &mut req,
-            &json!(60),
-            &json!(10_000),
-            &json!(0),
-            &json!(0),
-        );
+        let response = service
+            .jsonrpc_get_global_strikes_grid(
+                &mut req,
+                &json!(60),
+                &json!(10_000),
+                &json!(0),
+                &json!(0),
+            )
+            .await;
         assert_eq!(response, json!({}));
     }
 
-    #[test]
-    fn jsonrpc_get_global_strikes_grid_serves_response() {
+    #[tokio::test]
+    async fn jsonrpc_get_global_strikes_grid_serves_response() {
         let mut mock = MockExecutor::new();
         mock.add_rows(
             "ROUND((ST_X",
@@ -1243,13 +1291,15 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         mock.add_rows("-extract( epoch", vec![]);
         let service = Service::new(Arc::new(mock));
         let mut req = req_with("5.6.7.8");
-        let response = service.jsonrpc_get_global_strikes_grid(
-            &mut req,
-            &json!(30),
-            &json!(25_000),
-            &json!(0),
-            &json!(0),
-        );
+        let response = service
+            .jsonrpc_get_global_strikes_grid(
+                &mut req,
+                &json!(30),
+                &json!(25_000),
+                &json!(0),
+                &json!(0),
+            )
+            .await;
         let obj = response.as_object().expect("grid response");
         for key in ["r", "xd", "yd", "x0", "y1", "xc", "yc", "t", "dt", "h"] {
             assert!(obj.contains_key(key), "missing key {key}");
@@ -1262,8 +1312,8 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         assert_eq!(rows[0][2], json!(4));
     }
 
-    #[test]
-    fn jsonrpc_get_local_strikes_grid_serves_response() {
+    #[tokio::test]
+    async fn jsonrpc_get_local_strikes_grid_serves_response() {
         let mut mock = MockExecutor::new();
         mock.add_rows(
             "TRUNC((ST_X",
@@ -1277,16 +1327,18 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         mock.add_rows("-extract( epoch", vec![]);
         let service = Service::new(Arc::new(mock));
         let mut req = req_with("5.6.7.8");
-        let response = service.jsonrpc_get_local_strikes_grid(
-            &mut req,
-            &json!(5),
-            &json!(5),
-            &json!(10_000),
-            &json!(30),
-            &json!(0),
-            &json!(0),
-            &json!(5),
-        );
+        let response = service
+            .jsonrpc_get_local_strikes_grid(
+                &mut req,
+                &json!(5),
+                &json!(5),
+                &json!(10_000),
+                &json!(30),
+                &json!(0),
+                &json!(0),
+                &json!(5),
+            )
+            .await;
         let obj = response.as_object().expect("grid response");
         for key in ["r", "xd", "yd", "x0", "y1", "xc", "yc", "t", "dt", "h"] {
             assert!(obj.contains_key(key), "missing key {key}");
@@ -1297,12 +1349,13 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         assert_eq!(rows[0][2], json!(4));
     }
 
-    #[test]
-    fn jsonrpc_get_strikes_grid_invalid_params_yields_empty_object() {
+    #[tokio::test]
+    async fn jsonrpc_get_strikes_grid_invalid_params_yields_empty_object() {
         let service = Service::new(Arc::new(MockExecutor::new()));
         let mut req = req_with("5.6.7.8");
-        let response =
-            service.jsonrpc_get_strikes_grid(&mut req, &json!("x"), &json!(10_000), &json!(0), &json!(1), &json!(0));
+        let response = service
+            .jsonrpc_get_strikes_grid(&mut req, &json!("x"), &json!(10_000), &json!(0), &json!(1), &json!(0))
+            .await;
         assert_eq!(response, json!({}));
     }
 }
