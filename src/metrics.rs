@@ -14,6 +14,7 @@ use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 /// `blitzortung/service/metrics.py`.
 pub mod name {
     pub const STRIKES_GRID: &str = "strikes_grid";
+    pub const STRIKES_GRID_QUERY: &str = "strikes_grid_query";
     pub const GLOBAL_STRIKES_GRID: &str = "global_strikes_grid";
     pub const LOCAL_STRIKES_GRID: &str = "local_strikes_grid";
     pub const HISTOGRAM: &str = "histogram";
@@ -26,6 +27,7 @@ pub mod name {
     pub const SIZE: &str = "size";
     pub const POOL_WAIT: &str = "pool_wait";
     pub const TOTAL: &str = "total";
+    pub const QUERY: &str = "query";
 
     /// Metric-name leaves used by the importer CLIs (`blitzortung/cli`).
     ///
@@ -122,6 +124,7 @@ pub trait Metrics: Send + Sync {
 
     /// `StatsDMetrics.for_histogram(cache_ratio, cache_size)`.
     fn for_histogram(&self, cache_ratio: f64, cache_size: usize) {
+        self.incr(&metric_name(&[name::HISTOGRAM, name::QUERY, name::COUNT]), 1);
         self.gauge_f64(
             &metric_name(&[name::HISTOGRAM, name::CACHE_HITS]),
             cache_ratio,
@@ -150,6 +153,11 @@ pub trait Metrics: Send + Sync {
     fn for_grid_total(&self, grid: &str, elapsed_seconds: f64) {
         let millis = ((elapsed_seconds * 1000.0) as i64).max(1) as u64;
         self.timing(&metric_name(&[grid, name::TOTAL]), millis);
+    }
+
+    /// Count one grid database query (`strikes_grid.query`).
+    fn for_grid_query(&self) {
+        self.incr(&metric_name(&[name::STRIKES_GRID_QUERY]), 1);
     }
 
     /// `cli/imprt.py::import_strikes_for`: report one region's import run.
@@ -259,6 +267,10 @@ impl Metrics for std::sync::Arc<dyn Metrics> {
 
     fn for_grid_total(&self, grid: &str, elapsed_seconds: f64) {
         (**self).for_grid_total(grid, elapsed_seconds);
+    }
+
+    fn for_grid_query(&self) {
+        (**self).for_grid_query();
     }
 
     fn for_import(&self, region: u32, strike_count: u64, get_seconds: f64, insert_seconds: f64) {
@@ -540,6 +552,20 @@ mod tests {
             vec![
                 "strikes_grid.total:17|ms".to_string(),
                 "global_strikes_grid.total:1|ms".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn for_grid_query_counts_queries() {
+        let metrics = RecordingMetrics::new();
+        metrics.for_grid_query();
+        metrics.for_grid_query();
+        assert_eq!(
+            metrics.lines(),
+            vec![
+                "strikes_grid.query:1|c".to_string(),
+                "strikes_grid.query:1|c".to_string(),
             ]
         );
     }

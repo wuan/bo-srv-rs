@@ -393,6 +393,7 @@ impl<M: Metrics> Service<M> {
         } else {
             grid_query(grid, time_interval, region, count_threshold)
         };
+        self.metrics.for_grid_query();
         let rows = self
             .executor
             .query(&query.to_postgres(), &query.parameters())
