@@ -32,7 +32,15 @@ cargo test --test postgres_integration -- --ignored --nocapture
 ```sh
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 cargo run --manifest-path rust/bo-service/Cargo.toml
+
+# override the listening port (also: -p)
+cargo run --manifest-path rust/bo-service/Cargo.toml -- --port 8300
 ```
+
+The `service` binary accepts `-p, --port <PORT>` (plus `-h/--help` and
+`-V/--version`).  The listening port is resolved with the precedence
+**CLI `--port` > `BO_SERVICE_PORT` > `blitzortung.conf` `[webservice] port` >
+default `8080`**; the CLI flag wins over both env and file.
 
 At startup a `blitzortung.conf` INI file is searched in `./blitzortung.conf`
 then `/etc/blitzortung.conf` (mirroring `blitzortung/config.py`); set
