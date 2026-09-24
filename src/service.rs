@@ -1394,13 +1394,15 @@ mod tests {
         // second call hits the cache: second query count is 1, ratio 0.5
         assert_eq!(service.cache().strikes(0).get_size(), 1);
         assert!((service.cache().strikes(0).get_ratio() - 0.5).abs() < 1e-9);
-        // metrics recorded after each call: the histogram of the (30-minute)
-        // grid query, the total timing of the cache-miss producer, then the
-        // three strikes-grid lines.
+        // metrics recorded after each call: the grid-query counter, the
+        // histogram of the (30-minute) grid query, the total timing of the
+        // cache-miss producer, then the three strikes-grid lines.
         let recorded = service.metrics.lines();
         assert_eq!(
             recorded,
             vec![
+                "strikes_grid_query.count:1|c".to_string(),
+                "histogram.query.count:1|c".to_string(),
                 "histogram.cache_hits:0|g".to_string(),
                 "histogram.size:1|g".to_string(),
                 "strikes_grid.total:1|ms".to_string(),
@@ -1489,6 +1491,8 @@ mod tests {
         assert_eq!(
             service.metrics.lines(),
             vec![
+                "strikes_grid_query.count:1|c".to_string(),
+                "histogram.query.count:1|c".to_string(),
                 "histogram.cache_hits:0|g".to_string(),
                 "histogram.size:1|g".to_string(),
                 "global_strikes_grid.total:1|ms".to_string(),
@@ -1542,6 +1546,8 @@ mod tests {
         assert_eq!(
             service.metrics.lines(),
             vec![
+                "strikes_grid_query.count:1|c".to_string(),
+                "histogram.query.count:1|c".to_string(),
                 "histogram.cache_hits:0|g".to_string(),
                 "histogram.size:1|g".to_string(),
                 "strikes_grid.total:1|ms".to_string(),

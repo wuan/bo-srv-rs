@@ -158,9 +158,9 @@ pub trait Metrics: Send + Sync {
         self.timing(&metric_name(&[grid, name::TOTAL]), millis);
     }
 
-    /// Count one grid database query (`strikes_grid.query`).
+    /// Count one grid database query (`strikes_grid_query.count`).
     fn for_grid_query(&self) {
-        self.incr(&metric_name(&[name::STRIKES_GRID_QUERY]), 1);
+        self.incr(&metric_name(&[name::STRIKES_GRID_QUERY, name::COUNT]), 1);
     }
 
     /// `cli/imprt.py::import_strikes_for`: report one region's import run.
@@ -444,6 +444,7 @@ mod tests {
         metrics.for_histogram(0.0, 0);
         metrics.for_db_pool_wait(0.01);
         metrics.for_grid_total(name::STRIKES_GRID, 0.01);
+        metrics.for_grid_query();
     }
 
     #[test]
@@ -510,12 +511,13 @@ mod tests {
     }
 
     #[test]
-    fn for_histogram_reports_ratio_and_size() {
+    fn for_histogram_reports_query_count_ratio_and_size() {
         let metrics = RecordingMetrics::new();
         metrics.for_histogram(0.75, 4);
         assert_eq!(
             metrics.lines(),
             vec![
+                "histogram.query.count:1|c".to_string(),
                 "histogram.cache_hits:0.75|g".to_string(),
                 "histogram.size:4|g".to_string(),
             ]
@@ -558,8 +560,8 @@ mod tests {
         assert_eq!(
             metrics.lines(),
             vec![
-                "strikes_grid.query:1|c".to_string(),
-                "strikes_grid.query:1|c".to_string(),
+                "strikes_grid_query.count:1|c".to_string(),
+                "strikes_grid_query.count:1|c".to_string(),
             ]
         );
     }

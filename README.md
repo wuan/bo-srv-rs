@@ -177,23 +177,27 @@ plain StatsD lines (`<name>:<value>|<type>`), e.g.:
 org.blitzortung.service.strikes_grid.total_count:1|c
 org.blitzortung.service.strikes_grid.total_count.<region>:1|c
 org.blitzortung.service.strikes_grid.cache_hits:0.5|g
+org.blitzortung.service.strikes_grid_query.count:1|c
 org.blitzortung.service.strikes_grid.total:17|ms
 org.blitzortung.service.global_strikes_grid.total_count:1|c
 org.blitzortung.service.global_strikes_grid.total:23|ms
 org.blitzortung.service.local_strikes_grid.data_area.<area>:1|c
+org.blitzortung.service.histogram.query.count:1|c
 org.blitzortung.service.histogram.cache_hits:0.75|g
 org.blitzortung.service.histogram.size:4|g
 org.blitzortung.service.db.pool_wait:12|ms
 ```
 
-The metric names and counts match the Python implementation exactly:
+The metric names and counts match the Python implementation, plus a
+`strikes_grid_query.count` / `histogram.query.count` counter pair that counts
+the actual DB queries behind each cache miss:
 
 | Handler | Metrics |
 | --- | --- |
-| `get_strikes_grid` | `strikes_grid.total_count` (+ `.<region>`), `strikes_grid.cache_hits` gauge, `strikes_grid.total` timing (>= 1ms); at a 10-minute length also `strikes_grid.bg_count` (+ `.<region>`) |
-| `get_global_strikes_grid` | `strikes_grid.total_count`, `global_strikes_grid.total_count`, `global_strikes_grid.cache_hits` gauge, `global_strikes_grid.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
-| `get_local_strikes_grid` | `strikes_grid.total_count`, `local_strikes_grid.total_count`, `local_strikes_grid.data_area.<area>`, `local_strikes_grid.cache_hits` gauge, `strikes_grid.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
-| histogram cache | `histogram.cache_hits` gauge, `histogram.size` gauge |
+| `get_strikes_grid` | `strikes_grid.total_count` (+ `.<region>`), `strikes_grid.cache_hits` gauge, `strikes_grid_query.count` counter (one per DB query), `strikes_grid.total` timing (>= 1ms); at a 10-minute length also `strikes_grid.bg_count` (+ `.<region>`) |
+| `get_global_strikes_grid` | `strikes_grid.total_count`, `global_strikes_grid.total_count`, `global_strikes_grid.cache_hits` gauge, `strikes_grid_query.count` counter, `global_strikes_grid.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
+| `get_local_strikes_grid` | `strikes_grid.total_count`, `local_strikes_grid.total_count`, `local_strikes_grid.data_area.<area>`, `local_strikes_grid.cache_hits` gauge, `strikes_grid_query.count` counter, `strikes_grid.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
+| histogram cache | `histogram.query.count` counter (one per DB query), `histogram.cache_hits` gauge, `histogram.size` gauge |
 | DB pool wait | `db.pool_wait` timing in milliseconds (at least `1`) |
 
 The `*_total` timings measure how long a cache-miss grid producer took from
