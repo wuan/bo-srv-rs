@@ -1,4 +1,4 @@
-//! `bo-insert-websocket` implementation (port of
+//! `bo-import-websocket` implementation (port of
 //! `blitzortung/cli/imprt_websocket.py`).
 //!
 //! Connects to a Blitzortung live websocket, decodes and stores incoming
@@ -30,7 +30,7 @@ pub const COMMIT_STRIKE_COUNT: u64 = 100;
 /// Commit after this many seconds.
 pub const COMMIT_INTERVAL_SECONDS: u64 = 5;
 
-/// The option specs understood by `bo-insert-websocket`.
+/// The option specs understood by `bo-import-websocket`.
 pub const SPECS: &[(&str, &str, bool)] = &[
     ("verbose", "v", false),
     ("debug", "d", false),
@@ -49,7 +49,7 @@ pub fn strike_from_message(message: &str) -> Option<(crate::data::Strike, i64, f
     Some((strike, region, delay))
 }
 
-/// The `bo-insert-websocket` options.
+/// The `bo-import-websocket` options.
 pub struct WebsocketOptions {
     pub verbose: bool,
     pub debug: bool,

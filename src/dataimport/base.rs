@@ -45,7 +45,7 @@ impl Transport for FileTransport {
 
 /// HTTP transport with basic auth (`HttpFileTransport`).
 ///
-/// Python uses a 60 second timeout; the `bo-insert` CLI additionally relies on
+/// Python uses a 60 second timeout; the `bo-import` CLI additionally relies on
 /// its whole-region timeout, so per-request failures surface as
 /// [`TransportError::Request`].
 pub struct HttpFileTransport {
