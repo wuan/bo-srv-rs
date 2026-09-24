@@ -2,10 +2,9 @@
 //!
 //! Spins up the real TCP service against a live PostgreSQL with the PostGIS
 //! `strikes` schema and sends a JSON-RPC request, exercising the full path
-//! `transport` -> `jsonrpc` -> `service` where `query()` is called from inside
-//! a Tokio multi-thread runtime (the `block_in_place` path).  This is the
-//! regression guard for the `Cannot start a runtime from within a runtime`
-//! panic.
+//! `transport` -> `jsonrpc` -> `service` -> async `query()`.  This guards the
+//! whole async database path (previously a synchronous `block_on` here panicked
+//! with `Cannot start a runtime from within a runtime`).
 //!
 //! Run with:
 //! ```sh
