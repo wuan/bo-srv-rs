@@ -25,8 +25,16 @@ export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 cargo run --manifest-path rust/bo-service/Cargo.toml
 ```
 
-At startup a `blitzortung.conf` INI file is searched in `.` then `/etc/`
-(mirroring `blitzortung/config.py`), with these sections:
+At startup a `blitzortung.conf` INI file is searched in `./blitzortung.conf`
+then `/etc/blitzortung.conf` (mirroring `blitzortung/config.py`); set
+`BO_CONFIG=/path/to/file` to point at an explicit file instead.  The file has
+these sections (all `[db]` keys except `connection_count` are required by the
+Python `Config`, and `[auth]` is required for the protected data feeds):
+
+> **Note:** the tools read **only** the INI `blitzortung.conf`.  The legacy
+> YAML `config.yml`/`config.yaml` (with `blitzortung:` / `database:` keys, see
+> `.gitignore`) is **not** read; a missing/absent config file produces a clear
+> warning and the built-in defaults are used.
 
 ```ini
 [webservice]
@@ -237,6 +245,16 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   but preserve the Python long/short option names and defaults.  `clap`
   provides `-h`/`--help` and `-V`/`--version` (exit 0) and exits non-zero (2)
   on unknown options or invalid values.
+- **CLI error reporting.** Database errors print the full causal chain
+  (`cli::format_error_chain`), including the server-side `severity`/`message`/
+  `detail`/`hint` from `tokio_postgres::Error::as_db_error()`, instead of
+  tokio-postgres' unhelpful `"db error"` display.  Example:
+  `error: db error` / `caused by: ERROR: relation "strikes" does not exist`.
+- **Missing configuration is diagnosed.** When no `blitzortung.conf` is found,
+  the CLI tools print a prominent warning naming the searched paths and the
+  defaults in use (`Config::from_env`), rather than silently using defaults.
+  The Python `ConfigModule` raises `No configuration file found` instead; the
+  Rust port keeps running with defaults to remain non-breaking.
 - **No statsd in the CLI tools.** The Python importers report to a local
   statsd daemon; the Rust tools only log (metrics go through the same
   `Metrics`/plain-logging boundary as the service).
