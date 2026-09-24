@@ -3,7 +3,14 @@
 //! Mirrors the Python layer's `blitzortung/config.py`: a `blitzortung.conf`
 //! INI file with `[webservice] port` and `[db] host/port/dbname/username/
 //! password/connection_count` sections, searched in `.` then `/etc/`
-//! (`ConfigModule.find_config_file_path`).
+//! (`ConfigModule.find_config_file_path`).  A legacy YAML `config.yml` is
+//! **not** read.
+//!
+//! When no configuration file is found, [`Config::from_env`] prints a
+//! prominent warning naming the searched paths and the built-in defaults in
+//! use, and the [`ConfigDiagnostics`] returned by
+//! [`Config::from_env_with_diagnostics`] record which file (if any) was
+//! loaded.
 //!
 //! Environment variables supplement/override the file (kept for dev
 //! convenience; they are more explicit than the INI):
@@ -54,10 +61,57 @@ impl Default for Config {
     }
 }
 
+/// Where a [`Config`] was loaded from (used for diagnostics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigDiagnostics {
+    /// The INI file that was actually read, if any.
+    pub loaded_path: Option<String>,
+    /// `true` when an explicit `BO_CONFIG` path was requested but could not be
+    /// read (the caller is using built-in defaults instead).
+    pub explicit_but_missing: bool,
+    /// The default search locations, in order.
+    pub searched_paths: Vec<String>,
+}
+
+impl ConfigDiagnostics {
+    /// Whether no configuration file was found at all (the tool will run with
+    /// built-in defaults).
+    pub fn is_missing(&self) -> bool {
+        self.loaded_path.is_none()
+    }
+
+    /// A human-readable warning describing that no config file was found and
+    /// which defaults are in use.
+    pub fn missing_warning(&self) -> String {
+        let searched = self.searched_paths.join(", ");
+        format!(
+            "no blitzortung configuration file found (searched: {searched}); \
+             using built-in defaults.  Set BO_CONFIG or create blitzortung.conf \
+             with a [db] section.  Note: the legacy YAML config.yml is NOT read."
+        )
+    }
+}
+
 impl Config {
     /// Load configuration from the environment (and the INI file).
+    ///
+    /// Emits a prominent warning on stderr when no configuration file is found
+    /// (the tools then fall back to built-in defaults), matching the Python
+    /// `ConfigModule` which raises `No configuration file found`.
     pub fn from_env() -> Self {
-        Self::from_env_with(|k| std::env::var(k).ok())
+        let (config, diagnostics) = Self::from_env_with_diagnostics(|k| std::env::var(k).ok());
+        if let Some(path) = &diagnostics.loaded_path {
+            log::debug!("loaded configuration from {path}");
+        } else if diagnostics.explicit_but_missing {
+            eprintln!(
+                "warning: BO_CONFIG was set but the file could not be read; \
+                 using built-in defaults"
+            );
+        } else {
+            // Always visible (not gated on the logger being initialised).
+            eprintln!("warning: {}", diagnostics.missing_warning());
+        }
+        config
     }
 
     /// Testable core: `lookup` returns the value of an env var by name.
@@ -66,13 +120,28 @@ impl Config {
     /// an explicit `BO_CONFIG` path first, otherwise `./blitzortung.conf` and
     /// `/etc/blitzortung.conf`.  Flat env vars then override the INI.
     pub fn from_env_with(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        Self::from_env_with_diagnostics(lookup).0
+    }
+
+    /// Like [`Config::from_env_with`] but also returns where the configuration
+    /// was loaded from (for diagnostics/tests).  Does not print anything.
+    pub fn from_env_with_diagnostics(
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> (Self, ConfigDiagnostics) {
         let mut config = Config::default();
 
-        let ini_path = lookup("BO_CONFIG")
-            .filter(|path| !path.is_empty())
-            .or_else(find_blitzortung_conf);
+        let explicit = lookup("BO_CONFIG").filter(|path| !path.is_empty());
+        let searched_paths: Vec<String> = default_config_paths();
+        let ini_path = explicit.clone().or_else(find_blitzortung_conf);
+        let mut diagnostics = ConfigDiagnostics {
+            loaded_path: None,
+            explicit_but_missing: false,
+            searched_paths,
+        };
+
         if let Some(ini_path) = ini_path {
             if let Some(ini) = read_ini(&ini_path) {
+                diagnostics.loaded_path = Some(ini_path);
                 if let Some(section) = ini.get("webservice") {
                     if let Some(port) = section.get("port") {
                         if let Ok(port) = port.parse::<u16>() {
@@ -104,6 +173,10 @@ impl Config {
                 }
             }
         }
+
+        // An explicit `BO_CONFIG` that could not be read leaves us on the
+        // built-in defaults; surface that separately from the search case.
+        diagnostics.explicit_but_missing = explicit.is_some() && diagnostics.loaded_path.is_none();
 
         if let Some(v) = lookup("BO_SERVICE_PORT") {
             if let Ok(port) = v.parse::<u16>() {
@@ -137,7 +210,7 @@ impl Config {
             config.auth_password = v;
         }
 
-        config
+        (config, diagnostics)
     }
 
     /// `Config.get_username`: the HTTP basic-auth username from `[auth]`.
@@ -188,11 +261,23 @@ fn quote_conninfo_value(value: &str) -> String {
     }
 }
 
-/// Search order of `ConfigModule.find_config_file_path`: `.` then `/etc/`.
-fn find_blitzortung_conf() -> Option<String> {
+/// The search order of `ConfigModule.find_config_file_path`: `.` then `/etc/`.
+pub fn default_config_paths() -> Vec<String> {
     [".", "/etc/"]
         .iter()
-        .map(|dir| format!("{dir}/blitzortung.conf"))
+        .map(|dir| {
+            std::path::Path::new(dir)
+                .join("blitzortung.conf")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
+/// The first existing `blitzortung.conf` in [`default_config_paths`].
+fn find_blitzortung_conf() -> Option<String> {
+    default_config_paths()
+        .into_iter()
         .find(|path| std::path::Path::new(path).exists())
 }
 
@@ -352,6 +437,71 @@ mod tests {
         assert_eq!(config.password(), "fromenv");
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn diagnostics_report_loaded_config_path() {
+        let dir = ini_dir("diag-loaded");
+        let path = dir.join("config.ini");
+        std::fs::write(&path, "[db]\nhost = db.local\n").unwrap();
+
+        let (config, diagnostics) = Config::from_env_with_diagnostics(|k| {
+            if k == "BO_CONFIG" {
+                Some(path.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        });
+        assert_eq!(config.db_host, "db.local");
+        assert_eq!(
+            diagnostics.loaded_path.as_deref(),
+            Some(path.to_string_lossy().as_ref())
+        );
+        assert!(!diagnostics.is_missing());
+        assert!(!diagnostics.explicit_but_missing);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn diagnostics_report_missing_config_file() {
+        // No BO_CONFIG and (in this temp CWD) no blitzortung.conf.
+        let dir = ini_dir("diag-missing");
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let (config, diagnostics) =
+            Config::from_env_with_diagnostics(|_| None);
+        std::env::set_current_dir(original).unwrap();
+
+        assert!(diagnostics.is_missing());
+        assert!(!diagnostics.explicit_but_missing);
+        // Defaults are still applied (non-breaking).
+        assert_eq!(config.db_host, "localhost");
+        assert_eq!(config.db_name, "blitzortung");
+        // The search order is reported.
+        assert_eq!(
+            diagnostics.searched_paths,
+            vec!["./blitzortung.conf".to_string(), "/etc/blitzortung.conf".to_string()]
+        );
+        let warning = diagnostics.missing_warning();
+        assert!(warning.contains("no blitzortung configuration file found"));
+        assert!(warning.contains("./blitzortung.conf"));
+        assert!(warning.contains("config.yml is NOT read"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn diagnostics_flag_explicit_but_missing_config() {
+        let (_config, diagnostics) = Config::from_env_with_diagnostics(|k| {
+            if k == "BO_CONFIG" {
+                Some("/nonexistent/blitzortung.conf".into())
+            } else {
+                None
+            }
+        });
+        assert!(diagnostics.is_missing());
+        assert!(diagnostics.explicit_but_missing);
     }
 
     #[test]
