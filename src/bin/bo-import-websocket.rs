@@ -12,7 +12,8 @@
 use std::sync::Arc;
 
 use bo_service::cli::{
-    describe_error, exit_with, import_websocket_tool, init_logging, LockWithTimeout,
+    build_import_metrics, describe_error, exit_with, import_websocket_tool, init_logging,
+    LockWithTimeout,
 };
 use bo_service::config::Config;
 use bo_service::executor::QueryExecutor;
@@ -37,10 +38,15 @@ fn main() {
         Err(error) => exit_with(&describe_error("failed to build runtime", &error), 1),
     };
 
+    // Metrics use the importer prefix (`org.blitzortung.import`) with the
+    // configured `[statsd]` receiver; a missing daemon never blocks the import.
+    // In `--test` mode the database (and thus the config) is not opened, so the
+    // importer metrics fall back to the built-in receiver defaults.
+    let config = Config::from_env();
+
     let executor: Option<Arc<dyn QueryExecutor>> = if ws_options.test {
         None
     } else {
-        let config = Config::from_env();
         match runtime.block_on(PostgresExecutor::connect(&config)) {
             Ok(executor) => Some(Arc::new(executor)),
             Err(error) => {
@@ -49,7 +55,11 @@ fn main() {
         }
     };
 
-    if let Err(error) = runtime.block_on(import_websocket_tool::run(executor, &ws_options)) {
+    let metrics = build_import_metrics(&config);
+
+    if let Err(error) =
+        runtime.block_on(import_websocket_tool::run(executor, &ws_options, metrics.as_ref()))
+    {
         exit_with(&describe_error("websocket import failed", error.as_ref()), 1);
     }
 }

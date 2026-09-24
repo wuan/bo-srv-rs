@@ -26,6 +26,19 @@ pub mod name {
     pub const SIZE: &str = "size";
     pub const POOL_WAIT: &str = "pool_wait";
     pub const TOTAL: &str = "total";
+
+    /// Metric-name leaves used by the importer CLIs (`blitzortung/cli`).
+    ///
+    /// The importer tools send under the `org.blitzortung.import` prefix and
+    /// use a flat `strikes...` namespace rather than the service's
+    /// `strikes_grid` one.
+    pub const STRIKES: &str = "strikes";
+    pub const COUNT: &str = "count";
+    pub const GET: &str = "get";
+    pub const INSERT: &str = "insert";
+    pub const ERROR_COUNT: &str = "error_count";
+    pub const DELAY: &str = "delay";
+    pub const IMPORTED: &str = "imported";
 }
 
 /// `StatsDMetrics.name`: join the metric components with `.`.
@@ -138,6 +151,65 @@ pub trait Metrics: Send + Sync {
         let millis = ((elapsed_seconds * 1000.0) as i64).max(1) as u64;
         self.timing(&metric_name(&[grid, name::TOTAL]), millis);
     }
+
+    /// `cli/imprt.py::import_strikes_for`: report one region's import run.
+    ///
+    /// Increments `strikes.<region>`, gauges `strikes.<region>.count` and
+    /// reports the fetch/insert phases as millisecond timings clamped to at
+    /// least `1` (the Python `max(1, int(seconds * 1000))`).
+    fn for_import(
+        &self,
+        region: u32,
+        strike_count: u64,
+        get_seconds: f64,
+        insert_seconds: f64,
+    ) {
+        let region = region.to_string();
+        self.incr(&metric_name(&[name::STRIKES, &region]), 1);
+        self.gauge(
+            &metric_name(&[name::STRIKES, &region, name::COUNT]),
+            strike_count,
+        );
+        self.timing(
+            &metric_name(&[name::STRIKES, &region, name::GET]),
+            seconds_to_millis(get_seconds),
+        );
+        self.timing(
+            &metric_name(&[name::STRIKES, &region, name::INSERT]),
+            seconds_to_millis(insert_seconds),
+        );
+    }
+
+    /// `cli/imprt.py::import_strikes`: gauge the accumulated error count as
+    /// `strikes.error_count`.
+    fn for_import_error_count(&self, error_count: u64) {
+        self.gauge(
+            &metric_name(&[name::STRIKES, name::ERROR_COUNT]),
+            error_count,
+        );
+    }
+
+    /// `cli/imprt_websocket.py::on_message`: count one live strike and gauge
+    /// its local delay in seconds (`strikes`, `strikes.delay`).
+    fn for_websocket_strike(&self, local_delay: f64) {
+        self.incr(name::STRIKES, 1);
+        self.gauge_f64(&metric_name(&[name::STRIKES, name::DELAY]), local_delay);
+    }
+
+    /// `cli/update.py::update_strikes`: gauge the number of inserted strikes
+    /// as `strikes.imported`.
+    fn for_update_imported(&self, insert_count: u64) {
+        self.gauge(
+            &metric_name(&[name::STRIKES, name::IMPORTED]),
+            insert_count,
+        );
+    }
+}
+
+/// Seconds to whole milliseconds, clamped to at least `1`
+/// (`max(1, int(seconds * 1000))` in the Python importers).
+fn seconds_to_millis(seconds: f64) -> u64 {
+    ((seconds * 1000.0) as i64).max(1) as u64
 }
 
 /// Metrics that drop everything.
@@ -188,6 +260,22 @@ impl Metrics for std::sync::Arc<dyn Metrics> {
     fn for_grid_total(&self, grid: &str, elapsed_seconds: f64) {
         (**self).for_grid_total(grid, elapsed_seconds);
     }
+
+    fn for_import(&self, region: u32, strike_count: u64, get_seconds: f64, insert_seconds: f64) {
+        (**self).for_import(region, strike_count, get_seconds, insert_seconds);
+    }
+
+    fn for_import_error_count(&self, error_count: u64) {
+        (**self).for_import_error_count(error_count);
+    }
+
+    fn for_websocket_strike(&self, local_delay: f64) {
+        (**self).for_websocket_strike(local_delay);
+    }
+
+    fn for_update_imported(&self, insert_count: u64) {
+        (**self).for_update_imported(insert_count);
+    }
 }
 
 /// Default StatsD receiver address (`StatsClient('localhost', 8125)`).
@@ -195,6 +283,9 @@ pub const DEFAULT_STATSD_HOST: &str = "localhost";
 pub const DEFAULT_STATSD_PORT: u16 = 8125;
 /// `StatsClient(..., prefix='org.blitzortung.service')`.
 pub const DEFAULT_STATSD_PREFIX: &str = "org.blitzortung.service";
+/// `StatsClient(..., prefix='org.blitzortung.import')`: the prefix used by the
+/// importer CLIs (`cli/imprt.py`, `cli/imprt_websocket.py`, `cli/update.py`).
+pub const IMPORT_STATSD_PREFIX: &str = "org.blitzortung.import";
 
 /// Render a float the way StatsD strings are written by the Python
 /// `statsd` client: no exponent for ordinary values, and no trailing `.0`.
@@ -459,6 +550,82 @@ mod tests {
         assert_eq!(fmt_f64(1.0), "1");
         assert_eq!(fmt_f64(0.75), "0.75");
         assert_eq!(fmt_f64(0.5), "0.5");
+    }
+
+    /// `cli/imprt.py::import_strikes_for`: `strikes.<region>` counter, `.count`
+    /// gauge and `.get`/`.insert` millisecond timings (clamped to at least 1).
+    #[test]
+    fn for_import_reports_region_metrics() {
+        let metrics = RecordingMetrics::new();
+        metrics.for_import(3, 42, 0.0123, 0.0);
+        assert_eq!(
+            metrics.lines(),
+            vec![
+                "strikes.3:1|c".to_string(),
+                "strikes.3.count:42|g".to_string(),
+                "strikes.3.get:12|ms".to_string(),
+                "strikes.3.insert:1|ms".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn for_import_error_count_gauges_errors() {
+        let metrics = RecordingMetrics::new();
+        metrics.for_import_error_count(7);
+        assert_eq!(metrics.lines(), vec!["strikes.error_count:7|g".to_string()]);
+    }
+
+    #[test]
+    fn for_websocket_strike_counts_and_gauges_delay() {
+        let metrics = RecordingMetrics::new();
+        metrics.for_websocket_strike(4.5);
+        assert_eq!(
+            metrics.lines(),
+            vec!["strikes:1|c".to_string(), "strikes.delay:4.5|g".to_string()]
+        );
+    }
+
+    #[test]
+    fn for_update_imported_gauges_the_count() {
+        let metrics = RecordingMetrics::new();
+        metrics.for_update_imported(0);
+        metrics.for_update_imported(9);
+        assert_eq!(
+            metrics.lines(),
+            vec![
+                "strikes.imported:0|g".to_string(),
+                "strikes.imported:9|g".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn seconds_to_millis_clamps_to_one() {
+        assert_eq!(seconds_to_millis(0.0), 1);
+        assert_eq!(seconds_to_millis(0.0001), 1);
+        assert_eq!(seconds_to_millis(0.0123), 12);
+    }
+
+    /// The importer prefix puts the metrics under `org.blitzortung.import`.
+    #[test]
+    fn statsd_metrics_honours_import_prefix() {
+        let receiver = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let port = receiver.local_addr().unwrap().port();
+
+        let metrics = StatsDMetrics::with_address_and_prefix("127.0.0.1", port, IMPORT_STATSD_PREFIX)
+            .unwrap();
+        metrics.for_update_imported(2);
+
+        let mut buffer = [0u8; 512];
+        let (len, _) = receiver.recv_from(&mut buffer).unwrap();
+        assert_eq!(
+            String::from_utf8(buffer[..len].to_vec()).unwrap(),
+            "org.blitzortung.import.strikes.imported:2|g"
+        );
     }
 
     /// `StatsDMetrics` sends prefixed `name:value|type` datagrams to the
