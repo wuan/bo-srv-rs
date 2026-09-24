@@ -10,13 +10,12 @@
 //! Times default to the last hour (end: now minus one minute) in the selected
 //! time zone.
 
-use bo_service::cli::{connect_postgres, db_tool, exit_with, parse_timezone, Options};
+use bo_service::cli::{connect_postgres, db_tool, exit_with, parse_timezone};
 use bo_service::config::Config;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let options = Options::parse("bo-db", &args, db_tool::SPECS);
-    let db_options = db_tool::DbOptions::from_options(&options);
+    let args = <db_tool::DbArgs as clap::Parser>::parse();
+    let db_options = db_tool::DbOptions::from_args(&args);
 
     // Validate the time zone before touching the database, like
     // `cli/db.py.main`.

@@ -9,14 +9,13 @@
 //! database and the ten-minute logs from there up to now are downloaded (with
 //! HTTP basic auth) and inserted in batches of 1000.
 
-use bo_service::cli::{connect_postgres, exit_with, import_tool, init_logging, LockWithTimeout, Options};
+use bo_service::cli::{connect_postgres, exit_with, import_tool, init_logging, LockWithTimeout};
 use bo_service::config::Config;
 use bo_service::dataimport::HttpFileTransport;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let options = Options::parse("bo-import", &args, import_tool::SPECS);
-    let import_options = import_tool::ImportOptions::from_options(&options);
+    let args = <import_tool::ImportArgs as clap::Parser>::parse();
+    let import_options = import_tool::ImportOptions::from_args(&args);
     init_logging(import_options.verbose, import_options.debug);
 
     let mut lock = LockWithTimeout::new("/tmp/.bo-import.lock");

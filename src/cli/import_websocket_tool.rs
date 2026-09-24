@@ -7,12 +7,12 @@
 
 use std::sync::Arc;
 
+use clap::Parser;
 use futures::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::builder::Strike as StrikeBuilder;
-use crate::cli::{spec, OptionSpec, Options};
 use crate::db::StrikeDb;
 use crate::executor::QueryExecutor;
 use crate::websocket::decode;
@@ -30,13 +30,27 @@ pub const COMMIT_STRIKE_COUNT: u64 = 100;
 /// Commit after this many seconds.
 pub const COMMIT_INTERVAL_SECONDS: u64 = 5;
 
-/// The option specs understood by `bo-import-websocket` (help text mirrors
+/// `bo-import-websocket` command-line options (port of
 /// `cli/imprt_websocket.py`).
-pub const SPECS: &[OptionSpec] = &[
-    spec("verbose", "v", false, "verbose output"),
-    spec("debug", "d", false, "debug output"),
-    spec("test", "t", false, "test connection only"),
-];
+#[derive(Parser, Debug, Clone)]
+#[command(
+    name = "bo-import-websocket",
+    about = "Live strike import over the Blitzortung websocket",
+    version
+)]
+pub struct WebsocketArgs {
+    /// verbose output
+    #[arg(short, long)]
+    pub verbose: bool,
+
+    /// debug output
+    #[arg(short, long)]
+    pub debug: bool,
+
+    /// test connection only
+    #[arg(short, long)]
+    pub test: bool,
+}
 
 /// Parse a decoded websocket JSON message into a strike, using its `region`
 /// field.  Returns `(strike, region, delay)`; `None` when the message is not a
@@ -58,11 +72,11 @@ pub struct WebsocketOptions {
 }
 
 impl WebsocketOptions {
-    pub fn from_options(options: &Options) -> Self {
+    pub fn from_args(args: &WebsocketArgs) -> Self {
         WebsocketOptions {
-            verbose: options.flag("verbose"),
-            debug: options.flag("debug"),
-            test: options.flag("test"),
+            verbose: args.verbose,
+            debug: args.debug,
+            test: args.test,
         }
     }
 }

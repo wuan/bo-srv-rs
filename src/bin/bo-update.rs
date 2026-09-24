@@ -9,13 +9,12 @@
 
 use chrono::{Duration, Utc};
 
-use bo_service::cli::{connect_postgres, exit_with, init_logging, update_tool, LockWithTimeout, Options};
+use bo_service::cli::{connect_postgres, exit_with, init_logging, update_tool, LockWithTimeout};
 use bo_service::config::Config;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let options = Options::parse("bo-update", &args, update_tool::SPECS);
-    let update_options = update_tool::UpdateOptions::from_options(&options);
+    let args = <update_tool::UpdateArgs as clap::Parser>::parse();
+    let update_options = update_tool::UpdateOptions::from_args(&args);
     init_logging(update_options.verbose, update_options.debug);
 
     let mut lock = LockWithTimeout::new("/tmp/.bo-update.lock");

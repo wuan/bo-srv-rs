@@ -1,8 +1,9 @@
 //! `bo-db` implementation (port of `blitzortung/cli/db.py`).
 
 use chrono::{Duration, Utc};
+use clap::Parser;
 
-use crate::cli::{exit_with, parse_local_time, parse_timezone, spec, OptionSpec, Options, DATE_FORMAT};
+use crate::cli::{exit_with, parse_local_time, parse_timezone, DATE_FORMAT};
 use crate::data::GridData;
 use crate::db::StrikeDb;
 use crate::executor::QueryExecutor;
@@ -14,22 +15,68 @@ use crate::util::Timer;
 /// Default grid cell size (`cli/db.py DEFAULT_GRID`).
 pub const DEFAULT_GRID: (f64, f64) = (1.0, 1.0);
 
-/// The option specs understood by `bo-db` (help text mirrors `cli/db.py`).
-pub const SPECS: &[OptionSpec] = &[
-    spec("startdate", "", true, "start date for data retrieval"),
-    spec("starttime", "", true, "start time for data retrieval"),
-    spec("enddate", "", true, "end date for data retrieval"),
-    spec("endtime", "", true, "end time for data retrieval"),
-    spec("area", "", true, "area for which strikes are selected"),
-    spec("tz", "", true, "used timezone"),
-    spec("useenv", "", false, "use envelope of given area for query"),
-    spec("srid", "", true, "srid for query area and results"),
-    spec("precision", "", true, "precision of coordinates"),
-    spec("grid", "", true, "grid width"),
-    spec("x-grid", "", true, "grid x width"),
-    spec("y-grid", "", true, "grid y width"),
-    spec("map", "", false, "show ascii map instead of numerical grid"),
-];
+/// `bo-db` command-line options (port of `cli/db.py.parse_options`).
+///
+/// Long names and semantics match the Python `optparse` tool.
+#[derive(Parser, Debug, Clone)]
+#[command(
+    name = "bo-db",
+    about = "Query the blitzortung strike database (text or grid output)",
+    version
+)]
+pub struct DbArgs {
+    /// start date for data retrieval
+    #[arg(long, default_value = "default")]
+    pub startdate: String,
+
+    /// start time for data retrieval
+    #[arg(long, default_value = "default")]
+    pub starttime: String,
+
+    /// end date for data retrieval
+    #[arg(long, default_value = "default")]
+    pub enddate: String,
+
+    /// end time for data retrieval
+    #[arg(long, default_value = "default")]
+    pub endtime: String,
+
+    /// area for which strikes are selected
+    #[arg(long)]
+    pub area: Option<String>,
+
+    /// used timezone
+    #[arg(long, default_value = "UTC")]
+    pub tz: String,
+
+    /// use envelope of given area for query
+    #[arg(long)]
+    pub useenv: bool,
+
+    /// srid for query area and results
+    #[arg(long, default_value_t = 4326)]
+    pub srid: i64,
+
+    /// precision of coordinates
+    #[arg(long, default_value_t = 4)]
+    pub precision: i32,
+
+    /// grid width
+    #[arg(long)]
+    pub grid: Option<f64>,
+
+    /// grid x width
+    #[arg(long)]
+    pub x_grid: Option<f64>,
+
+    /// grid y width
+    #[arg(long)]
+    pub y_grid: Option<f64>,
+
+    /// show ascii map instead of numerical grid
+    #[arg(long)]
+    pub map: bool,
+}
 
 /// Resolved `bo-db` options.
 #[derive(Debug, Clone)]
@@ -69,35 +116,23 @@ impl DbOptions {
         }
     }
 
-    /// Build from parsed command-line options.
-    pub fn from_options(options: &Options) -> Self {
-        let mut result = DbOptions::defaults();
-        if let Some(v) = options.value("startdate") {
-            result.startdate = v.to_string();
+    /// Build from the clap-parsed command line.
+    pub fn from_args(args: &DbArgs) -> Self {
+        DbOptions {
+            startdate: args.startdate.clone(),
+            starttime: args.starttime.clone(),
+            enddate: args.enddate.clone(),
+            endtime: args.endtime.clone(),
+            area: args.area.clone(),
+            tz: args.tz.clone(),
+            useenv: args.useenv,
+            srid: args.srid,
+            precision: args.precision,
+            grid: args.grid,
+            xgrid: args.x_grid,
+            ygrid: args.y_grid,
+            map: args.map,
         }
-        if let Some(v) = options.value("starttime") {
-            result.starttime = v.to_string();
-        }
-        if let Some(v) = options.value("enddate") {
-            result.enddate = v.to_string();
-        }
-        if let Some(v) = options.value("endtime") {
-            result.endtime = v.to_string();
-        }
-        if let Some(v) = options.value("area") {
-            result.area = Some(v.to_string());
-        }
-        if let Some(v) = options.value("tz") {
-            result.tz = v.to_string();
-        }
-        result.useenv = options.flag("useenv");
-        result.srid = options.parse_or("srid", 4326);
-        result.precision = options.parse_or("precision", 4);
-        result.grid = options.parse_opt("grid");
-        result.xgrid = options.parse_opt("x-grid");
-        result.ygrid = options.parse_opt("y-grid");
-        result.map = options.flag("map");
-        result
     }
 }
 

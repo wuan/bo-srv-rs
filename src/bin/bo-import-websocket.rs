@@ -11,17 +11,14 @@
 
 use std::sync::Arc;
 
-use bo_service::cli::{
-    exit_with, import_websocket_tool, init_logging, LockWithTimeout, Options,
-};
+use bo_service::cli::{exit_with, import_websocket_tool, init_logging, LockWithTimeout};
 use bo_service::config::Config;
 use bo_service::executor::QueryExecutor;
 use bo_service::postgres::PostgresExecutor;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let options = Options::parse("bo-import-websocket", &args, import_websocket_tool::SPECS);
-    let ws_options = import_websocket_tool::WebsocketOptions::from_options(&options);
+    let args = <import_websocket_tool::WebsocketArgs as clap::Parser>::parse();
+    let ws_options = import_websocket_tool::WebsocketOptions::from_args(&args);
     init_logging(ws_options.verbose, ws_options.debug);
 
     let mut lock = LockWithTimeout::new("/tmp/.bo-import-websocket.lock");
