@@ -245,3 +245,8 @@ cargo run --bin bo-insert-websocket -- -t    # connection test, no DB writes
 - **Streaming vs. buffered downloads.** The Python provider yields strikes
   lazily while streaming each log; the Rust provider collects the lines for a
   region into memory before inserting.
+- **`bo-db` grid output.** Python's `db.Strike.select_grid` returns the
+  `build_grid_result` tuple, which has no `to_map()`/`to_arcgrid()` (the
+  `cli/db.py` grid path only works against a mocked result). The Rust port
+  builds a `data.GridData` directly and renders the arcgrid/ascii map as
+  `cli/db.py` intends.

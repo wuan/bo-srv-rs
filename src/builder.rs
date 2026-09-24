@@ -304,6 +304,18 @@ mod tests {
     }
 
     #[test]
+    fn from_line_with_realistic_29_char_timestamp() {
+        // The protected-log timestamp is `%Y-%m-%d %H:%M:%S.%f` (26 chars)
+        // followed by three nanosecond digits (29 chars total).
+        let line = "2013-09-28 23:23:38.123456789 pos;49.3000;11.2000;2500 str;10.5 dev;5400.0 sta;11;10;1,2,3";
+        let strike = Strike::new().from_line(line).unwrap().build().unwrap();
+        assert_eq!(
+            strike.to_string(),
+            "2013-09-28 23:23:38.123456789 11.2000 49.3000 2500.0 10.5 5400 11"
+        );
+    }
+
+    #[test]
     fn from_line_negative_coordinates() {
         let line = "2025-01-15T12:30:45.123456+00:00 pos;-48.5;-10.2;500.5 str;45.2 dev;250.0 sta;5;10;1,2,3,4,5";
         let strike = Strike::new().from_line(line).unwrap().build().unwrap();
