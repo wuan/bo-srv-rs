@@ -225,6 +225,12 @@ histogram bins (empty when `minute_length <= 10`).
   `data_area = max(5, ..)`.
 - `fix_bad_accept_header`: `Accept-Encoding` is stripped for
   `bo-android-<version>` with `1 <= version <= 177`.
+- Response compression (HTTP transport) mirrors
+  `txjsonrpc_ng.web.render.Renderer.handle_compression`: the response is
+  gzipped (with `Content-Encoding: gzip`) when the request advertises
+  `Accept-Encoding: gzip` **and** the rendered body is at least 1000 bytes.
+  Old Android clients (`<= 177`) never receive gzip because
+  `fix_bad_accept_header` strips their `Accept-Encoding` first.
 - Results are cached in a `ServiceCache` (short TTL 20 s, long 60 s, local
   caps 100/400, cleanup 300 s) keyed like the Python producer args.
 
@@ -347,6 +353,12 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   explicit casts (`$1::integer`, `$2::timestamptz`, `$3::smallint`,
   `ST_MakePoint($1::double precision, ...)`); the psycopg2-form SQL from
   `Query::to_sql()` is unchanged and stays byte-for-byte Python-identical.
+  The histogram envelope is a related case: `CAST($n AS geometry)` is ambiguous
+  because PostGIS registers both a `bytea -> geometry` and a `text -> geometry`
+  cast, so the placeholder gets an explicit `::bytea` (`CAST($n::bytea AS
+  geometry)`).  Without it tokio-postgres fails with
+  `error serializing parameter 4` and every region/local histogram request
+  returns `null`.
 - **CLI error reporting.** Database errors print the full causal chain
   (`cli::format_error_chain`), including the server-side `severity`/`message`/
   `detail`/`hint` from `tokio_postgres::Error::as_db_error()`, instead of

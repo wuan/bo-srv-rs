@@ -80,6 +80,9 @@ pub struct Request {
     pub x_forwarded_for: Option<String>,
     pub content_type: Option<String>,
     pub referer: Option<String>,
+    /// Raw `Accept-Encoding` request header (the txjsonrpc renderer reads it
+    /// per response via `getHeader('Accept-encoding')`).
+    pub accept_encoding: Option<String>,
     /// `fix_bad_accept_header` stripped the `Accept-Encoding` header because
     /// the client is at or below `MAX_COMPATIBLE_ANDROID_VERSION`.
     pub accept_encoding_removed: bool,
@@ -125,6 +128,26 @@ impl Request {
         } else {
             false
         }
+    }
+
+    /// Whether the response may be gzip-compressed for this request.
+    ///
+    /// Mirrors `txjsonrpc_ng.web.render.Renderer.handle_compression`: the
+    /// `Accept-Encoding` header must list `gzip` (case-insensitively, comma
+    /// separated) and `fix_bad_accept_header` must not have stripped it for an
+    /// old Android client.  The size threshold (>= 1000 bytes) is applied by
+    /// the caller where the rendered body length is known.
+    pub fn accepts_gzip(&self) -> bool {
+        if self.accept_encoding_removed {
+            return false;
+        }
+        self.accept_encoding
+            .as_deref()
+            .is_some_and(|value| {
+                value
+                    .split(',')
+                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("gzip"))
+            })
     }
 }
 
@@ -893,6 +916,59 @@ mod tests {
             ..Default::default()
         };
         assert!(!req.fix_bad_accept_header());
+    }
+
+    /// The compression policy: `gzip` must be advertised, and an old Android
+    /// client's stripped header must win over the raw value
+    /// (`Renderer.handle_compression` + `fix_bad_accept_header`).
+    #[test]
+    fn accepts_gzip_matches_accept_encoding_and_client_version() {
+        let gzip = Request {
+            accept_encoding: Some("gzip".to_string()),
+            ..Default::default()
+        };
+        assert!(gzip.accepts_gzip());
+
+        let gzip_mixed = Request {
+            accept_encoding: Some("deflate, GZIP".to_string()),
+            ..Default::default()
+        };
+        assert!(gzip_mixed.accepts_gzip());
+
+        // `txjsonrpc_ng` only splits on commas (no q-value parsing), so a
+        // quality parameter does not match a bare `gzip` token.
+        let gzip_with_qvalue = Request {
+            accept_encoding: Some("gzip;q=0.5".to_string()),
+            ..Default::default()
+        };
+        assert!(!gzip_with_qvalue.accepts_gzip());
+
+        let identity = Request {
+            accept_encoding: Some("identity".to_string()),
+            ..Default::default()
+        };
+        assert!(!identity.accepts_gzip());
+
+        let missing = Request::default();
+        assert!(!missing.accepts_gzip());
+
+        // An old client is downgraded: even with `Accept-Encoding: gzip` the
+        // header is treated as removed after `fix_bad_accept_header`.
+        let mut old_client = Request {
+            user_agent: Some("bo-android-177".to_string()),
+            accept_encoding: Some("gzip".to_string()),
+            ..Default::default()
+        };
+        assert!(old_client.fix_bad_accept_header());
+        assert!(!old_client.accepts_gzip());
+
+        // A new client keeps it.
+        let new_client = Request {
+            user_agent: Some("bo-android-178".to_string()),
+            accept_encoding: Some("gzip".to_string()),
+            ..Default::default()
+        };
+        assert!(new_client.accepts_gzip());
     }
 
     #[test]

@@ -641,6 +641,14 @@ pub fn histogram_query(
         q = q
             .condition("ST_SetSRID(CAST(%(envelope)s AS geometry), %(envelope_srid)s) && geog")
             .param("envelope", Param::Bytea(env))
+            // `CAST($n AS geometry)` is ambiguous: PostGIS registers both a
+            // `bytea -> geometry` and a `text -> geometry` cast, so PostgreSQL
+            // cannot infer the placeholder type and defaults it to `text`.
+            // tokio-postgres then refuses to send the bytea value as text
+            // (`error serializing parameter 4`), aborting every region/local
+            // histogram request.  `::bytea` pins the type (psycopg2 is
+            // unaffected because `psycopg2.Binary` already binds bytea).
+            .cast("envelope", "bytea")
             .param("envelope_srid", Param::Int(4326))
             .cast("envelope_srid", "integer");
     }
@@ -836,6 +844,33 @@ mod tests {
         assert!(matches!(params[3], Param::Int(1)));
         assert!(matches!(params[4], Param::Bytea(_)));
         assert!(matches!(params[5], Param::Int(4326)));
+    }
+
+    /// Regression: the histogram envelope parameter sits inside
+    /// `CAST($n AS geometry)`, which PostGIS registers for both `bytea` and
+    /// `text`.  Without an explicit `::bytea` PostgreSQL defaults the
+    /// placeholder to `text` and tokio-postgres fails to serialize the bytea
+    /// value ("error serializing parameter 4"), aborting every region/local
+    /// histogram request.  (The psycopg2 form stays unchanged.)
+    #[test]
+    fn histogram_envelope_param_is_cast_to_bytea() {
+        let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
+        let grid = Grid::new(
+            -25.0,
+            56.8605750930044,
+            27.0,
+            71.94746107673467,
+            0.14017221762500753,
+            0.08865376938211966,
+        );
+        let q = histogram_query(&interval, 5, Some(1), Some(&grid));
+        let sql = q.to_postgres();
+        assert!(
+            sql.contains("CAST($5::bytea AS geometry)"),
+            "expected an explicit bytea cast, got: {sql}"
+        );
+        // The psycopg2 rendering keeps the Python placeholder untouched.
+        assert!(q.to_sql().contains("CAST(%(envelope)s AS geometry)"));
     }
 
     #[test]

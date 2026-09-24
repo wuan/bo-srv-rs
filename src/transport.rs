@@ -68,6 +68,7 @@ pub(crate) fn request_from_headers(headers: &str, client_ip: Option<String>) -> 
                 "x-forwarded-for" => request.x_forwarded_for = Some(value),
                 "content-type" => request.content_type = Some(value),
                 "referer" => request.referer = Some(value),
+                "accept-encoding" => request.accept_encoding = Some(value),
                 _ => {}
             }
         }
