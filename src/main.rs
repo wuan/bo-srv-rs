@@ -20,7 +20,9 @@ use bo_service::service::Service;
 use bo_service::transport;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
+    // Default to INFO so the per-request access logs are visible out of the
+    // box; `RUST_LOG` still overrides (e.g. `RUST_LOG=debug`).
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let config = Config::from_env();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

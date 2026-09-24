@@ -159,6 +159,35 @@ async fn read_frame<R: AsyncRead + Unpin>(
     Ok(Some((headers, body)))
 }
 
+/// Emit one access log line per dispatched request.
+///
+/// Mirrors the Python service's `log.msg` access lines: method + a compact
+/// params summary + client + user agent + timing, with an explicit `BLOCKED`
+/// line for rejected clients.  Success and method-not-found/invalid-request
+/// faults are logged at INFO; blocked requests and other faults at WARN.
+/// Bodies/credentials are never logged (only a bounded params summary).
+pub fn log_access(request: &Request, meta: &crate::jsonrpc::RequestMeta, elapsed_ms: f64) {
+    let method = meta.method.as_deref().unwrap_or("<unknown>");
+    let client = request.request_client().unwrap_or_else(|| "-".to_string());
+    let user_agent = request.user_agent.as_deref().unwrap_or("-");
+    let params = &meta.params;
+    let id = &meta.id;
+
+    match meta.outcome.as_ref() {
+        Some(crate::jsonrpc::Outcome::Blocked(reason)) => log::warn!(
+            "{method}({params}) BLOCKED ({reason}) id={id} client={client} ua={user_agent} {elapsed_ms:.1}ms"
+        ),
+        Some(crate::jsonrpc::Outcome::Fault { code, message }) => log::warn!(
+            "{method}({params}) fault {code} {message:?} id={id} client={client} ua={user_agent} {elapsed_ms:.1}ms"
+        ),
+        Some(crate::jsonrpc::Outcome::Success) => log::info!(
+            "{method}({params}) id={id} client={client} ua={user_agent} {elapsed_ms:.1}ms"
+        ),
+        // No metadata (should not happen): still record the access.
+        None => log::info!("{method} id={id} client={client} ua={user_agent} {elapsed_ms:.1}ms"),
+    }
+}
+
 /// Handle a single connection: read frames and answer them in order.
 async fn handle_connection<M: Metrics>(
     stream: TcpStream,
@@ -175,8 +204,13 @@ async fn handle_connection<M: Metrics>(
 
         let mut request = request_from_headers(&headers, peer_ip.clone());
         let body = String::from_utf8_lossy(&frame);
-        let response = crate::jsonrpc::dispatch(&service, &mut request, &body);
-        if let Some(response) = response {
+
+        let started = std::time::Instant::now();
+        let result = crate::jsonrpc::dispatch(&service, &mut request, &body);
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        log_access(&request, &result.meta, elapsed_ms);
+
+        if let Some(response) = result.response {
             write_half.write_all(&encode_frame(response.as_bytes())).await?;
             write_half.flush().await?;
         }
