@@ -83,6 +83,10 @@ pub struct Request {
     /// `fix_bad_accept_header` stripped the `Accept-Encoding` header because
     /// the client is at or below `MAX_COMPATIBLE_ANDROID_VERSION`.
     pub accept_encoding_removed: bool,
+    /// Set by the data handlers when `is_forbidden` rejects the request; the
+    /// reason is surfaced in the access log (`BLOCKED`).  `None` for requests
+    /// that were not blocked.
+    pub blocked_reason: Option<String>,
 }
 
 impl Request {
@@ -379,22 +383,40 @@ impl<M: Metrics> Service<M> {
     /// blocked, the user agent is not a valid `bo-android-<int>` client, the
     /// content type is not `text/json`, a referer is set, or the grid baseline
     /// is below the endpoint minimum or not one of the supported sizes.
-    fn is_forbidden(
+    ///
+    /// Returns the human-readable reason when forbidden (`None` when allowed),
+    /// matching the `FORBIDDEN - client: .., user agent: ..` diagnostic of
+    /// `base.py` and driving the access log's `BLOCKED` line.
+    fn forbidden_reason(
         &self,
         request: &Request,
         client: Option<&str>,
         user_agent_version: i64,
         grid_base_length: i64,
         min_grid_base_length: i64,
-    ) -> bool {
+    ) -> Option<String> {
         let content_type = request.content_type.as_deref();
         let referer = request.referer.as_deref();
-        client.is_some_and(|client| self.forbidden_ips.contains(client))
-            || user_agent_version == 0
-            || content_type != Some(JSON_CONTENT_TYPE)
-            || referer.is_some_and(|referer| !referer.is_empty())
-            || grid_base_length < min_grid_base_length
-            || !VALID_GRID_BASE_LENGTHS.contains(&grid_base_length)
+        if client.is_some_and(|client| self.forbidden_ips.contains(client)) {
+            Some(format!("blocked ip {client:?}"))
+        } else if user_agent_version == 0 {
+            Some(format!(
+                "invalid user agent {:?}",
+                request.user_agent.as_deref().unwrap_or("")
+            ))
+        } else if content_type != Some(JSON_CONTENT_TYPE) {
+            Some(format!("bad content type {content_type:?}"))
+        } else if referer.is_some_and(|referer| !referer.is_empty()) {
+            Some(format!("referer {referer:?}"))
+        } else if grid_base_length < min_grid_base_length {
+            Some(format!(
+                "grid_base_length {grid_base_length} below minimum {min_grid_base_length}"
+            ))
+        } else if !VALID_GRID_BASE_LENGTHS.contains(&grid_base_length) {
+            Some(format!("invalid grid_base_length {grid_base_length}"))
+        } else {
+            None
+        }
     }
 }
 
@@ -430,13 +452,14 @@ impl<M: Metrics> Service<M> {
         let client = request.request_client();
         let user_agent_version = request.user_agent_version();
 
-        if self.is_forbidden(
+        if let Some(reason) = self.forbidden_reason(
             request,
             client.as_deref(),
             user_agent_version,
             grid_base_length,
             MIN_GRID_BASE_LENGTH,
         ) {
+            request.blocked_reason = Some(reason);
             return json!({});
         }
 
@@ -498,16 +521,17 @@ impl<M: Metrics> Service<M> {
             return json!({});
         };
 
-        let client = request.request_client();
+let client = request.request_client();
         let user_agent_version = request.user_agent_version();
 
-        if self.is_forbidden(
+        if let Some(reason) = self.forbidden_reason(
             request,
             client.as_deref(),
             user_agent_version,
             grid_base_length,
             GLOBAL_MIN_GRID_BASE_LENGTH,
         ) {
+            request.blocked_reason = Some(reason);
             return json!({});
         }
 
@@ -539,7 +563,7 @@ impl<M: Metrics> Service<M> {
     #[allow(clippy::too_many_arguments)]
     pub fn jsonrpc_get_local_strikes_grid(
         &self,
-        request: &Request,
+        request: &mut Request,
         x: &Value,
         y: &Value,
         grid_base_length: &Value,
@@ -572,13 +596,14 @@ impl<M: Metrics> Service<M> {
         let client = request.request_client();
         let user_agent_version = request.user_agent_version();
 
-        if self.is_forbidden(
+        if let Some(reason) = self.forbidden_reason(
             request,
             client.as_deref(),
             user_agent_version,
             grid_base_length,
             MIN_GRID_BASE_LENGTH,
         ) {
+            request.blocked_reason = Some(reason);
             return json!({});
         }
 
@@ -762,6 +787,26 @@ mod tests {
         }
     }
 
+    /// Test shim for the removed `is_forbidden` (now `forbidden_reason`).
+    fn is_forbidden(
+        service: &Service,
+        request: &Request,
+        client: Option<&str>,
+        user_agent_version: i64,
+        grid_base_length: i64,
+        min_grid_base_length: i64,
+    ) -> bool {
+        service
+            .forbidden_reason(
+                request,
+                client,
+                user_agent_version,
+                grid_base_length,
+                min_grid_base_length,
+            )
+            .is_some()
+    }
+
     #[test]
     fn check_counts_monotonically() {
         let service = Service::new(Arc::new(MockExecutor::new()));
@@ -866,7 +911,7 @@ mod tests {
             content_type: Some(JSON_CONTENT_TYPE.to_string()),
             ..Default::default()
         };
-        assert!(service.is_forbidden(&blocked_ip, Some("1.2.3.4"), 190, 10_000, MIN_GRID_BASE_LENGTH));
+        assert!(is_forbidden(&service, &blocked_ip, Some("1.2.3.4"), 190, 10_000, MIN_GRID_BASE_LENGTH));
 
         let bad_ua = Request {
             user_agent: Some("Mozilla/5.0".to_string()),
@@ -874,7 +919,7 @@ mod tests {
             content_type: Some(JSON_CONTENT_TYPE.to_string()),
             ..Default::default()
         };
-        assert!(service.is_forbidden(&bad_ua, Some("5.6.7.8"), 0, 10_000, MIN_GRID_BASE_LENGTH));
+        assert!(is_forbidden(&service, &bad_ua, Some("5.6.7.8"), 0, 10_000, MIN_GRID_BASE_LENGTH));
 
         let bad_content_type = Request {
             user_agent: Some("bo-android-190".to_string()),
@@ -882,7 +927,7 @@ mod tests {
             content_type: Some("application/json".to_string()),
             ..Default::default()
         };
-        assert!(service.is_forbidden(
+        assert!(is_forbidden(&service, 
             &bad_content_type,
             Some("5.6.7.8"),
             190,
@@ -897,7 +942,7 @@ mod tests {
             referer: Some("http://example.com".to_string()),
             ..Default::default()
         };
-        assert!(service.is_forbidden(&referer, Some("5.6.7.8"), 190, 10_000, MIN_GRID_BASE_LENGTH));
+        assert!(is_forbidden(&service, &referer, Some("5.6.7.8"), 190, 10_000, MIN_GRID_BASE_LENGTH));
 
         let low_baseline = Request {
             user_agent: Some("bo-android-190".to_string()),
@@ -905,7 +950,7 @@ mod tests {
             content_type: Some(JSON_CONTENT_TYPE.to_string()),
             ..Default::default()
         };
-        assert!(service.is_forbidden(
+        assert!(is_forbidden(&service, 
             &low_baseline,
             Some("5.6.7.8"),
             190,
@@ -913,7 +958,7 @@ mod tests {
             MIN_GRID_BASE_LENGTH
         ));
         // unsupported size in the valid set
-        assert!(service.is_forbidden(
+        assert!(is_forbidden(&service, 
             &low_baseline,
             Some("5.6.7.8"),
             190,
@@ -927,7 +972,7 @@ mod tests {
             content_type: Some(JSON_CONTENT_TYPE.to_string()),
             ..Default::default()
         };
-        assert!(!service.is_forbidden(&valid, Some("5.6.7.8"), 190, 10_000, MIN_GRID_BASE_LENGTH));
+        assert!(!is_forbidden(&service, &valid, Some("5.6.7.8"), 190, 10_000, MIN_GRID_BASE_LENGTH));
     }
 
     #[test]
@@ -1155,9 +1200,9 @@ assert_eq!(obj["x0"].as_f64().unwrap(), -25.0);
         );
         mock.add_rows("-extract( epoch", vec![]);
         let service = Service::new(Arc::new(mock));
-        let req = req_with("5.6.7.8");
+        let mut req = req_with("5.6.7.8");
         let response = service.jsonrpc_get_local_strikes_grid(
-            &req,
+            &mut req,
             &json!(5),
             &json!(5),
             &json!(10_000),
