@@ -215,14 +215,43 @@ impl PostgresExecutor {
     }
 }
 
+/// Run a future on `handle`, safely whether or not we are already inside a
+/// Tokio runtime.
+///
+/// * **Outside a runtime** (the CLI tools): `block_on` directly.
+/// * **Inside a multi-thread runtime** (the `bo-service` TCP handler tasks,
+///   which run on `tokio-rt-worker` threads): [`tokio::task::block_in_place`]
+///   is the sanctioned way to block while still letting other tasks make
+///   progress — a plain `Handle::block_on` from a worker thread panics with
+///   `Cannot start a runtime from within a runtime`.
+///
+/// `block_in_place` requires a **multi-thread** runtime; the service builds one
+/// in `main.rs`.  A current-thread runtime cannot use `block_in_place` and is
+/// not used by any consumer, so it is deliberately unsupported here.
+///
+/// Concurrency note: every in-flight request that hits a DB query blocks one
+/// runtime worker thread for the duration of that query (`block_in_place`
+/// parks the worker).  With more concurrent blocking queries than worker
+/// threads, worker threads are exhausted and the extra requests stall until a
+/// worker frees up.  This is inherent to the synchronous
+/// [`QueryExecutor::query`] trait that both the CLI tools and the service use;
+/// a true async query path (an `async` executor the service awaits directly)
+/// would be required to remove the ceiling.  It is unrelated to the panic this
+/// function fixes.
+fn block_on_future<T>(handle: &tokio::runtime::Handle, future: impl std::future::Future<Output = T>) -> T {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::block_in_place(|| handle.block_on(future))
+    } else {
+        handle.block_on(future)
+    }
+}
+
 impl QueryExecutor for PostgresExecutor {
     fn query(&self, sql: &str, params: &[Param]) -> Result<Vec<Row>, Box<dyn std::error::Error + Send + Sync>> {
         let pg_params = Self::bind(params);
         let refs = Self::to_refs(&pg_params);
 
-        let rows = self
-            .handle
-            .block_on(self.client.query(sql, &refs))
+        let rows = block_on_future(&self.handle, self.client.query(sql, &refs))
             .map_err(|e| -> Box<dyn Error + Send + Sync> { Box::new(e) })?;
 
         rows.iter().map(convert_row).collect()
@@ -239,8 +268,7 @@ impl QueryExecutor for PostgresExecutor {
         let pg_params = Self::bind(params);
         let refs = Self::to_refs(&pg_params);
 
-        self.handle
-            .block_on(self.client.execute(sql, &refs))
+        block_on_future(&self.handle, self.client.execute(sql, &refs))
             .map_err(|e| -> Box<dyn Error + Send + Sync> { Box::new(e) })
     }
 }
@@ -261,8 +289,49 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pg_param_adapter_maps_values() {
+    /// `block_on_future` must run a future from inside a multi-thread runtime
+/// without panicking (it uses `block_in_place` on a worker thread).  This is
+/// the regression guard for the service's `Cannot start a runtime from within
+/// a runtime` panic.
+#[test]
+fn block_on_future_works_from_inside_a_multithread_runtime() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // Drive a future on a worker thread via `block_in_place`; a panic here
+    // would fail the test.  (This used to panic with "Cannot start a runtime
+    // from within a runtime".)
+    runtime.block_on(async {
+        let handle = tokio::runtime::Handle::current();
+        let value = tokio::task::block_in_place(|| block_on_future(&handle, async { 42u32 }));
+        assert_eq!(value, 42);
+    });
+
+    // The inside-a-runtime path without explicit block_in_place is the real
+    // service shape (query() called from an async task).
+    runtime.block_on(async {
+        let handle = tokio::runtime::Handle::current();
+        let value = block_on_future(&handle, async { 100u32 });
+        assert_eq!(value, 100);
+    });
+}
+
+/// The outside-a-runtime path (CLI tools): the current thread is not inside a
+/// runtime, so `block_on` is used directly.
+#[test]
+fn block_on_future_works_outside_a_runtime() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let value = block_on_future(runtime.handle(), async { 7u32 });
+    assert_eq!(value, 7);
+}
+
+#[test]
+fn pg_param_adapter_maps_values() {
         let param = Param::Timestamp(
             DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
         );
