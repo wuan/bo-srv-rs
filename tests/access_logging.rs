@@ -18,6 +18,10 @@ struct CaptureLogger {
 
 static LOGGER: OnceLock<&'static CaptureLogger> = OnceLock::new();
 
+/// Serializes the tests: they share the process-global logger, so running them
+/// in parallel would let one test's clear/emit interleave with another's.
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
 fn logger() -> &'static CaptureLogger {
     LOGGER.get_or_init(|| {
         let logger: &'static CaptureLogger = Box::leak(Box::new(CaptureLogger {
@@ -65,6 +69,7 @@ fn client_request() -> Request {
 
 #[test]
 fn success_is_logged_at_info_with_method_and_client() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let logger = logger();
     logger.records.lock().unwrap().clear();
     let meta = RequestMeta {
@@ -86,6 +91,7 @@ fn success_is_logged_at_info_with_method_and_client() {
 
 #[test]
 fn blocked_is_logged_at_warn_with_blocked_marker() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let logger = logger();
     logger.records.lock().unwrap().clear();
     let meta = RequestMeta {
@@ -105,6 +111,7 @@ fn blocked_is_logged_at_warn_with_blocked_marker() {
 
 #[test]
 fn fault_is_logged_at_warn_with_code() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let logger = logger();
     logger.records.lock().unwrap().clear();
     let meta = RequestMeta {
