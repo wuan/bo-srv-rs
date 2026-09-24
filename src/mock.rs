@@ -25,6 +25,10 @@ pub struct MockExecutor {
 struct MockInner {
     expectations: Vec<Expectation>,
     calls: Vec<(String, Vec<Param>)>,
+    /// Statements executed via [`QueryExecutor::execute`].
+    executions: Vec<(String, Vec<Param>)>,
+    commit_count: usize,
+    rollback_count: usize,
 }
 
 impl MockExecutor {
@@ -66,6 +70,23 @@ impl MockExecutor {
     pub fn call_count(&self) -> usize {
         self.inner.lock().unwrap().calls.len()
     }
+
+    /// The write statements executed so far (SQL + parameters).
+    pub fn executions(&self) -> Vec<(String, Vec<Param>)> {
+        self.inner.lock().unwrap().executions.clone()
+    }
+
+    pub fn execution_count(&self) -> usize {
+        self.inner.lock().unwrap().executions.len()
+    }
+
+    pub fn commit_count(&self) -> usize {
+        self.inner.lock().unwrap().commit_count
+    }
+
+    pub fn rollback_count(&self) -> usize {
+        self.inner.lock().unwrap().rollback_count
+    }
 }
 
 impl QueryExecutor for MockExecutor {
@@ -86,6 +107,39 @@ impl QueryExecutor for MockExecutor {
             Expectation::Rows { rows, .. } => Ok(rows),
             Expectation::Error { message, .. } => Err(message.into()),
         }
+    }
+
+    fn execute(
+        &self,
+        sql: &str,
+        params: &[Param],
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.executions.push((sql.to_string(), params.to_vec()));
+
+        // An execute call that contains a registered `SELECT` fragment is
+        // treated as a query for the purpose of error injection.
+        if let Some(pos) = inner.expectations.iter().position(|e| match e {
+            Expectation::Rows { fragment, .. } => sql.contains(fragment),
+            Expectation::Error { fragment, .. } => sql.contains(fragment),
+        }) {
+            if let Expectation::Error { message, .. } = &inner.expectations[pos] {
+                let message = message.clone();
+                inner.expectations.remove(pos);
+                return Err(message.into());
+            }
+        }
+        Ok(1)
+    }
+
+    fn commit(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.lock().unwrap().commit_count += 1;
+        Ok(())
+    }
+
+    fn rollback(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.lock().unwrap().rollback_count += 1;
+        Ok(())
     }
 }
 

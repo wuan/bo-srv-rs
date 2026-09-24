@@ -423,6 +423,18 @@ impl Envelope {
             [self.x_max, self.y_min],
         ])
     }
+
+    /// The envelope as a WKB Polygon, matching
+    /// `shapely.geometry.Polygon([(xmin,ymin),(xmin,ymax),(xmax,ymax),
+    /// (xmax,ymin)])` (`geom.Envelope.env`).
+    pub fn as_wkb_polygon(&self) -> Vec<u8> {
+        crate::wkb::polygon(&[vec![
+            [self.x_min, self.y_min],
+            [self.x_min, self.y_max],
+            [self.x_max, self.y_max],
+            [self.x_max, self.y_min],
+        ]])
+    }
 }
 
 /// Grid characteristics (ported from `blitzortung.geom.Grid`).

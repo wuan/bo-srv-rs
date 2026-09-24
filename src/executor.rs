@@ -99,12 +99,52 @@ impl Row {
 pub trait QueryExecutor: Send + Sync {
     /// Run a query returning rows.
     fn query(&self, sql: &str, params: &[Param]) -> Result<Vec<Row>, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Execute a statement that does not return rows (INSERT/UPDATE/DDL) and
+    /// report the number of affected rows.
+    ///
+    /// The default implementation rejects the call so existing executor
+    /// implementations remain valid; the write-capable implementations used by
+    /// the CLI tools (`postgres` and `mock`) override it.
+    fn execute(
+        &self,
+        _sql: &str,
+        _params: &[Param],
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        Err("execute is not supported by this executor".into())
+    }
+
+    /// Commit the current transaction (no-op by default).
+    fn commit(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+
+    /// Roll back the current transaction (no-op by default).
+    fn rollback(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
 }
 
 /// Blanket implementation so `&E where E: QueryExecutor` also works.
 impl<T: QueryExecutor + ?Sized> QueryExecutor for &T {
     fn query(&self, sql: &str, params: &[Param]) -> Result<Vec<Row>, Box<dyn std::error::Error + Send + Sync>> {
         (**self).query(sql, params)
+    }
+
+    fn execute(
+        &self,
+        sql: &str,
+        params: &[Param],
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        (**self).execute(sql, params)
+    }
+
+    fn commit(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        (**self).commit()
+    }
+
+    fn rollback(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        (**self).rollback()
     }
 }
 
