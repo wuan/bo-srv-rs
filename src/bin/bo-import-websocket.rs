@@ -11,7 +11,9 @@
 
 use std::sync::Arc;
 
-use bo_service::cli::{exit_with, import_websocket_tool, init_logging, LockWithTimeout};
+use bo_service::cli::{
+    describe_error, exit_with, import_websocket_tool, init_logging, LockWithTimeout,
+};
 use bo_service::config::Config;
 use bo_service::executor::QueryExecutor;
 use bo_service::postgres::PostgresExecutor;
@@ -32,7 +34,7 @@ fn main() {
         .build()
     {
         Ok(runtime) => runtime,
-        Err(error) => exit_with(&format!("failed to build runtime: {error}"), 1),
+        Err(error) => exit_with(&describe_error("failed to build runtime", &error), 1),
     };
 
     let executor: Option<Arc<dyn QueryExecutor>> = if ws_options.test {
@@ -41,11 +43,13 @@ fn main() {
         let config = Config::from_env();
         match runtime.block_on(PostgresExecutor::connect(&config)) {
             Ok(executor) => Some(Arc::new(executor)),
-            Err(error) => exit_with(&format!("failed to connect to database: {error}"), 1),
+            Err(error) => {
+                exit_with(&describe_error("failed to connect to database", error.as_ref()), 1)
+            }
         }
     };
 
     if let Err(error) = runtime.block_on(import_websocket_tool::run(executor, &ws_options)) {
-        exit_with(&format!("websocket import failed: {error}"), 1);
+        exit_with(&describe_error("websocket import failed", error.as_ref()), 1);
     }
 }

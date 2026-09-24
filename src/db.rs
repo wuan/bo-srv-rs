@@ -60,13 +60,23 @@ pub enum DbError {
 impl std::fmt::Display for DbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DbError::Executor(e) => write!(f, "{e}"),
+            // Include the full causal chain: tokio-postgres displays server
+            // errors as the bare "db error", so the useful message only
+            // appears via `source()`.
+            DbError::Executor(e) => write!(f, "{}", crate::cli::format_error_chain(e.as_ref())),
             DbError::Column(name) => write!(f, "invalid or missing column: {name}"),
         }
     }
 }
 
-impl std::error::Error for DbError {}
+impl std::error::Error for DbError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DbError::Executor(e) => Some(e.as_ref()),
+            DbError::Column(_) => None,
+        }
+    }
+}
 
 impl From<Box<dyn std::error::Error + Send + Sync>> for DbError {
     fn from(error: Box<dyn std::error::Error + Send + Sync>) -> Self {

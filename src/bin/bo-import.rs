@@ -9,7 +9,9 @@
 //! database and the ten-minute logs from there up to now are downloaded (with
 //! HTTP basic auth) and inserted in batches of 1000.
 
-use bo_service::cli::{connect_postgres, exit_with, import_tool, init_logging, LockWithTimeout};
+use bo_service::cli::{
+    connect_postgres, describe_error, exit_with, import_tool, init_logging, LockWithTimeout,
+};
 use bo_service::config::Config;
 use bo_service::dataimport::HttpFileTransport;
 
@@ -29,7 +31,7 @@ fn main() {
     let config = Config::from_env();
     let (_runtime, executor) = match connect_postgres(&config) {
         Ok(pair) => pair,
-        Err(error) => exit_with(&format!("failed to connect to database: {error}"), 1),
+        Err(error) => exit_with(&describe_error("failed to connect to database", error.as_ref()), 1),
     };
 
     // Per-file HTTP timeout: the task pins this at 30 seconds (the Python
