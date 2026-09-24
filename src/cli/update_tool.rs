@@ -5,9 +5,9 @@
 //! (by timestamp/location/lateral error) and older than one minute.
 
 use chrono::{DateTime, Duration, Utc};
+use clap::Parser;
 
 use crate::builder::Strike as StrikeBuilder;
-use crate::cli::{spec, OptionSpec, Options};
 use crate::data::Strike;
 use crate::db::{HashableStrikeKey, StrikeDb, StrikeKey};
 use crate::executor::QueryExecutor;
@@ -133,15 +133,32 @@ pub fn last_strikes_url(start_time: DateTime<Utc>) -> String {
     )
 }
 
-/// The option specs understood by `bo-update` (help text mirrors `cli/update.py`).
-pub const SPECS: &[OptionSpec] = &[
-    spec("hours", "", true, "Number of hours to look back (default: 1)"),
-    spec("verbose", "v", false, "Enable verbose logging"),
-    spec("debug", "d", false, "Enable debug logging"),
-    spec("no-lock", "", false, "Skip file locking (use with caution)"),
-];
+/// `bo-update` command-line options (port of `cli/update.py.parse_options`).
+#[derive(Parser, Debug, Clone)]
+#[command(
+    name = "bo-update",
+    about = "Import recent strikes from last_strikes.php into the database",
+    version
+)]
+pub struct UpdateArgs {
+    /// Number of hours to look back (default: 1)
+    #[arg(long, default_value_t = 1)]
+    pub hours: i64,
 
-/// Build the `bo-update` options from the parsed command line.
+    /// Enable verbose logging
+    #[arg(short, long)]
+    pub verbose: bool,
+
+    /// Enable debug logging
+    #[arg(short, long)]
+    pub debug: bool,
+
+    /// Skip file locking (use with caution)
+    #[arg(long)]
+    pub no_lock: bool,
+}
+
+/// Resolved `bo-update` options.
 pub struct UpdateOptions {
     pub hours: i64,
     pub verbose: bool,
@@ -150,12 +167,12 @@ pub struct UpdateOptions {
 }
 
 impl UpdateOptions {
-    pub fn from_options(options: &Options) -> Self {
+    pub fn from_args(args: &UpdateArgs) -> Self {
         UpdateOptions {
-            hours: options.parse_or("hours", 1),
-            verbose: options.flag("verbose"),
-            debug: options.flag("debug"),
-            no_lock: options.flag("no-lock"),
+            hours: args.hours,
+            verbose: args.verbose,
+            debug: args.debug,
+            no_lock: args.no_lock,
         }
     }
 }

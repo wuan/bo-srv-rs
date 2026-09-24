@@ -7,8 +7,8 @@
 //! Python code does.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
+use clap::Parser;
 
-use crate::cli::{spec, OptionSpec, Options};
 use crate::data::Timestamp;
 use crate::dataimport::{StrikesBlitzortungDataProvider, Transport};
 use crate::db::StrikeDb;
@@ -28,14 +28,34 @@ pub const STRIKE_GROUP_SIZE: i64 = 10000;
 /// Sleep between retries.
 pub const RETRY_SLEEP_MILLIS: u64 = 2000;
 
-/// The option specs understood by `bo-import` (help text mirrors `cli/imprt.py`).
-pub const SPECS: &[OptionSpec] = &[
-    spec("verbose", "v", false, "verbose output"),
-    spec("debug", "d", false, "debug output"),
-    spec("no-timeout", "", false, "do not apply 5 minute timeout"),
-    spec("startdate", "", true, "import start date"),
-    spec("update", "", false, "run as regular update"),
-];
+/// `bo-import` command-line options (port of `cli/imprt.py.parse_options`).
+#[derive(Parser, Debug, Clone)]
+#[command(
+    name = "bo-import",
+    about = "Import protected strike logs from data.blitzortung.org",
+    version
+)]
+pub struct ImportArgs {
+    /// verbose output
+    #[arg(short, long)]
+    pub verbose: bool,
+
+    /// debug output
+    #[arg(short, long)]
+    pub debug: bool,
+
+    /// do not apply 5 minute timeout
+    #[arg(long)]
+    pub no_timeout: bool,
+
+    /// import start date
+    #[arg(long)]
+    pub startdate: Option<String>,
+
+    /// run as regular update
+    #[arg(long)]
+    pub update: bool,
+}
 
 /// `imprt.update_start_time`: now - 30 minutes.
 pub fn update_start_time() -> DateTime<Utc> {
@@ -189,13 +209,13 @@ pub struct ImportOptions {
 }
 
 impl ImportOptions {
-    pub fn from_options(options: &Options) -> Self {
+    pub fn from_args(args: &ImportArgs) -> Self {
         ImportOptions {
-            verbose: options.flag("verbose"),
-            debug: options.flag("debug"),
-            no_timeout: options.flag("no-timeout"),
-            startdate: options.value("startdate").map(|s| s.to_string()),
-            update: options.flag("update"),
+            verbose: args.verbose,
+            debug: args.debug,
+            no_timeout: args.no_timeout,
+            startdate: args.startdate.clone(),
+            update: args.update,
         }
     }
 }
