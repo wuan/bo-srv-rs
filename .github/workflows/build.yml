@@ -83,6 +83,11 @@ jobs:
           . "$HOME/.cargo/env" 
           cargo clippy --message-format=json &> clippy.json
 
+      - name: Prepare environment for Sonar
+        run: |
+          . "$HOME/.cargo/env"
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - name: Update Sonar
         uses: sonarsource/sonarqube-scan-action@v8
         if: github.secret_source == 'Actions'
