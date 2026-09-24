@@ -232,7 +232,10 @@ histogram bins (empty when `minute_length <= 10`).
   Old Android clients (`<= 177`) never receive gzip because
   `fix_bad_accept_header` strips their `Accept-Encoding` first.
 - Results are cached in a `ServiceCache` (short TTL 20 s, long 60 s, local
-  caps 100/400, cleanup 300 s) keyed like the Python producer args.
+  caps 100/400, cleanup 300 s) keyed like the Python producer args.  Producers
+  run **without** the cache lock held, so a blocking database query on a cache
+  miss cannot park other requests on the mutex and freeze the runtime under a
+  cold-cache request burst (see `cache.rs` `get_result`).
 
 ## Architecture
 

@@ -105,51 +105,11 @@ impl ObjectCache {
     /// Fetch `key`, computing the payload with `creator` on a miss
     /// (`ObjectCache.get`).  `now` is injectable for tests.
     fn get_at(&self, key: &str, creator: impl FnOnce() -> Value, now: f64) -> Value {
-        let mut inner = self.lock();
-
-        if let Some(period) = self.cleanup_period {
-            if now > inner.last_cleanup + period {
-                inner.clean_expired(now);
-                inner.last_cleanup = now;
-            }
+        match self.get_result_at(key, || Ok::<_, std::convert::Infallible>(creator()), now) {
+            Ok(payload) => payload,
+            // `creator` is infallible here.
+            Err(never) => match never {},
         }
-
-        inner.total_count += 1;
-        let current_time = now as i64;
-
-        // `Some(Some(payload))` = valid cached entry; `Some(None)` = an entry
-        // exists but is expired (falls through to re-create); `None` = no
-        // entry (the size-eviction branch applies).
-        let cached = inner
-            .cache
-            .get(key)
-            .map(|entry| entry.is_valid(current_time).then(|| entry.payload.clone()));
-        match cached {
-            Some(Some(payload)) => {
-                if self.size.is_some() {
-                    inner.track_usage(key);
-                }
-                inner.total_hit_count += 1;
-                return payload;
-            }
-            Some(None) => {}
-            None => {
-                if let Some(size) = self.size {
-                    if inner.cache.len() >= size {
-                        inner.remove_oldest_entry();
-                    }
-                }
-            }
-        }
-
-        let payload = creator();
-        let entry = CacheEntry {
-            expires: current_time + self.ttl_seconds,
-            payload: payload.clone(),
-        };
-        inner.track_usage(key);
-        inner.cache.insert(key.to_string(), entry);
-        payload
     }
 
     /// Fetch `key`, computing the payload with `creator` on a miss
@@ -161,46 +121,79 @@ impl ObjectCache {
     /// [`ObjectCache::get`] for producers that can fail: on `Err` nothing is
     /// cached and the error is returned (mirrors the Python behaviour, where
     /// an errored Deferred is neither cached nor returned as a response).
+    ///
+    /// The `creator` runs **without** the cache lock held.  This is essential
+    /// for the service: the producers run database queries that block the
+    /// calling thread (via `PostgresExecutor`), and holding a `std::sync::Mutex`
+    /// across that block deadlocks the runtime — the waiting tasks park worker
+    /// threads on the mutex, which Tokio cannot compensate for the way it does
+    /// for `block_in_place`, so under a cold-cache request burst every worker
+    /// is consumed and the service freezes until restart.
+    ///
+    /// As in the Python `ObjectCache`, there is no single-flight dedup: if
+    /// several requests miss the same key concurrently they all compute it and
+    /// the last writer wins.
     pub fn get_result<F, E>(&self, key: &str, creator: F) -> Result<Value, E>
     where
         F: FnOnce() -> Result<Value, E>,
     {
-        let now = now_seconds();
-        let mut inner = self.lock();
+        self.get_result_at(key, creator, now_seconds())
+    }
 
-        if let Some(period) = self.cleanup_period {
-            if now > inner.last_cleanup + period {
-                inner.clean_expired(now);
-                inner.last_cleanup = now;
-            }
-        }
-
-        inner.total_count += 1;
+    /// [`ObjectCache::get_result`] with an injectable clock.
+    fn get_result_at<F, E>(&self, key: &str, creator: F, now: f64) -> Result<Value, E>
+    where
+        F: FnOnce() -> Result<Value, E>,
+    {
         let current_time = now as i64;
 
-        let cached = inner
-            .cache
-            .get(key)
-            .map(|entry| entry.is_valid(current_time).then(|| entry.payload.clone()));
-        match cached {
-            Some(Some(payload)) => {
-                if self.size.is_some() {
-                    inner.track_usage(key);
+        // Lookup/cleanup/eviction under the lock; drop the lock before running
+        // `creator`.
+        {
+            let mut inner = self.lock();
+
+            if let Some(period) = self.cleanup_period {
+                if now > inner.last_cleanup + period {
+                    inner.clean_expired(now);
+                    inner.last_cleanup = now;
                 }
-                inner.total_hit_count += 1;
-                return Ok(payload);
             }
-            Some(None) => {}
-            None => {
-                if let Some(size) = self.size {
-                    if inner.cache.len() >= size {
-                        inner.remove_oldest_entry();
+
+            inner.total_count += 1;
+
+            // `Some(Some(payload))` = valid cached entry; `Some(None)` = an
+            // entry exists but is expired (falls through to re-create);
+            // `None` = no entry (the size-eviction branch applies).
+            let cached = inner
+                .cache
+                .get(key)
+                .map(|entry| entry.is_valid(current_time).then(|| entry.payload.clone()));
+            match cached {
+                Some(Some(payload)) => {
+                    if self.size.is_some() {
+                        inner.track_usage(key);
+                    }
+                    inner.total_hit_count += 1;
+                    return Ok(payload);
+                }
+                Some(None) => {}
+                None => {
+                    if let Some(size) = self.size {
+                        if inner.cache.len() >= size {
+                            inner.remove_oldest_entry();
+                        }
                     }
                 }
             }
         }
 
+        // Compute outside the lock so a blocking producer cannot stall other
+        // requests on this cache.
         let payload = creator()?;
+
+        // Re-acquire to store the fresh entry (a concurrent request may have
+        // stored the same key already; the last writer wins).
+        let mut inner = self.lock();
         let entry = CacheEntry {
             expires: current_time + self.ttl_seconds,
             payload: payload.clone(),
@@ -326,6 +319,7 @@ impl Default for ServiceCache {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
 
     /// A panic while another thread holds the cache lock must not cascade:
     /// the lock is poisoned but the cache still works.
@@ -431,6 +425,41 @@ mod tests {
         assert_eq!(cache.get_size(), 1);
         let hit: Result<Value, String> = cache.get_result("k", || Ok(json!(99)));
         assert_eq!(hit.unwrap(), json!(42));
+    }
+
+    /// Regression: the producer must run **without** the cache lock held, so a
+    /// blocking producer (a database query) cannot stall other requests on the
+    /// cache mutex — the mechanism behind the "server freezes under load"
+    /// report.  While the creator blocks, another thread must be able to touch
+    /// the cache.
+    #[test]
+    fn creator_runs_without_holding_the_cache_lock() {
+        use std::sync::mpsc;
+
+        let cache = Arc::new(ObjectCache::new(60, None, None));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        let producer_cache = cache.clone();
+        let producer = std::thread::spawn(move || {
+            producer_cache.get_result("k", || {
+                entered_tx.send(()).unwrap();
+                // Block like a database query would, until the test releases us.
+                release_rx.recv().unwrap();
+                Ok::<_, String>(json!(1))
+            })
+        });
+
+        // Wait until the creator is running, then touch the cache from another
+        // thread.  If the lock were held across the creator this would block
+        // forever.
+        entered_rx.recv().unwrap();
+        assert_eq!(cache.get_size(), 0);
+        assert_eq!(cache.get_ratio(), 0.0);
+
+        release_tx.send(()).unwrap();
+        assert_eq!(producer.join().unwrap().unwrap(), json!(1));
+        assert_eq!(cache.get_size(), 1);
     }
 
     #[test]
