@@ -13,6 +13,7 @@ use crate::data::Timestamp;
 use crate::dataimport::{StrikesBlitzortungDataProvider, Transport};
 use crate::db::StrikeDb;
 use crate::executor::QueryExecutor;
+use crate::metrics::Metrics;
 use crate::util::Timer;
 
 /// Regions imported by `cli/imprt.py`.
@@ -72,7 +73,9 @@ pub fn parse_start_date(value: &str) -> Option<DateTime<Utc>> {
 
 /// `imprt.import_strikes_for`: import one region into the database.
 ///
-/// Returns the number of strikes inserted.
+/// Returns the number of strikes inserted.  Reports the same StatsD metrics
+/// as the Python tool (`strikes.<region>`, `.count`, `.get`, `.insert`) through
+/// `metrics`.
 pub async fn import_strikes_for<T: Transport>(
     executor: &dyn QueryExecutor,
     transport: &T,
@@ -80,6 +83,7 @@ pub async fn import_strikes_for<T: Transport>(
     start_time: Option<Timestamp>,
     is_update: bool,
     deadline: Option<std::time::Instant>,
+    metrics: &dyn Metrics,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     log::debug!("work on region {region}");
     let db = StrikeDb::new(executor, 4326);
@@ -105,9 +109,13 @@ pub async fn import_strikes_for<T: Transport>(
         }
     }
 
+    // `reference_time` before the fetch; `query_time` after it (Python:
+    // `imprt.import_strikes_for`).
+    let reference_time = std::time::Instant::now();
     let provider = StrikesBlitzortungDataProvider::new(transport);
     let latest = latest_time.and_then(|t| t.datetime);
     let mut strikes = provider.get_strikes_since_with_deadline(latest, region, deadline)?;
+    let query_time = std::time::Instant::now();
 
     let mut strike_count: i64 = 0;
     let mut strike_batch: Vec<crate::data::Strike> = Vec::new();
@@ -144,7 +152,16 @@ pub async fn import_strikes_for<T: Transport>(
     }
 
     let insert_time = std::time::Instant::now();
-    let _ = insert_time;
+
+    // `imprt.import_strikes_for`: `strikes.<region>` counter, `.count` gauge
+    // and the `.get`/`.insert` phase timings.
+    metrics.for_import(
+        region,
+        strike_count.max(0) as u64,
+        query_time.duration_since(reference_time).as_secs_f64(),
+        insert_time.duration_since(query_time).as_secs_f64(),
+    );
+
     let total = global_start_time.elapsed().as_secs_f64().max(f64::EPSILON);
     log::info!(
         "imported {} strikes ({:.1}/s) for region {}",
@@ -159,6 +176,8 @@ pub async fn import_strikes_for<T: Transport>(
 /// `imprt.import_strikes`: iterate all regions, retrying connection errors.
 ///
 /// Returns the total number of strikes and the accumulated error count.
+/// Reports the accumulated error count as `strikes.error_count` like the
+/// Python tool.
 pub async fn import_strikes<T: Transport>(
     executor: &dyn QueryExecutor,
     transport: &T,
@@ -166,6 +185,7 @@ pub async fn import_strikes<T: Transport>(
     start_time: Option<Timestamp>,
     no_timeout: bool,
     is_update: bool,
+    metrics: &dyn Metrics,
 ) -> (usize, usize) {
     let mut error_count = 0usize;
     let mut total_strikes = 0usize;
@@ -183,6 +203,7 @@ pub async fn import_strikes<T: Transport>(
                 start_time,
                 is_update,
                 deadline,
+                metrics,
             )
             .await
             {
@@ -198,6 +219,7 @@ pub async fn import_strikes<T: Transport>(
             }
         }
     }
+    metrics.for_import_error_count(error_count as u64);
     (total_strikes, error_count)
 }
 
@@ -238,6 +260,7 @@ mod tests {
     use crate::dataimport::base::Transport;
     use crate::dataimport::TransportError;
     use crate::executor::{Row, Value};
+    use crate::metrics::NoopMetrics;
     use crate::mock::MockExecutor;
     use chrono::TimeZone;
     use std::sync::Mutex;
@@ -319,7 +342,9 @@ mod tests {
         // Latest DB time is older than the log entry, so the strike is new.
         let mut mock = executor_with_latest(Some((now - Duration::hours(2), 0)));
         let transport = StubTransport::new(vec![strike_line(now - Duration::minutes(30))], 0);
-        let count = import_strikes_for(&mock, &transport, 1, None, false, None).await.unwrap();
+        let count = import_strikes_for(&mock, &transport, 1, None, false, None, &NoopMetrics)
+            .await
+            .unwrap();
         assert_eq!(count, 1);
         assert_eq!(mock.execution_count(), 1);
         assert_eq!(mock.commit_count(), 1);
@@ -329,11 +354,33 @@ mod tests {
         let _ = &mut mock;
     }
 
+    /// `import_strikes_for` reports the Python metric set through the sink.
+    #[tokio::test]
+    async fn import_strikes_for_reports_metrics() {
+        let now = Utc::now();
+        let mut mock = executor_with_latest(Some((now - Duration::hours(2), 0)));
+        let transport = StubTransport::new(vec![strike_line(now - Duration::minutes(30))], 0);
+        let metrics = crate::metrics::RecordingMetrics::new();
+        import_strikes_for(&mock, &transport, 3, None, false, None, &metrics)
+            .await
+            .unwrap();
+        let lines = metrics.lines();
+        assert_eq!(lines[0], "strikes.3:1|c");
+        assert_eq!(lines[1], "strikes.3.count:1|g");
+        assert!(lines[2].starts_with("strikes.3.get:"), "got {lines:?}");
+        assert!(lines[2].ends_with("|ms"), "got {lines:?}");
+        assert!(lines[3].starts_with("strikes.3.insert:"), "got {lines:?}");
+        assert!(lines[3].ends_with("|ms"), "got {lines:?}");
+        let _ = &mut mock;
+    }
+
     #[tokio::test]
     async fn import_strikes_for_no_strikes_does_not_commit() {
         let mut mock = executor_with_latest(None);
         let transport = StubTransport::new(vec![], 0);
-        let count = import_strikes_for(&mock, &transport, 1, None, false, None).await.unwrap();
+        let count = import_strikes_for(&mock, &transport, 1, None, false, None, &NoopMetrics)
+            .await
+            .unwrap();
         assert_eq!(count, 0);
         assert_eq!(mock.commit_count(), 0);
         let _ = &mut mock;
@@ -354,9 +401,26 @@ mod tests {
             );
         }
         let transport = StubTransport::new(vec![strike_line(now - Duration::minutes(30))], 1);
-        let (strikes, errors) = import_strikes(&mock, &transport, &[1], None, true, false).await;
+        let (strikes, errors) =
+            import_strikes(&mock, &transport, &[1], None, true, false, &NoopMetrics).await;
         assert_eq!(errors, 1);
         assert_eq!(strikes, 1);
+        let _ = &mut mock;
+    }
+
+    /// `import_strikes` gauges the accumulated error count like Python.
+    #[tokio::test]
+    async fn import_strikes_reports_error_count_metric() {
+        // Each retry re-reads the latest DB time before the transport fails.
+        let mut mock = MockExecutor::new();
+        for _ in 0..RETRY_COUNT {
+            mock.add_rows("ORDER BY \"timestamp\" DESC", vec![]);
+        }
+        let transport = StubTransport::new(vec![], RETRY_COUNT);
+        let metrics = crate::metrics::RecordingMetrics::new();
+        let (_, errors) = import_strikes(&mock, &transport, &[1], None, true, false, &metrics).await;
+        assert_eq!(errors, RETRY_COUNT);
+        assert_eq!(metrics.lines(), vec!["strikes.error_count:5|g".to_string()]);
         let _ = &mut mock;
     }
 
@@ -366,7 +430,9 @@ mod tests {
         // replaced by now - 30min.
         let mut mock = executor_with_latest(None);
         let transport = StubTransport::new(vec![], 0);
-        let count = import_strikes_for(&mock, &transport, 1, None, true, None).await.unwrap();
+        let count = import_strikes_for(&mock, &transport, 1, None, true, None, &NoopMetrics)
+            .await
+            .unwrap();
         assert_eq!(count, 0);
         let _ = &mut mock;
     }

@@ -10,7 +10,8 @@
 //! HTTP basic auth) and inserted in batches of 1000.
 
 use bo_service::cli::{
-    connect_postgres, describe_error, exit_with, import_tool, init_logging, LockWithTimeout,
+    build_import_metrics, connect_postgres, describe_error, exit_with, import_tool, init_logging,
+    LockWithTimeout,
 };
 use bo_service::config::Config;
 use bo_service::dataimport::HttpFileTransport;
@@ -29,6 +30,7 @@ fn main() {
     let start_time = import_tool::resolve_start_time(&import_options);
 
     let config = Config::from_env();
+    let metrics = build_import_metrics(&config);
     let (runtime, executor) = match connect_postgres(&config) {
         Ok(pair) => pair,
         Err(error) => exit_with(&describe_error("failed to connect to database", error.as_ref()), 1),
@@ -45,6 +47,7 @@ fn main() {
         start_time,
         import_options.no_timeout,
         import_options.update,
+        metrics.as_ref(),
     ));
     log::info!("imported {strikes} strikes (error count {errors})");
 }

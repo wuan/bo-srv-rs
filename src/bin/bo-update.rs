@@ -10,7 +10,8 @@
 use chrono::{Duration, Utc};
 
 use bo_service::cli::{
-    connect_postgres, describe_error, exit_with, init_logging, update_tool, LockWithTimeout,
+    build_import_metrics, connect_postgres, describe_error, exit_with, init_logging, update_tool,
+    LockWithTimeout,
 };
 use bo_service::config::Config;
 
@@ -59,6 +60,10 @@ fn main() {
     let url_strikes = update_tool::parse_strikes_from_text(&body);
     log::info!("Fetched {} strikes from URL", url_strikes.len());
 
+    // Metrics use the importer prefix (`org.blitzortung.import`) with the
+    // configured `[statsd]` receiver; a missing daemon never blocks the update.
+    let metrics = build_import_metrics(&config);
+
     let (runtime, executor) = match connect_postgres(&config) {
         Ok(pair) => pair,
         Err(error) => exit_with(&describe_error("failed to connect to database", error.as_ref()), 1),
@@ -69,6 +74,7 @@ fn main() {
         &url_strikes,
         update_options.hours,
         now,
+        metrics.as_ref(),
     )) {
         Ok(result) => {
             log::info!("Import completed: {} new strikes inserted", result.inserted);

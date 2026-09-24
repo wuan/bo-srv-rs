@@ -32,6 +32,47 @@ pub fn connect_postgres(
     Ok((runtime, executor))
 }
 
+/// Build a StatsD metrics sink for the importer CLIs.
+///
+/// The Python importers (`cli/imprt.py`, `cli/imprt_websocket.py`,
+/// `cli/update.py`) each open a `statsd.StatsClient('localhost', 8125,
+/// prefix='org.blitzortung.import')`.  This mirrors that: the receiver comes
+/// from the `[statsd]`/`BO_STATSD_*` configuration (`host`, `port`) but always
+/// uses the importer prefix unless one is configured explicitly.  When the
+/// socket cannot be set up the tools fall back to [`NoopMetrics`] so a missing
+/// metrics daemon can never prevent an import.
+///
+/// [`NoopMetrics`]: crate::metrics::NoopMetrics
+pub fn build_import_metrics(config: &crate::config::Config) -> std::sync::Arc<dyn crate::metrics::Metrics> {
+    use crate::metrics::{NoopMetrics, StatsDMetrics, IMPORT_STATSD_PREFIX};
+
+    let (host, port) = config.statsd_address();
+    // The importer prefix is the default; an explicit `[statsd] prefix`/env
+    // override (i.e. anything other than the service default) is honoured.
+    let prefix = if config.statsd_prefix == crate::metrics::DEFAULT_STATSD_PREFIX {
+        IMPORT_STATSD_PREFIX
+    } else {
+        &config.statsd_prefix
+    };
+
+    match StatsDMetrics::with_address_and_prefix(host, port, prefix) {
+        Ok(metrics) => {
+            log::info!(
+                "sending StatsD metrics to {} with prefix {:?}",
+                metrics.target(),
+                prefix
+            );
+            std::sync::Arc::new(metrics)
+        }
+        Err(error) => {
+            log::warn!(
+                "StatsD metrics disabled: could not set up a sender for {host}:{port}: {error}"
+            );
+            std::sync::Arc::new(NoopMetrics)
+        }
+    }
+}
+
 /// Configure console logging from the `-v`/`-d` flags plus the `RUST_LOG`
 /// environment override.
 pub fn init_logging(verbose: bool, debug: bool) {
@@ -432,5 +473,70 @@ mod tests {
         assert!(second.lock(1).is_ok());
         second.unlock();
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The importer sink uses `org.blitzortung.import` by default and honours
+    /// an explicitly configured prefix.
+    #[test]
+    fn build_import_metrics_uses_import_prefix_by_default() {
+        let receiver = std::net::UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let port = receiver.local_addr().unwrap().port();
+
+        let config = crate::config::Config {
+            statsd_host: "127.0.0.1".into(),
+            statsd_port: port,
+            ..crate::config::Config::default()
+        };
+        let metrics = build_import_metrics(&config);
+        metrics.for_update_imported(3);
+
+        let mut buffer = [0u8; 512];
+        let (len, _) = receiver.recv_from(&mut buffer).unwrap();
+        assert_eq!(
+            String::from_utf8(buffer[..len].to_vec()).unwrap(),
+            "org.blitzortung.import.strikes.imported:3|g"
+        );
+    }
+
+    /// An explicitly configured `[statsd] prefix` is passed through unchanged.
+    #[test]
+    fn build_import_metrics_honours_configured_prefix() {
+        let receiver = std::net::UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let port = receiver.local_addr().unwrap().port();
+
+        let config = crate::config::Config {
+            statsd_host: "127.0.0.1".into(),
+            statsd_port: port,
+            statsd_prefix: "my.import".into(),
+            ..crate::config::Config::default()
+        };
+        let metrics = build_import_metrics(&config);
+        metrics.for_update_imported(3);
+
+        let mut buffer = [0u8; 512];
+        let (len, _) = receiver.recv_from(&mut buffer).unwrap();
+        assert_eq!(
+            String::from_utf8(buffer[..len].to_vec()).unwrap(),
+            "my.import.strikes.imported:3|g"
+        );
+    }
+
+    /// A bad receiver host disables metrics instead of failing the import.
+    #[test]
+    fn build_import_metrics_falls_back_to_noop_on_bad_host() {
+        let config = crate::config::Config {
+            statsd_host: "invalid.invalid.invalid".into(),
+            statsd_port: 8125,
+            ..crate::config::Config::default()
+        };
+        let metrics = build_import_metrics(&config);
+        // The no-op sink silently accepts everything.
+        metrics.for_import(1, 0, 0.0, 0.0);
     }
 }

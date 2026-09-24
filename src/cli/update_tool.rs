@@ -11,6 +11,7 @@ use crate::builder::Strike as StrikeBuilder;
 use crate::data::Strike;
 use crate::db::{HashableStrikeKey, StrikeDb, StrikeKey};
 use crate::executor::QueryExecutor;
+use crate::metrics::Metrics;
 use crate::query::TimeInterval;
 use crate::round::py_round;
 
@@ -55,12 +56,14 @@ pub struct UpdateResult {
 /// `update.update_strikes`: fetch, filter and insert new strikes.
 ///
 /// `now` is injected for testability.  Returns `Err` on a database failure
-/// (after rolling back), matching the Python behaviour.
+/// (after rolling back), matching the Python behaviour.  The number of inserted
+/// strikes is gauged as `strikes.imported` through `metrics`.
 pub async fn update_strikes(
     executor: &dyn QueryExecutor,
     url_strikes: &[Strike],
     hours: i64,
     now: DateTime<Utc>,
+    metrics: &dyn Metrics,
 ) -> Result<UpdateResult, Box<dyn std::error::Error + Send + Sync>> {
     let start_time = now - Duration::hours(hours);
     let interval = TimeInterval::new(start_time, now);
@@ -113,6 +116,9 @@ pub async fn update_strikes(
     } else {
         log::info!("No new strikes to insert");
     }
+
+    // `update.update_strikes`: gauge the inserted strike count.
+    metrics.for_update_imported(new_strikes.len() as u64);
 
     Ok(UpdateResult {
         inserted: new_strikes.len(),
@@ -182,6 +188,7 @@ impl UpdateOptions {
 mod tests {
     use super::*;
     use crate::executor::{Param, Row, Value};
+    use crate::metrics::NoopMetrics;
     use crate::mock::MockExecutor;
     use chrono::TimeZone;
 
@@ -240,10 +247,25 @@ mod tests {
             strike_at(now - Duration::minutes(30), 10.5, 20.5, None),
             strike_at(now - Duration::minutes(30), 11.5, 21.5, None),
         ];
-        let result = update_strikes(&mock, &strikes, 1, now).await.unwrap();
+        let result = update_strikes(&mock, &strikes, 1, now, &NoopMetrics).await.unwrap();
         assert_eq!(result.inserted, 2);
         assert_eq!(mock.execution_count(), 1);
         assert_eq!(mock.commit_count(), 1);
+        let _ = &mut mock;
+    }
+
+    /// `update_strikes` gauges the inserted strike count like Python.
+    #[tokio::test]
+    async fn update_reports_imported_metric() {
+        let now = utc(2025, 1, 1, 12, 0, 0);
+        let mut mock = empty_keys_executor();
+        let strikes = vec![
+            strike_at(now - Duration::minutes(30), 10.5, 20.5, None),
+            strike_at(now - Duration::minutes(30), 11.5, 21.5, None),
+        ];
+        let metrics = crate::metrics::RecordingMetrics::new();
+        update_strikes(&mock, &strikes, 1, now, &metrics).await.unwrap();
+        assert_eq!(metrics.lines(), vec!["strikes.imported:2|g".to_string()]);
         let _ = &mut mock;
     }
 
@@ -252,7 +274,7 @@ mod tests {
         let now = utc(2025, 1, 1, 12, 0, 0);
         let mut mock = empty_keys_executor();
         let strikes = vec![strike_at(now - Duration::seconds(59), 10.5, 20.5, None)];
-        let result = update_strikes(&mock, &strikes, 1, now).await.unwrap();
+        let result = update_strikes(&mock, &strikes, 1, now, &NoopMetrics).await.unwrap();
         assert_eq!(result.inserted, 0);
         assert_eq!(mock.execution_count(), 0);
         assert_eq!(mock.commit_count(), 0);
@@ -275,7 +297,7 @@ mod tests {
             ])],
         );
         let strikes = vec![strike_at(now - Duration::minutes(30), 10.5, 20.5, None)];
-        let result = update_strikes(&mock, &strikes, 1, now).await.unwrap();
+        let result = update_strikes(&mock, &strikes, 1, now, &NoopMetrics).await.unwrap();
         assert_eq!(result.inserted, 0);
         assert_eq!(mock.execution_count(), 0);
         let _ = &mut mock;
@@ -289,7 +311,7 @@ mod tests {
             strike_at(now - Duration::minutes(30), 10.5, 20.5, None),
             strike_at(now - Duration::hours(2), 11.5, 21.5, None),
         ];
-        let result = update_strikes(&mock, &strikes, 1, now).await.unwrap();
+        let result = update_strikes(&mock, &strikes, 1, now, &NoopMetrics).await.unwrap();
         assert_eq!(result.inserted, 1);
         let _ = &mut mock;
     }
@@ -301,7 +323,7 @@ mod tests {
         mock.add_rows("FROM strikes", vec![]);
         mock.add_error("INSERT INTO strikes", "database error");
         let strikes = vec![strike_at(now - Duration::minutes(30), 10.5, 20.5, None)];
-        let result = update_strikes(&mock, &strikes, 1, now).await;
+        let result = update_strikes(&mock, &strikes, 1, now, &NoopMetrics).await;
         assert!(result.is_err());
         assert_eq!(mock.rollback_count(), 1);
     }
@@ -324,7 +346,7 @@ mod tests {
         let now = utc(2025, 1, 1, 12, 0, 0);
         let mut mock = empty_keys_executor();
         let strikes = vec![strike_at(now - Duration::minutes(30), 10.5, 20.5, None)];
-        update_strikes(&mock, &strikes, 1, now).await.unwrap();
+        update_strikes(&mock, &strikes, 1, now, &NoopMetrics).await.unwrap();
         let (_, params) = &mock.executions()[0];
         assert_eq!(params[5], Param::Int(1));
         let _ = &mut mock;

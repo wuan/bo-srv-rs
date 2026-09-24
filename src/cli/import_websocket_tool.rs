@@ -15,6 +15,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::builder::Strike as StrikeBuilder;
 use crate::db::StrikeDb;
 use crate::executor::QueryExecutor;
+use crate::metrics::Metrics;
 use crate::websocket::decode;
 
 /// Websocket server indices chosen from at random (`imprt_websocket.main`).
@@ -97,16 +98,22 @@ pub fn server_url(index: u32) -> String {
 struct Importer<'a> {
     db: Option<&'a StrikeDb<'a>>,
     executor: Option<&'a dyn QueryExecutor>,
+    metrics: &'a dyn Metrics,
     strike_count: u64,
     last_commit: std::time::Instant,
     local_delay_sum: f64,
 }
 
 impl<'a> Importer<'a> {
-    fn new(db: Option<&'a StrikeDb<'a>>, executor: Option<&'a dyn QueryExecutor>) -> Self {
+    fn new(
+        db: Option<&'a StrikeDb<'a>>,
+        executor: Option<&'a dyn QueryExecutor>,
+        metrics: &'a dyn Metrics,
+    ) -> Self {
         Importer {
             db,
             executor,
+            metrics,
             strike_count: 0,
             last_commit: std::time::Instant::now(),
             local_delay_sum: 0.0,
@@ -143,6 +150,9 @@ impl<'a> Importer<'a> {
             "{strike} - region {region} - delay {delay:.1}, local delay {local_delay:.1}"
         );
 
+        // `imprt_websocket.on_message`: count the strike and gauge its delay.
+        self.metrics.for_websocket_strike(local_delay);
+
         if let Some(db) = self.db {
             db.insert(&strike, region).await?;
         }
@@ -170,6 +180,7 @@ async fn run_once(
     index: u32,
     test: bool,
     executor: Option<Arc<dyn QueryExecutor>>,
+    metrics: &dyn Metrics,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let url = server_url(index);
     log::info!("connect to {url}");
@@ -206,7 +217,7 @@ async fn run_once(
 
     let db = executor.as_ref().map(|_| StrikeDb::new(executor.as_deref().unwrap(), 4326));
     let db = db.as_ref();
-    let mut importer = Importer::new(db, executor.as_deref());
+    let mut importer = Importer::new(db, executor.as_deref(), metrics);
 
     while let Some(message) = read.next().await {
         match message {
@@ -243,10 +254,11 @@ async fn run_once(
 pub async fn run(
     executor: Option<Arc<dyn QueryExecutor>>,
     options: &WebsocketOptions,
+    metrics: &dyn Metrics,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     loop {
         let index = random_server_index();
-        if let Err(error) = run_once(index, options.test, executor.clone()).await {
+        if let Err(error) = run_once(index, options.test, executor.clone(), metrics).await {
             log::warn!("connection error: {error}");
         }
         // Brief pause before reconnecting, matching the outer `while True`.
@@ -297,10 +309,16 @@ mod tests {
     #[tokio::test]
     async fn importer_commits_on_test_mode_without_db() {
         // Without a database the importer still counts and commits are no-ops.
-        let mut importer = Importer::new(None, None);
+        let metrics = crate::metrics::RecordingMetrics::new();
+        let mut importer = Importer::new(None, None, &metrics);
         let message = "{\"time\":1650135893612088000,\"lat\":32.335748,\"lon\":-89.561516,\
                        \"alt\":0,\"mds\":100,\"region\":3}";
         importer.on_message(message).await.unwrap();
         assert_eq!(importer.strike_count, 1);
+        // `strikes` counter plus the `strikes.delay` float gauge.
+        let lines = metrics.lines();
+        assert_eq!(lines[0], "strikes:1|c");
+        assert!(lines[1].starts_with("strikes.delay:"), "got {lines:?}");
+        assert!(lines[1].ends_with("|g"), "got {lines:?}");
     }
 }

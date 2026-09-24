@@ -115,7 +115,10 @@ data feeds (`data.blitzortung.org`), mirroring `Config.get_username()` /
 
 The optional `[statsd]` section points at the local StatsD receiver (default
 `localhost:8125`, prefix `org.blitzortung.service`) as in the Python
-implementation.
+implementation.  The service uses the configured `prefix`; the importer CLIs
+(`bo-import`, `bo-import-websocket`, `bo-update`) default to
+`org.blitzortung.import` (matching the Python `StatsClient(...,
+prefix='org.blitzortung.import')`) unless `prefix` is set explicitly.
 
 Environment variables supplement/override the file (explicit env vars win):
 
@@ -200,6 +203,32 @@ timing, matching `StrikeGridState.log_timing`/`GlobalStrikeGridQuery`).
 StatsD is fire-and-forget: if the socket cannot be created the service logs a
 warning and continues with metrics disabled, and a missing/failing daemon never
 affects request handling.
+
+### Importer metrics
+
+The importer CLIs report to the same receiver under the
+`org.blitzortung.import` prefix, matching the Python tools:
+
+| Tool | Metrics |
+| --- | --- |
+| `bo-import` (`cli/imprt.py`) | per region `strikes.<region>` counter, `strikes.<region>.count` gauge, `strikes.<region>.get` and `strikes.<region>.insert` timings (ms, at least `1`); after the run `strikes.error_count` gauge |
+| `bo-import-websocket` (`cli/imprt_websocket.py`) | `strikes` counter and `strikes.delay` gauge (local delay in seconds) per received strike |
+| `bo-update` (`cli/update.py`) | `strikes.imported` gauge with the number of inserted strikes |
+
+For example:
+
+```text
+org.blitzortung.import.strikes.3:1|c
+org.blitzortung.import.strikes.3.count:42|g
+org.blitzortung.import.strikes.3.get:12|ms
+org.blitzortung.import.strikes.3.insert:1|ms
+org.blitzortung.import.strikes.error_count:0|g
+org.blitzortung.import.strikes.delay:4.5|g
+org.blitzortung.import.strikes.imported:3|g
+```
+
+If the socket cannot be created the importers log a warning and continue with
+metrics disabled, so a missing daemon never blocks an import.
 
 ## Protocol
 
@@ -311,7 +340,7 @@ histogram bins (empty when `minute_length <= 10`).
 - `jsonrpc` — JSON-RPC parsing/dispatch and the pre-1.0 / v1 / v2 envelope
   dialects
 - `metrics` — the `Metrics` trait (no-op for production, recording impl for
-  tests)
+  tests) plus the service and importer metric helpers and the StatsD sender
 - `transport` — LSP-style `Content-Length` framing, header parsing, and the TCP
   accept loop
 - `http` — HTTP/1.1 transport (`POST /`, `GET ?request=`, JSONP, keep-alive,
@@ -427,9 +456,10 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   defaults in use (`Config::from_env`), rather than silently using defaults.
   The Python `ConfigModule` raises `No configuration file found` instead; the
   Rust port keeps running with defaults to remain non-breaking.
-- **No statsd in the CLI tools.** The Python importers report to a local
-  statsd daemon; the Rust tools only log (metrics go through the same
-  `Metrics`/plain-logging boundary as the service).
+- **Importer statsd metrics.** The Rust importers now report the same StatsD
+  metrics as the Python tools (`org.blitzortung.import` prefix), through the
+  shared `Metrics` trait; a missing daemon leaves them disabled without failing
+  the import.
 - **Per-region timeout is cooperative.** Python wraps each `bo-import` region
   in `stopit.SignalTimeout(300)`; the Rust port checks the deadline between log
   downloads and uses a 30 second per-request HTTP timeout.
