@@ -177,14 +177,15 @@ histogram bins (empty when `minute_length <= 10`).
 
 ## CLI tools
 
-Four binaries are ported from the Python `blitzortung/cli` package:
+Four binaries are ported from the Python `blitzortung/cli` package.  Their
+names match bo-python's `pyproject.toml` `[project.scripts]` entries:
 
 | Binary | Python source | Purpose |
 | --- | --- | --- |
 | `bo-db` | `cli/db.py` | Query strikes as text or a grid (arcgrid/ascii map) |
-| `bo-insert` | `cli/imprt.py` | Import protected ten-minute strike logs |
+| `bo-import` | `cli/imprt.py` | Import protected ten-minute strike logs |
 | `bo-update` | `cli/update.py` | Import recent strikes from `last_strikes.php` |
-| `bo-insert-websocket` | `cli/imprt_websocket.py` | Live websocket strike import |
+| `bo-import-websocket` | `cli/imprt_websocket.py` | Live websocket strike import |
 
 ```sh
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
@@ -197,11 +198,11 @@ cargo run --bin bo-db -- --startdate 20250101 --starttime 1200 \
   --grid 0.1 --map
 
 # import from data.blitzortung.org (needs [auth] credentials)
-cargo run --bin bo-insert -- --startdate 20250101
-cargo run --bin bo-insert -- --update        # now - 30min window
+cargo run --bin bo-import -- --startdate 20250101
+cargo run --bin bo-import -- --update        # now - 30min window
 cargo run --bin bo-update -- --hours 2
-cargo run --bin bo-insert-websocket -- -v
-cargo run --bin bo-insert-websocket -- -t    # connection test, no DB writes
+cargo run --bin bo-import-websocket -- -v
+cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
 ```
 
 ## Documented differences from the Python implementation
@@ -235,7 +236,7 @@ cargo run --bin bo-insert-websocket -- -t    # connection test, no DB writes
 - **No statsd in the CLI tools.** The Python importers report to a local
   statsd daemon; the Rust tools only log (metrics go through the same
   `Metrics`/plain-logging boundary as the service).
-- **Per-region timeout is cooperative.** Python wraps each `bo-insert` region
+- **Per-region timeout is cooperative.** Python wraps each `bo-import` region
   in `stopit.SignalTimeout(300)`; the Rust port checks the deadline between log
   downloads and uses a 30 second per-request HTTP timeout.
 - **Write transactions.** `QueryExecutor::execute` runs each statement in its

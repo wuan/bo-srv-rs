@@ -10,22 +10,23 @@ default-run = "service"
 name = "service"
 path = "src/main.rs"
 
-# CLI tools ported from the Python `blitzortung/cli` package.
+# CLI tools ported from the Python `blitzortung/cli` package; the names match
+# `pyproject.toml` `[project.scripts]` (bo-python).
 [[bin]]
 name = "bo-db"
 path = "src/bin/bo-db.rs"
 
 [[bin]]
-name = "bo-insert"
-path = "src/bin/bo-insert.rs"
+name = "bo-import"
+path = "src/bin/bo-import.rs"
 
 [[bin]]
 name = "bo-update"
 path = "src/bin/bo-update.rs"
 
 [[bin]]
-name = "bo-insert-websocket"
-path = "src/bin/bo-insert-websocket.rs"
+name = "bo-import-websocket"
+path = "src/bin/bo-import-websocket.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }
@@ -40,9 +41,9 @@ ini = "2"
 futures = "0.3"
 log = "0.4"
 env_logger = "0.11"
-# CLI data import tools (bo-insert / bo-update): blocking HTTP with basic auth.
+# CLI data import tools (bo-import / bo-update): blocking HTTP with basic auth.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-# bo-insert-websocket: async websocket client.
+# bo-import-websocket: async websocket client.
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 rand = "0.8"
 

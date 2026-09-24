@@ -1,4 +1,4 @@
-//! `bo-insert` implementation (port of `blitzortung/cli/imprt.py`).
+//! `bo-import` implementation (port of `blitzortung/cli/imprt.py`).
 //!
 //! Imports strikes from the protected ten-minute logs for the known regions.
 //! The Python tool wraps each region in a 300 second `stopit` signal timeout
@@ -28,7 +28,7 @@ pub const STRIKE_GROUP_SIZE: i64 = 10000;
 /// Sleep between retries.
 pub const RETRY_SLEEP_MILLIS: u64 = 2000;
 
-/// The option specs understood by `bo-insert`.
+/// The option specs understood by `bo-import`.
 pub const SPECS: &[(&str, &str, bool)] = &[
     ("verbose", "v", false),
     ("debug", "d", false),
@@ -179,8 +179,8 @@ pub fn import_strikes<T: Transport>(
     (total_strikes, error_count)
 }
 
-/// Build the `bo-insert` options from the parsed command line.
-pub struct InsertOptions {
+/// Build the `bo-import` options from the parsed command line.
+pub struct ImportOptions {
     pub verbose: bool,
     pub debug: bool,
     pub no_timeout: bool,
@@ -188,9 +188,9 @@ pub struct InsertOptions {
     pub update: bool,
 }
 
-impl InsertOptions {
+impl ImportOptions {
     pub fn from_options(options: &Options) -> Self {
-        InsertOptions {
+        ImportOptions {
             verbose: options.flag("verbose"),
             debug: options.flag("debug"),
             no_timeout: options.flag("no-timeout"),
@@ -201,7 +201,7 @@ impl InsertOptions {
 }
 
 /// Resolve the `--startdate` option to a [`Timestamp`] (UTC midnight).
-pub fn resolve_start_time(options: &InsertOptions) -> Option<Timestamp> {
+pub fn resolve_start_time(options: &ImportOptions) -> Option<Timestamp> {
     options.startdate.as_ref().map(|value| {
         let parsed = parse_start_date(value).unwrap_or_else(|| {
             crate::cli::exit_with(&format!("parse error in startdate \"{value}\""), 5)

@@ -92,7 +92,7 @@ impl<'a> StrikeDb<'a> {
     /// `Strike.insert_many`: insert all strikes in a single multi-value
     /// `INSERT`, using `ST_MakePoint(lon, lat)` for the `geog` column.
     ///
-    /// `region` pins every strike to the same region (the `bo-insert` case);
+    /// `region` pins every strike to the same region (the `bo-import` case);
     /// when it is `None` each strike's own region is used, falling back to 1
     /// (the `bo-update` case).
     pub fn insert_many(&self, strikes: &[Strike], region: Option<i64>) -> Result<usize, DbError> {

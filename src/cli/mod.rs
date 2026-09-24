@@ -1,14 +1,14 @@
-//! Shared helpers for the Blitzortung CLI tools (`bo-db`, `bo-insert`,
-//! `bo-update`, `bo-insert-websocket`).
+//! Shared helpers for the Blitzortung CLI tools (`bo-db`, `bo-import`,
+//! `bo-update`, `bo-import-websocket`).
 //!
 //! The Python tools use `optparse`; the Rust port uses a small hand-written
 //! parser instead of pulling in a CLI crate, matching the project's preference
 //! for minimal dependencies.
 
 pub mod db_tool;
-pub mod insert_tool;
+pub mod import_tool;
+pub mod import_websocket_tool;
 pub mod update_tool;
-pub mod websocket_tool;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -119,7 +119,7 @@ impl Options {
 }
 
 /// Build a Tokio runtime and connect a [`PostgresExecutor`] to the configured
-/// database.  Used by all CLI tools except `bo-insert-websocket`, which builds
+/// database.  Used by all CLI tools except `bo-import-websocket`, which builds
 /// its own runtime for the websocket event loop.
 ///
 /// [`PostgresExecutor`]: crate::postgres::PostgresExecutor

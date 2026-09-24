@@ -1,8 +1,8 @@
-//! `bo-insert-websocket` — live strike import over the Blitzortung websocket
+//! `bo-import-websocket` — live strike import over the Blitzortung websocket
 //! (port of `blitzortung/cli/imprt_websocket.py`).
 //!
 //! ```text
-//! bo-insert-websocket [-v] [-d] [-t]
+//! bo-import-websocket [-v] [-d] [-t]
 //! ```
 //!
 //! Connects to `wss://ws{1|7|8}.blitzortung.org/`, decodes each message and
@@ -11,15 +11,17 @@
 
 use std::sync::Arc;
 
-use bo_service::cli::{exit_with, init_logging, websocket_tool, LockWithTimeout, Options};
+use bo_service::cli::{
+    exit_with, import_websocket_tool, init_logging, LockWithTimeout, Options,
+};
 use bo_service::config::Config;
 use bo_service::executor::QueryExecutor;
 use bo_service::postgres::PostgresExecutor;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let options = Options::parse(&args, websocket_tool::SPECS);
-    let ws_options = websocket_tool::WebsocketOptions::from_options(&options);
+    let options = Options::parse(&args, import_websocket_tool::SPECS);
+    let ws_options = import_websocket_tool::WebsocketOptions::from_options(&options);
     init_logging(ws_options.verbose, ws_options.debug);
 
     let mut lock = LockWithTimeout::new("/tmp/.bo-import-websocket.lock");
@@ -46,7 +48,7 @@ fn main() {
         }
     };
 
-    if let Err(error) = runtime.block_on(websocket_tool::run(executor, &ws_options)) {
+    if let Err(error) = runtime.block_on(import_websocket_tool::run(executor, &ws_options)) {
         exit_with(&format!("websocket import failed: {error}"), 1);
     }
 }
