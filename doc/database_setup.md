@@ -146,6 +146,18 @@ Observability, currently all off: `shared_preload_libraries =
 'pg_stat_statements'`, `track_io_timing = on`, `log_min_duration_statement =
 500ms`, `log_lock_waits = on`.
 
+#### updated values
+
+| Setting | Value |
+| --- | --- |
+| `random_page_cost` | 3.0 |
+| `effective_cache_size` | 5GB |
+| `shared_buffers` | 512MB |
+| `work_mem` | 128MB |
+| `effective_io_concurrency` | 50 |
+| `max_wal_size` | 4GB |
+| `jit` | off |
+
 ### 3. Application / schema follow-ups
 
 - **Done:** the service now uses a `deadpool-postgres` connection pool
