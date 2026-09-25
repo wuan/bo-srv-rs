@@ -7,12 +7,22 @@
 use crate::data::{GridData, GridElement, Strike, Timestamp};
 use crate::executor::{Param, QueryExecutor, Row};
 use crate::geom::Grid;
-use crate::query::{self, Area, TimeInterval};
+use crate::query::{self, Area, SelectColumns, SelectOrder, TimeInterval};
 use crate::round::py_round;
 
 /// A de-duplication key: `(timestamp ns value, round(x,4), round(y,4),
 /// lateral_error)` (`db.Strike._create_strike_key` / `update.create_strike_key`).
 pub type StrikeKey = (i64, f64, f64, Option<i64>);
+
+/// Parameters bound per strike row (timestamp, nanoseconds, the two
+/// `ST_MakePoint` coordinates, altitude, region, amplitude, error2d,
+/// stationcount).
+const STRIKE_PARAMETERS: usize = 9;
+
+/// PostgreSQL rejects statements with more than 65535 bound parameters (the
+/// `ParameterDescription` count is a `u16`), so a single multi-value `INSERT`
+/// must stay at or below this many strikes.
+const MAX_STRIKES_PER_INSERT: usize = u16::MAX as usize / STRIKE_PARAMETERS;
 
 /// A hashable/sortable form of [`StrikeKey`] (float coordinates compared by
 /// their bit pattern; the values are rounded to four decimals beforehand, so
@@ -99,13 +109,32 @@ impl<'a> StrikeDb<'a> {
         StrikeDb { executor, srid }
     }
 
-    /// `Strike.insert_many`: insert all strikes in a single multi-value
-    /// `INSERT`, using `ST_MakePoint(lon, lat)` for the `geog` column.
+    /// `Strike.insert_many`: insert all strikes using a multi-value `INSERT`
+    /// with `ST_MakePoint(lon, lat)` for the `geog` column.
     ///
     /// `region` pins every strike to the same region (the `bo-import` case);
     /// when it is `None` each strike's own region is used, falling back to 1
     /// (the `bo-update` case).
+    ///
+    /// Batches larger than [`MAX_STRIKES_PER_INSERT`] are split transparently:
+    /// PostgreSQL caps a statement at 65535 bound parameters, and exceeding it
+    /// wraps the `u16` parameter count and desyncs the wire protocol (the
+    /// client reports `invalid message length: parameters is not drained`).
     pub async fn insert_many(
+        &self,
+        strikes: &[Strike],
+        region: Option<i64>,
+    ) -> Result<usize, DbError> {
+        let mut inserted = 0;
+        for chunk in strikes.chunks(MAX_STRIKES_PER_INSERT) {
+            inserted += self.insert_chunk(chunk, region).await?;
+        }
+        Ok(inserted)
+    }
+
+    /// Build and run one multi-value `INSERT` for a batch that already fits the
+    /// parameter limit.
+    async fn insert_chunk(
         &self,
         strikes: &[Strike],
         region: Option<i64>,
@@ -117,11 +146,11 @@ impl<'a> StrikeDb<'a> {
             "INSERT INTO strikes \
              (\"timestamp\", nanoseconds, geog, altitude, region, amplitude, error2d, stationcount) VALUES ",
         );
-        let mut params: Vec<Param> = Vec::with_capacity(strikes.len() * 9);
+        let mut params: Vec<Param> = Vec::with_capacity(strikes.len() * STRIKE_PARAMETERS);
         let mut placeholders: Vec<String> = Vec::with_capacity(strikes.len());
 
         for (index, strike) in strikes.iter().enumerate() {
-            let base = index * 9;
+            let base = index * STRIKE_PARAMETERS;
             // `ST_MakePoint` is overloaded for float8/float4, so cast the
             // coordinates explicitly (the remaining placeholders are typed by
             // the INSERT column list).
@@ -219,7 +248,14 @@ impl<'a> StrikeDb<'a> {
         area: Option<&Area>,
         region: Option<i64>,
     ) -> Result<Vec<Strike>, DbError> {
-        let query = query::select_query(time_interval, area, region, self.srid);
+        let query = query::select_query(
+            time_interval,
+            area,
+            region,
+            self.srid,
+            SelectColumns::Strike,
+            SelectOrder::Timestamp,
+        );
         let rows = self
             .executor
             .query(&query.to_postgres(), &query.parameters())
@@ -234,7 +270,14 @@ impl<'a> StrikeDb<'a> {
         area: Option<&Area>,
         region: Option<i64>,
     ) -> Result<Vec<StrikeKey>, DbError> {
-        let query = query::select_key_query(time_interval, area, region, self.srid);
+        let query = query::select_query(
+            time_interval,
+            area,
+            region,
+            self.srid,
+            SelectColumns::StrikeKey,
+            SelectOrder::None,
+        );
         let rows = self
             .executor
             .query(&query.to_postgres(), &query.parameters())
@@ -418,6 +461,29 @@ mod tests {
         let db = StrikeDb::new(&mock, 4326);
         assert_eq!(db.insert_many(&[], Some(1)).await.unwrap(), 0);
         assert_eq!(mock.execution_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn insert_many_splits_batches_over_parameter_limit() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows("SELECT", vec![]);
+        let db = StrikeDb::new(&mock, 4326);
+        let strikes: Vec<Strike> = (0..MAX_STRIKES_PER_INSERT + 1)
+            .map(|_| strike(1.0, 2.0))
+            .collect();
+        let count = db.insert_many(&strikes, Some(1)).await.unwrap();
+        assert_eq!(count, MAX_STRIKES_PER_INSERT + 1);
+
+        let executions = mock.executions();
+        assert_eq!(executions.len(), 2);
+        assert_eq!(
+            executions[0].1.len(),
+            MAX_STRIKES_PER_INSERT * STRIKE_PARAMETERS
+        );
+        assert_eq!(executions[1].1.len(), STRIKE_PARAMETERS);
+        for (_, params) in &executions {
+            assert!(params.len() <= u16::MAX as usize);
+        }
     }
 
     #[tokio::test]

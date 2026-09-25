@@ -3,12 +3,12 @@
 //!
 //! The generated SQL text uses psycopg2-style `%(name)s` placeholders and
 //! tracks parameters by name like the Python `Query.parameters` dict.  It
-//! matches the Python implementation except for the queries that always read
-//! coordinates in SRID 4326 ([`strikes_query`], [`grid_query`],
-//! [`global_grid_query`]): those access `geog::geometry` directly instead of
-//! the no-op `ST_Transform(geog::geometry, 4326)`.  Use [`Query::to_postgres`]
-//! / [`Query::parameters`] to obtain the `$1, $2, ...` form with parameters in
-//! the same order for tokio-postgres.
+//! matches the Python implementation except that a no-op
+//! `ST_Transform(geog::geometry, 4326)` is omitted when coordinates are read in
+//! the default SRID: the fixed-4326 queries ([`strikes_query`], [`grid_query`],
+//! [`global_grid_query`]) and [`select_query`] with [`DEFAULT_SRID`].  Use
+//! [`Query::to_postgres`] / [`Query::parameters`] to obtain the `$1, $2, ...`
+//! form with parameters in the same order for tokio-postgres.
 
 use chrono::{DateTime, Utc};
 
@@ -244,6 +244,13 @@ impl Query {
         self
     }
 
+    /// Like [`Query::set_columns`] but takes owned strings, for projections
+    /// built at runtime (e.g. [`SelectColumns::sql_columns`]).
+    pub fn set_columns_owned(mut self, columns: Vec<String>) -> Self {
+        self.columns = columns;
+        self
+    }
+
     pub fn condition(mut self, condition: &str) -> Self {
         self.conditions.push(condition.to_string());
         self
@@ -363,18 +370,30 @@ fn add_time_interval(q: Query, time_interval: &TimeInterval) -> Query {
 }
 
 /// `query.Query.add_geometry`: bounding-box pre-filter plus an `ST_Intersects`
-/// condition when the geometry is not already its own envelope.
-fn add_geometry(q: Query, area: &Area) -> Query {
+/// condition when the geometry is not already its own envelope.  When
+/// `default_srid` is set the SRID is inlined as a literal and the no-op
+/// `ST_Transform` is skipped, so no `srid` parameter is required.
+fn add_geometry(q: Query, area: &Area, default_srid: bool) -> Query {
+    let (srid, geog) = if default_srid {
+        (DEFAULT_SRID.to_string(), "geog".to_string())
+    } else {
+        let srid = "%(srid)s".to_string();
+        (
+            srid.clone(),
+            format!("ST_Transform(geog::geometry, {srid})"),
+        )
+    };
     let mut qq = q
-        .condition("ST_GeomFromWKB(%(envelope)s, %(srid)s) && geog")
-        .param("envelope", Param::Bytea(area.envelope_wkb.clone()))
-        .cast("srid", "integer");
+        .condition(&format!("ST_GeomFromWKB(%(envelope)s, {srid}) && geog"))
+        .param("envelope", Param::Bytea(area.envelope_wkb.clone()));
+    if !default_srid {
+        qq = qq.cast("srid", "integer");
+    }
     if let Some(geometry) = &area.geometry_wkb {
         qq = qq
-            .condition(
-                "ST_Intersects(ST_GeomFromWKB(%(geometry)s, %(srid)s), \
-                 ST_Transform(geog::geometry, %(srid)s))",
-            )
+            .condition(&format!(
+                "ST_Intersects(ST_GeomFromWKB(%(geometry)s, {srid}), {geog})"
+            ))
             .param("geometry", Param::Bytea(geometry.clone()));
     }
     qq
@@ -451,6 +470,7 @@ fn add_select_conditions(
     time_interval: &TimeInterval,
     area: Option<&Area>,
     region: Option<i64>,
+    default_srid: bool,
 ) -> Query {
     let mut qq = add_time_interval(q, time_interval);
     if let Some(region) = region {
@@ -460,74 +480,118 @@ fn add_select_conditions(
             .cast("region", "smallint");
     }
     if let Some(area) = area {
-        qq = add_geometry(qq, area);
+        qq = add_geometry(qq, area, default_srid);
     }
     qq
 }
 
-/// `blitzortung.db.query_builder.Strike.select_query`: select columns, time
-/// interval, optional region/geometry, `ORDER BY id`.
+/// Columns fetched by [`select_query`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectColumns {
+    /// Full strike row (`id`, `"timestamp"`, `nanoseconds`, `x`, `y`, `altitude`,
+    /// `amplitude`, `error2d`, `stationcount`).
+    Strike,
+    /// The fields needed to identify a strike (`"timestamp"`, `nanoseconds`,
+    /// `x`, `y`, `error2d`), used by `bo-update` for de-duplication.
+    StrikeKey,
+}
+
+impl SelectColumns {
+    /// SQL projection for this variant.  When `default_srid` is set the
+    /// `ST_Transform(geog::geometry, 4326)` no-op is omitted from the
+    /// coordinate expressions, matching [`strikes_query`].
+    fn sql_columns(self, default_srid: bool) -> Vec<String> {
+        let x = coordinate_column("ST_X", "x", default_srid);
+        let y = coordinate_column("ST_Y", "y", default_srid);
+        match self {
+            SelectColumns::Strike => vec![
+                "id".to_string(),
+                "\"timestamp\"".to_string(),
+                "nanoseconds".to_string(),
+                x,
+                y,
+                "altitude".to_string(),
+                "amplitude".to_string(),
+                "error2d".to_string(),
+                "stationcount".to_string(),
+            ],
+            SelectColumns::StrikeKey => vec![
+                "\"timestamp\"".to_string(),
+                "nanoseconds".to_string(),
+                x,
+                y,
+                "error2d".to_string(),
+            ],
+        }
+    }
+}
+
+/// The CRS the `geog` column is stored in.  A `ST_Transform` to this SRID is a
+/// no-op, so it is omitted.
+pub const DEFAULT_SRID: i64 = 4326;
+
+/// A `ST_X`/`ST_Y` projection that skips the no-op `ST_Transform` when the
+/// coordinates are already in [`DEFAULT_SRID`].
+fn coordinate_column(function: &str, alias: &str, default_srid: bool) -> String {
+    if default_srid {
+        format!("{function}(geog::geometry) AS {alias}")
+    } else {
+        format!("{function}(ST_Transform(geog::geometry, %(srid)s)) AS {alias}")
+    }
+}
+
+/// `ORDER BY` behaviour of [`select_query`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectOrder {
+    /// Chronological (`"timestamp", nanoseconds`), the `bo-db` default.  `id` is
+    /// deliberately not the sort key: it is a `bigserial` assigned at insert
+    /// time, so delayed/backfilled imports make `id` order diverge from time
+    /// order.
+    Timestamp,
+    /// Insertion order (`id`).
+    Id,
+    /// Leave the result unordered, e.g. for de-duplication where order is
+    /// irrelevant.
+    None,
+}
+
+impl SelectOrder {
+    fn apply(self, q: Query) -> Query {
+        match self {
+            SelectOrder::Timestamp => q
+                .order_by("\"timestamp\"", false)
+                .order_by("nanoseconds", false),
+            SelectOrder::Id => q.order_by("id", false),
+            SelectOrder::None => q,
+        }
+    }
+}
+
+/// `blitzortung.db.query_builder.Strike.select_query`: select the requested
+/// columns over a time interval with optional region/geometry, ordered by
+/// `order`.
 pub fn select_query(
     time_interval: &TimeInterval,
     area: Option<&Area>,
     region: Option<i64>,
     srid: i64,
+    columns: SelectColumns,
+    order: SelectOrder,
 ) -> Query {
-    let q = Query::new("strikes")
-        .set_columns(&[
-            "id",
-            "\"timestamp\"",
-            "nanoseconds",
-            "ST_X(ST_Transform(geog::geometry, %(srid)s)) AS x",
-            "ST_Y(ST_Transform(geog::geometry, %(srid)s)) AS y",
-            "altitude",
-            "amplitude",
-            "error2d",
-            "stationcount",
-        ])
-        .param("srid", Param::Int(srid))
-        .cast("srid", "integer");
-    let q = add_select_conditions(q, time_interval, area, region);
-    q.order_by("id", false)
-}
-
-/// `blitzortung.db.query_builder.Strike.select_key_query`: the fields needed
-/// to identify a strike (`"timestamp", nanoseconds, x, y, error2d`), used by
-/// `bo-update` for de-duplication.
-pub fn select_key_query(
-    time_interval: &TimeInterval,
-    area: Option<&Area>,
-    region: Option<i64>,
-    srid: i64,
-) -> Query {
-    let q = Query::new("strikes")
-        .set_columns(&[
-            "\"timestamp\"",
-            "nanoseconds",
-            "ST_X(ST_Transform(geog::geometry, %(srid)s)) AS x",
-            "ST_Y(ST_Transform(geog::geometry, %(srid)s)) AS y",
-            "error2d",
-        ])
-        .param("srid", Param::Int(srid))
-        .cast("srid", "integer");
-    add_select_conditions(q, time_interval, area, region)
+    let default_srid = srid == DEFAULT_SRID;
+    let mut q = Query::new("strikes").set_columns_owned(columns.sql_columns(default_srid));
+    if !default_srid {
+        q = q.param("srid", Param::Int(srid)).cast("srid", "integer");
+    }
+    let q = add_select_conditions(q, time_interval, area, region, default_srid);
+    order.apply(q)
 }
 
 /// `blitzortung.db.query_builder.Strike.select_query` as used by the
 /// `strikes` method: select columns, time interval, optional id interval,
 /// `ORDER BY id`.
 pub fn strikes_query(time_interval: &TimeInterval, id_interval: Option<IdInterval>) -> Query {
-    let mut q = Query::new("strikes").set_columns(&[
-        "id",
-        "\"timestamp\"",
-        "nanoseconds",
-        "ST_X(geog::geometry) AS x",
-        "ST_Y(geog::geometry) AS y",
-        "altitude",
-        "amplitude",
-        "error2d",
-        "stationcount",
-    ]);
+    let mut q = Query::new("strikes").set_columns_owned(SelectColumns::Strike.sql_columns(true));
     q = add_time_interval(q, time_interval);
     if let Some(id) = id_interval {
         q = q
@@ -713,12 +777,19 @@ mod tests {
     /// failure: without an explicit `::integer`, PostgreSQL cannot choose between
     /// `ST_Transform(geometry, integer)` and `ST_Transform(geometry, text)` and
     /// defaults the placeholder to `text`; tokio-postgres then sends the integer
-    /// in binary form and the server rejects the NUL byte.  The default select
-    /// query must therefore carry the cast.
+    /// in binary form and the server rejects the NUL byte.  Any emitted
+    /// `ST_Transform` must therefore carry the cast (a non-default SRID here).
     #[test]
     fn to_postgres_adds_explicit_casts() {
         let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
-        let q = select_query(&interval, None, Some(1), 4326);
+        let q = select_query(
+            &interval,
+            None,
+            Some(1),
+            3857,
+            SelectColumns::Strike,
+            SelectOrder::Timestamp,
+        );
         let sql = q.to_postgres();
         assert!(sql.contains("ST_X(ST_Transform(geog::geometry, $1::integer))"));
         assert!(sql.contains("ST_Y(ST_Transform(geog::geometry, $1::integer))"));
@@ -897,7 +968,14 @@ mod tests {
             [0.0, 0.0],
         ]])
         .unwrap();
-        let q = select_query(&interval, Some(&area), None, 4326);
+        let q = select_query(
+            &interval,
+            Some(&area),
+            None,
+            3857,
+            SelectColumns::Strike,
+            SelectOrder::Timestamp,
+        );
         let sql = q.to_postgres();
         // `srid` appears in both coordinate transforms and in the three
         // geometry calls, but is a single positional parameter.
@@ -908,34 +986,86 @@ mod tests {
     }
 
     #[test]
-    fn select_query_matches_python() {
+    fn select_query_orders_by_timestamp() {
         let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
-        let q = select_query(&interval, None, None, 4326);
+        let q = select_query(
+            &interval,
+            None,
+            None,
+            4326,
+            SelectColumns::Strike,
+            SelectOrder::Timestamp,
+        );
         let expected = "SELECT id, \"timestamp\", nanoseconds, \
-             ST_X(ST_Transform(geog::geometry, %(srid)s)) AS x, \
-             ST_Y(ST_Transform(geog::geometry, %(srid)s)) AS y, \
+             ST_X(geog::geometry) AS x, \
+             ST_Y(geog::geometry) AS y, \
              altitude, amplitude, error2d, stationcount \
              FROM strikes WHERE \"timestamp\" >= %(start_time)s AND \"timestamp\" < %(end_time)s \
-             ORDER BY id";
+             ORDER BY \"timestamp\", nanoseconds";
         assert_eq!(q.to_sql(), expected);
     }
 
     #[test]
-    fn select_key_query_matches_python() {
+    fn select_query_default_srid_omits_noop_transform() {
         let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
-        let q = select_key_query(&interval, None, None, 4326);
+        let sql = |srid| {
+            select_query(
+                &interval,
+                None,
+                None,
+                srid,
+                SelectColumns::Strike,
+                SelectOrder::Timestamp,
+            )
+            .to_sql()
+        };
+        assert!(sql(DEFAULT_SRID).contains("ST_X(geog::geometry) AS x"));
+        assert!(!sql(DEFAULT_SRID).contains("ST_Transform"));
+        assert!(sql(3857).contains("ST_X(ST_Transform(geog::geometry, %(srid)s)) AS x"));
+    }
+
+    #[test]
+    fn select_query_order_variants() {
+        let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
+        let sql = |order| {
+            select_query(&interval, None, None, 4326, SelectColumns::StrikeKey, order).to_sql()
+        };
+        assert!(!sql(SelectOrder::None).contains("ORDER BY"));
+        assert!(sql(SelectOrder::Id).ends_with("ORDER BY id"));
+        assert!(sql(SelectOrder::Timestamp).ends_with("ORDER BY \"timestamp\", nanoseconds"));
+    }
+
+    #[test]
+    fn select_strike_key_columns_match_python() {
+        let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
+        let q = select_query(
+            &interval,
+            None,
+            None,
+            4326,
+            SelectColumns::StrikeKey,
+            SelectOrder::None,
+        );
         let expected = "SELECT \"timestamp\", nanoseconds, \
-             ST_X(ST_Transform(geog::geometry, %(srid)s)) AS x, \
-             ST_Y(ST_Transform(geog::geometry, %(srid)s)) AS y, error2d \
+             ST_X(geog::geometry) AS x, \
+             ST_Y(geog::geometry) AS y, error2d \
              FROM strikes WHERE \"timestamp\" >= %(start_time)s AND \"timestamp\" < %(end_time)s";
         assert_eq!(q.to_sql(), expected);
-        assert_eq!(q.parameters().len(), 3);
+        // The default SRID is not referenced, so only the interval remains.
+        assert_eq!(q.parameters().len(), 2);
     }
 
     #[test]
-    fn select_key_query_with_region() {
+    fn select_strike_key_columns_with_region() {
         let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
-        let q = select_key_query(&interval, None, Some(7), 4326);
+        let q = select_query(
+            &interval,
+            None,
+            Some(7),
+            4326,
+            SelectColumns::StrikeKey,
+            SelectOrder::None,
+        );
         assert!(q.to_sql().contains("region = %(region)s"));
         assert!(matches!(q.parameters().last(), Some(Param::Int(7))));
     }
@@ -944,9 +1074,18 @@ mod tests {
     fn select_query_with_envelope_area_adds_bbox_only() {
         let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
         let area = Area::from_envelope(&Envelope::new(10.0, 12.0, 50.0, 52.0));
-        let q = select_query(&interval, Some(&area), None, 4326);
+        let q = select_query(
+            &interval,
+            Some(&area),
+            None,
+            4326,
+            SelectColumns::Strike,
+            SelectOrder::Timestamp,
+        );
         let sql = q.to_sql();
-        assert!(sql.contains("ST_GeomFromWKB(%(envelope)s, %(srid)s) && geog"));
+        // Default SRID is inlined, so no `srid` parameter is declared.
+        assert!(sql.contains("ST_GeomFromWKB(%(envelope)s, 4326) && geog"));
+        assert!(!sql.contains("%(srid)s"));
         assert!(!sql.contains("ST_Intersects"));
         assert!(q.parameters().iter().any(|p| matches!(p, Param::Bytea(_))));
     }
@@ -962,9 +1101,18 @@ mod tests {
             [0.0, 0.0],
         ]])
         .unwrap();
-        let q = select_query(&interval, Some(&area), None, 4326);
+        let q = select_query(
+            &interval,
+            Some(&area),
+            None,
+            4326,
+            SelectColumns::Strike,
+            SelectOrder::Timestamp,
+        );
         let sql = q.to_sql();
-        assert!(sql.contains("ST_Intersects(ST_GeomFromWKB(%(geometry)s"));
+        // Default SRID is inlined and the no-op transform is dropped.
+        assert!(sql.contains("ST_Intersects(ST_GeomFromWKB(%(geometry)s, 4326), geog)"));
+        assert!(!sql.contains("%(srid)s"));
         // two bytea params: envelope and geometry
         let bytea = q
             .parameters()
@@ -986,7 +1134,14 @@ mod tests {
         ]])
         .unwrap();
         assert!(area.geometry_wkb.is_none());
-        let q = select_query(&interval, Some(&area), None, 4326);
+        let q = select_query(
+            &interval,
+            Some(&area),
+            None,
+            4326,
+            SelectColumns::Strike,
+            SelectOrder::Timestamp,
+        );
         assert!(!q.to_sql().contains("ST_Intersects"));
     }
 

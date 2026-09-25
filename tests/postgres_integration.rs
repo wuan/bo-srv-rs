@@ -564,6 +564,88 @@ fn applied_schema_has_production_indexes() {
     });
 }
 
+/// The canonical schema declares `strikes` as a RANGE-partitioned table and an
+/// insert routes into the UTC day's partition.
+#[test]
+fn strikes_is_partitioned_and_routes_by_timestamp() {
+    let ctx = TestContext::new();
+    ctx.runtime.block_on(async {
+        let rows = ctx
+            .executor
+            .query(
+                "SELECT c.relkind::text FROM pg_class c WHERE c.oid = 'strikes'::regclass",
+                &[],
+            )
+            .await
+            .expect("relkind query");
+        assert!(
+            matches!(rows[0].get(0), Some(Value::Text(t)) if t == "p"),
+            "strikes must be a partitioned table (relkind 'p')"
+        );
+
+        let db = StrikeDb::new(&ctx.executor, 4326);
+        db.insert(&strike_now(11.5, 49.5, Some(1)), 1)
+            .await
+            .expect("insert must succeed");
+
+        let rows = ctx
+            .executor
+            .query(
+                "SELECT tableoid::regclass::text FROM strikes WHERE region = 1",
+                &[],
+            )
+            .await
+            .expect("tableoid query");
+        let partition = match rows[0].get(0) {
+            Some(Value::Text(name)) => name.clone(),
+            other => panic!("unexpected tableoid: {other:?}"),
+        };
+        let today = chrono::Utc::now().format("%Y%m%d").to_string();
+        assert_eq!(
+            partition,
+            format!("strikes_p{today}"),
+            "insert must land in the current UTC day's partition"
+        );
+    });
+}
+
+/// `strikes_create_partition` / `strikes_drop_old_partitions` manage the
+/// retention window.
+#[test]
+fn partition_maintenance_creates_and_drops_old_partitions() {
+    let _guard = support::serial();
+    let (runtime, executor) = support::test_db().runtime_and_executor();
+    runtime.block_on(async {
+        executor
+            .query("SELECT strikes_create_partition('2000-01-01'::date)", &[])
+            .await
+            .expect("create old partition");
+        let rows = executor
+            .query("SELECT to_regclass('strikes_p20000101') IS NULL", &[])
+            .await
+            .expect("to_regclass");
+        assert_eq!(
+            rows[0].get(0),
+            Some(&Value::Bool(false)),
+            "old partition must exist before the cleanup"
+        );
+
+        executor
+            .query("SELECT strikes_drop_old_partitions('2 days'::interval)", &[])
+            .await
+            .expect("drop old partitions");
+        let rows = executor
+            .query("SELECT to_regclass('strikes_p20000101') IS NULL", &[])
+            .await
+            .expect("to_regclass");
+        assert_eq!(
+            rows[0].get(0),
+            Some(&Value::Bool(true)),
+            "old partition must be dropped"
+        );
+    });
+}
+
 /// `prepare_cached` reuses the prepared statement: with a single-connection pool
 /// the second run of the same SQL text is a cache hit, so that connection's
 /// statement cache holds exactly one entry.

@@ -145,7 +145,11 @@ Environment variables supplement/override the file (explicit env vars win):
 
 The PostgreSQL schema is the normal blitzortung one; the service only reads
 `strikes` rows (the `strikes` table with a `geog` geography column, a
-`"timestamp"` column, and a `region` column).
+`"timestamp"` column, and a `region` column).  The canonical schema declares
+`strikes` as a RANGE-partitioned table (one partition per UTC day) so retention
+is an O(1) partition drop; see `tests/schema/strikes.sql` and
+`doc/database_setup.md` for the maintenance functions and the migration of an
+existing non-partitioned table.
 
 ## Logging
 

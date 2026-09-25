@@ -208,8 +208,11 @@ pub async fn import_strikes<T: Transport>(
                     total_strikes += count;
                     break;
                 }
-                Err(_) => {
-                    log::warn!("import failed: retry {retry} region {region}");
+                Err(error) => {
+                    log::warn!(
+                        "import failed: retry {retry} region {region}: {}",
+                        crate::cli::describe_error("error", error.as_ref())
+                    );
                     error_count += 1;
                     tokio::time::sleep(std::time::Duration::from_millis(RETRY_SLEEP_MILLIS)).await;
                 }
