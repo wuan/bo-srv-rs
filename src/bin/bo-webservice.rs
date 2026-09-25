@@ -89,8 +89,10 @@ fn effective_protocol(cli_protocol: Option<&str>, config: &Config) -> Result<Pro
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Default to INFO so the per-request access logs are visible out of the
-    // box; `RUST_LOG` still overrides (e.g. `RUST_LOG=debug`).
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // box; `RUST_LOG` still overrides (e.g. `RUST_LOG=debug`).  Under systemd
+    // this logs as structured journal entries, so journald owns the
+    // timestamp/priority and no duplicate header is printed.
+    blitzortung_srv::cli::init_logging_with_default("info");
 
     let args = Args::parse();
     let config = Config::from_env();

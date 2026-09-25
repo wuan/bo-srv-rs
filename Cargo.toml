@@ -76,3 +76,12 @@ tokio = { version = "1", features = ["full"] }
 # own `runtime.block_on`).
 testcontainers = { version = "0.27", features = ["blocking"] }
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
+
+# Native systemd journal logging: when the service runs under systemd its
+# stdout/stderr is captured by journald, which owns the timestamp/PID/priority.
+# Writing log records to the journal socket (instead of formatted text) avoids
+# the duplicate `Sep 25 ... bo-webservice[pid]:` + `[timestamp LEVEL target]`
+# header.  The `env_filter` engine is reused to honour `RUST_LOG` directives.
+[target.'cfg(target_os = "linux")'.dependencies]
+env_filter = "2"
+systemd-journal-logger = "2"

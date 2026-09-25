@@ -85,12 +85,88 @@ pub fn init_logging(verbose: bool, debug: bool) {
     } else {
         "warn"
     };
-    let mut builder =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default));
-    if debug {
-        builder.filter_level(log::LevelFilter::Debug);
+    init_logging_with_default(default);
+}
+
+/// Initialise the `log` facade, using `default_filter` when `RUST_LOG` is unset
+/// (e.g. `"info"` for the webservice, `"warn"` for the CLI tools).
+///
+/// On Linux, when the process is directly connected to the systemd journal
+/// (i.e. it runs as a systemd service), records are written as structured
+/// journal entries rather than formatted text.  journald then owns the
+/// timestamp, PID and priority, which avoids the duplicate
+/// `[timestamp LEVEL target]` header [`env_logger`] would otherwise add on top
+/// of journald's own `Sep 25 ... bo-webservice[pid]:` prefix.  Everywhere else
+/// (interactive shells, the macOS dev machine) logging falls back to
+/// [`env_logger`] on stderr.
+pub fn init_logging_with_default(default_filter: &str) {
+    #[cfg(target_os = "linux")]
+    if init_journald_logging(default_filter) {
+        return;
     }
-    let _ = builder.try_init();
+
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(default_filter),
+    )
+    .try_init();
+}
+
+/// Try to install the systemd journal logger, returning `true` on success.
+///
+/// Returns `false` when the process is not connected to the journal or a logger
+/// is already installed, so the caller can fall back to [`env_logger`].
+#[cfg(target_os = "linux")]
+fn init_journald_logging(default_filter: &str) -> bool {
+    if !systemd_journal_logger::connected_to_journal() {
+        return false;
+    }
+
+    let mut builder = env_filter::Builder::new();
+    let directives = std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_string());
+    builder.parse(&directives);
+    let filter = builder.build();
+    let max_level = filter.filter();
+
+    let sink = match systemd_journal_logger::JournalLog::new() {
+        Ok(sink) => sink,
+        Err(error) => {
+            eprintln!(
+                "{error}: could not connect to the systemd journal, falling back to stderr logging"
+            );
+            return false;
+        }
+    };
+
+    if log::set_boxed_logger(Box::new(FilteredJournalLog { filter, sink })).is_err() {
+        return false;
+    }
+    log::set_max_level(max_level);
+    true
+}
+
+/// A [`log`] adapter that applies the `RUST_LOG` filter before forwarding to
+/// journald: [`JournalLog`](systemd_journal_logger::JournalLog) performs no
+/// level filtering itself, so without this every record down to `trace` would
+/// be written.
+#[cfg(target_os = "linux")]
+struct FilteredJournalLog {
+    filter: env_filter::Filter,
+    sink: systemd_journal_logger::JournalLog,
+}
+
+#[cfg(target_os = "linux")]
+impl log::Log for FilteredJournalLog {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        self.filter.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.filter.matches(record) {
+            self.sink.log(record);
+        }
+    }
+
+    fn flush(&self) {}
 }
 
 /// Abort with an error message and exit code, like the Python tools'

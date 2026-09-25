@@ -174,6 +174,15 @@ The level defaults to `INFO` so these lines are visible out of the box;
 override with `RUST_LOG` (e.g. `RUST_LOG=debug`, or `RUST_LOG=warn` to hide the
 access lines).
 
+When the service runs under systemd its output is written as **structured
+journal entries** instead of formatted text: journald then owns the timestamp,
+PID and priority, so `journalctl` does not show a duplicated
+`Sep 25 ... bo-webservice[pid]:` prefix on top of an env-logger
+`[timestamp LEVEL target]` header. Run `journalctl -u bo-webservice` (add
+`-p warning`, `-o verbose` or `-o json` to filter or inspect fields). Anywhere
+else (interactive shell, the macOS dev machine) logging falls back to the usual
+`env_logger` output on stderr.
+
 ## Metrics
 
 Like the Python service (`blitzortung/service/metrics.py`), the service sends
