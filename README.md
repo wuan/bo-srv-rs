@@ -227,9 +227,15 @@ directory, resolved with the usual precedence **CLI > env > config > default**:
 `<path>` is a **directory** that will contain the daily
 `servicelog_YYYY-MM-DD` files (matching the Python layout).  If the path looks
 like a file — it has an extension, e.g. `/var/log/blitzortung/servicelog.log` —
-its parent directory is used (documented behaviour).  A configured directory
-must exist; otherwise the service logs a warning and disables usage logging.
-An empty env value disables it explicitly.  When enabled the service logs
+its parent directory is used (documented behaviour).
+
+The directory must exist **and be writable** by the service user; existence
+alone is not enough (`/var/log/blitzortung` often exists but is not writable).
+An unusable directory — missing, not writable, or not a directory — disables the
+consumer with a **single** `WARN` at startup naming the path and the reason.  An
+explicitly configured but unusable path is **warn-and-disable**, not a startup
+failure, so a bad value never prevents the service from running.  An empty env
+value disables it explicitly.  When enabled the service logs
 `writing per-request usage log to <dir>` at startup.
 
 ### File format
@@ -282,6 +288,14 @@ The queue is **bounded**.  The request path uses `try_send`: when the queue is
 full the entry is **dropped** and a single `WARN` is logged (not one per drop).
 Requests therefore never block, fail or hang because of usage logging; under
 sustained overload some usage rows are lost instead of slowing the service down.
+
+### Write failures
+
+A directory that becomes unwritable at runtime (permissions change, disk full,
+...) does **not** produce one error per row.  The first write failure is logged
+once at `WARN`; then writing is disabled for the rest of that UTC day (further
+rows are silently dropped) with a single summary at shutdown.  The next UTC day
+clears the state and retries once.  Requests are never affected.
 
 ### Shutdown and flush
 
@@ -632,8 +646,12 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   timestamp is an int64 epoch-microsecond value (not `%.4f` seconds) and the
   always-`-` masked client-IP column is replaced by a client **platform** marker
   (`A` for Android).  Backpressure policy: a full queue drops entries with a
-  single `WARN` (requests never block).  GeoIP is best-effort (missing/unreadable
-  db or not-found address -> `-`), where Python aborts on a missing db.
+  single `WARN` (requests never block).  The servicelog directory must be
+  writable beyond merely existing (a common `/var/log/blitzortung` on a locked
+  down server), and a runtime write failure is reported once and then suppressed
+  for the rest of the day instead of erroring per row.  GeoIP is best-effort
+  (missing/unreadable db or not-found address -> `-`), where Python aborts on a
+  missing db.
 - **Usage-log directory and GeoIP path.** The Python service hard-codes
   `/var/log/blitzortung` (used only when it exists).  The Rust port additionally
   accepts `--servicelog` / `BO_SERVICE_SERVICELOG` /

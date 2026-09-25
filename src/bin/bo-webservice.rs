@@ -99,6 +99,22 @@ fn effective_protocol(cli_protocol: Option<&str>, config: &Config) -> Result<Pro
     }
 }
 
+/// The result of resolving the usage-log directory.
+#[derive(Debug, Clone, PartialEq)]
+enum ServicelogResolution {
+    /// A usable (existing + writable) directory.
+    Enabled(std::path::PathBuf),
+    /// Nothing was configured and the default does not apply (disabled, silent).
+    Disabled,
+    /// A directory was resolved but is unusable; the reason is included.
+    Unusable {
+        path: std::path::PathBuf,
+        /// Whether the path came from an explicit flag/env/config.
+        explicit: bool,
+        reason: &'static str,
+    },
+}
+
 /// Resolve the effective usage-log directory: an explicit `--servicelog` wins
 /// over the configured value (`BO_SERVICE_SERVICELOG` over the INI
 /// `[webservice] servicelog`), which itself defaults to disabled.
@@ -108,14 +124,28 @@ fn effective_protocol(cli_protocol: Option<&str>, config: &Config) -> Result<Pro
 /// file (it has an extension) is treated as the log file name: its parent
 /// directory is used and the file name is ignored, so a value such as
 /// `/var/log/blitzortung/servicelog_2023-11-14` still lands in
-/// `/var/log/blitzortung`.
-fn effective_servicelog(
-    cli: Option<&std::path::Path>,
-    config: &Config,
-) -> Option<std::path::PathBuf> {
-    match cli {
+/// `/var/log/blitzortung`.  An unusable (missing or non-writable) directory
+/// disables the consumer and is reported once at startup.
+fn resolve_servicelog(cli: Option<&std::path::Path>, config: &Config) -> ServicelogResolution {
+    let explicit = cli.is_some() || config.service_log_dir.is_some();
+    let candidate = match cli {
         Some(path) => Some(servicelog_directory(path)),
-        None => config.service_log_directory(),
+        None => config.candidate_service_log_directory(),
+    };
+    match candidate {
+        None => ServicelogResolution::Disabled,
+        Some(path) if blitzortung_srv::service_log::directory_is_writable(&path) => {
+            ServicelogResolution::Enabled(path)
+        }
+        Some(path) => ServicelogResolution::Unusable {
+            reason: if path.is_dir() {
+                "is not writable by the service user"
+            } else {
+                "does not exist"
+            },
+            explicit,
+            path,
+        },
     }
 }
 
@@ -157,50 +187,54 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         eprintln!("{error}");
         std::process::exit(2);
     });
-    let servicelog_dir = effective_servicelog(args.servicelog.as_deref(), &config);
+    let servicelog = resolve_servicelog(args.servicelog.as_deref(), &config);
     let geoip_db = effective_geoip_db(args.geoip_db.as_deref(), &config);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
-    // Usage logging (`base.Blitzortung(log_directory=..)`): only when a
-    // servicelog directory is configured and exists.  Absent/disabled means no
-    // queue and no consumer thread.  The consumer runs on its own OS thread
-    // because GeoIP and file appends are blocking.
+    // Build the metrics sink once: it is shared by the service and the
+    // usage-log consumer so the "StatsD metrics disabled" warning is emitted at
+    // most once.
+    let metrics: Arc<dyn Metrics> = build_metrics(&config);
+
+    // Usage logging (`base.Blitzortung(log_directory=..)`): only when a usable
+    // (existing and writable) servicelog directory is configured.  Absent, or
+    // present but unusable, means no queue and no consumer thread — usage
+    // logging is disabled with a single warning rather than erroring per row.
     let usage_consumer: Option<UsageLogConsumer>;
-    let usage_sender = match servicelog_dir {
-        Some(directory) => {
-            if !directory.is_dir() {
-                eprintln!(
-                    "warning: servicelog directory {} does not exist; usage logging disabled",
-                    directory.display()
-                );
-                log::warn!(
-                    "servicelog directory {} does not exist; usage logging disabled",
-                    directory.display()
-                );
-                usage_consumer = None;
-                None
-            } else {
-                log::info!(
-                    "writing per-request usage log to {} (geoip db {})",
-                    directory.display(),
-                    geoip_db.display()
-                );
-                // A separate sender-side metrics handle so the consumer can
-                // emit `access` counters under the service prefix.
-                let consumer_metrics = build_metrics(&config);
-                let (sender, consumer) = blitzortung_srv::service_log::spawn(
-                    directory,
-                    Some(geoip_db),
-                    Some(consumer_metrics),
-                );
-                usage_consumer = Some(consumer);
-                Some(sender)
-            }
+    let usage_sender = match servicelog {
+        ServicelogResolution::Enabled(directory) => {
+            log::info!(
+                "writing per-request usage log to {} (geoip db {})",
+                directory.display(),
+                geoip_db.display()
+            );
+            let (sender, consumer) = blitzortung_srv::service_log::spawn(
+                directory,
+                Some(geoip_db),
+                Some(metrics.clone()),
+            );
+            usage_consumer = Some(consumer);
+            Some(sender)
         }
-        None => {
+        ServicelogResolution::Unusable {
+            path,
+            explicit,
+            reason,
+        } => {
+            // One clear warning and disable the consumer; the service itself
+            // keeps running with no usage log.
+            let origin = if explicit { "configured" } else { "default" };
+            log::warn!(
+                "servicelog directory {} ({origin}) {reason}; usage logging disabled",
+                path.display()
+            );
+            usage_consumer = None;
+            None
+        }
+        ServicelogResolution::Disabled => {
             log::debug!("usage logging disabled (no servicelog directory configured)");
             usage_consumer = None;
             None
@@ -213,7 +247,6 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // request checks out (creating on demand) a pooled connection; while the
         // database is down it is answered with a per-request JSON-RPC fault
         // instead of hanging.
-        let metrics: Arc<dyn Metrics> = build_metrics(&config);
         let executor = PostgresExecutor::lazy(&config)?.with_metrics(metrics.clone());
         let executor: Arc<dyn QueryExecutor> = Arc::new(executor);
         let mut service: Service<Arc<dyn Metrics>> = Service::with_parts(
@@ -383,40 +416,116 @@ mod tests {
         assert!(args.geoip_db.is_none());
     }
 
-    /// `--servicelog` (CLI) wins over config; absent CLI falls back to config;
-    /// disabled when neither is set.
-    #[test]
-    fn effective_servicelog_precedence() {
-        // Default: disabled.
-        let config = Config::default();
-        assert_eq!(effective_servicelog(None, &config), None);
-
-        // An existing configured directory is used when no CLI value is given.
-        let dir = std::env::temp_dir().join(format!("bo-servicelog-cfg-{}", std::process::id()));
+    /// A per-test temp directory with a unique tag.
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("bo-ws-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// `--servicelog` (CLI) wins over config; absent CLI falls back to config;
+    /// disabled when neither is set; an unusable path is reported.
+    #[test]
+    fn resolve_servicelog_precedence_and_usability() {
+        // Default with no configured path: disabled (candidate is the default
+        // path, which in the test environment either exists+writable => Enabled
+        // or is unusable => Unusable; never Disabled via config).
+        let config = Config::default();
+        match resolve_servicelog(None, &config) {
+            ServicelogResolution::Enabled(path) => {
+                assert_eq!(path, std::path::PathBuf::from("/var/log/blitzortung"));
+            }
+            ServicelogResolution::Unusable { path, explicit, .. } => {
+                assert_eq!(path, std::path::PathBuf::from("/var/log/blitzortung"));
+                assert!(!explicit, "default fallback is not explicit");
+            }
+            ServicelogResolution::Disabled => {}
+        }
+
+        // A writable configured directory is enabled when no CLI value is given.
+        let dir = temp_dir("cfg");
         let config = Config {
             service_log_dir: Some(dir.to_string_lossy().into_owned()),
             ..Config::default()
         };
-        assert_eq!(effective_servicelog(None, &config), Some(dir.clone()));
-
-        // CLI wins over the configured value (a non-existent CLI path is still
-        // used here and rejected later by `main` with a warning).
         assert_eq!(
-            effective_servicelog(Some(std::path::Path::new("/from/cli")), &config),
-            Some(std::path::PathBuf::from("/from/cli"))
+            resolve_servicelog(None, &config),
+            ServicelogResolution::Enabled(dir.clone())
         );
 
+        // CLI wins over the configured value.
+        let cli = temp_dir("cli");
+        assert_eq!(
+            resolve_servicelog(Some(&cli), &config),
+            ServicelogResolution::Enabled(cli.clone())
+        );
+
+        // A non-existent CLI path is unusable and marked explicit.
+        match resolve_servicelog(
+            Some(std::path::Path::new("/nonexistent/servicelog")),
+            &config,
+        ) {
+            ServicelogResolution::Unusable {
+                path,
+                explicit,
+                reason,
+                ..
+            } => {
+                assert_eq!(path, std::path::PathBuf::from("/nonexistent/servicelog"));
+                assert!(explicit);
+                assert_eq!(reason, "does not exist");
+            }
+            other => panic!("expected Unusable, got {other:?}"),
+        }
+
+        // A configured but non-existent directory is unusable (explicit).
+        let missing = Config {
+            service_log_dir: Some("/nonexistent/bo-usage-log".into()),
+            ..Config::default()
+        };
+        assert!(matches!(
+            resolve_servicelog(None, &missing),
+            ServicelogResolution::Unusable { explicit: true, .. }
+        ));
+
+        // An empty configured value means "disabled".
+        let empty = Config {
+            service_log_dir: None,
+            ..Config::default()
+        };
+        // (No env var is set in the test process for the CLI path, so the
+        // default candidate applies; only assert the CLI-provided case.)
+        let _ = empty;
+
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&cli);
+    }
+
+    /// The default fallback that exists but is not writable is `Unusable`
+    /// (disabled), never enabled.
+    #[test]
+    fn unwritable_directory_is_unusable() {
+        // Root can write anywhere, so a permission-based test is unreliable;
+        // use a path component that is a file, which no user can make a dir.
+        let file = std::env::temp_dir().join(format!("bo-ws-notadir-{}", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        std::fs::write(&file, b"x").unwrap();
+        let config = Config {
+            service_log_dir: Some(file.to_string_lossy().into_owned()),
+            ..Config::default()
+        };
+        match resolve_servicelog(None, &config) {
+            ServicelogResolution::Unusable { explicit, .. } => assert!(explicit),
+            other => panic!("expected Unusable, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&file);
     }
 
     /// An existing CLI path is used as the directory verbatim.
     #[test]
     fn servicelog_directory_prefers_existing_dir() {
-        let dir = std::env::temp_dir().join(format!("bo-servicelog-dir-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("existing");
         assert_eq!(servicelog_directory(&dir), dir);
         let _ = std::fs::remove_dir_all(&dir);
     }

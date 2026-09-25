@@ -360,6 +360,33 @@ pub fn open_geoip(path: &Path) -> Option<maxminddb::Reader<Vec<u8>>> {
     }
 }
 
+/// Probe whether `dir` can actually be written to.
+///
+/// Existence alone is not enough: `/var/log/blitzortung` may exist but not be
+/// writable by the service user.  This creates and removes a small probe file
+/// in the directory, so a directory that is not writable (permissions, read-only
+/// mount, ...) is reported as unusable *before* the consumer is started — which
+/// keeps usage logging disabled rather than spamming per-row write errors.
+pub fn directory_is_writable(dir: &Path) -> bool {
+    if !dir.is_dir() {
+        return false;
+    }
+    let probe = dir.join(format!(".bo-servicelog-probe-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&probe)
+    {
+        Ok(file) => {
+            drop(file);
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// Sender side of the usage-log pipeline, held by the `Service`.
 ///
 /// `record` never blocks: it uses `try_send` and drops on a full queue.
@@ -470,8 +497,15 @@ pub fn spawn(
                 let client = entry.client.as_deref().unwrap_or("");
                 let (country, city) = geoip_lookup(reader.as_ref(), client);
                 let row = build_row(&entry, version, country.as_deref(), city.as_deref());
-                if let Err(error) = writer.append(&entry, &row) {
-                    log::error!("failed to write usage log row: {error}");
+                match writer.append(&entry, &row) {
+                    // Log the failure once at WARN, then writing is disabled for
+                    // the rest of the day (no per-row errors).
+                    WriteOutcome::Failed => log::warn!(
+                        "usage log write failed ({}); further rows are dropped until the \
+                         next UTC day",
+                        writer.failure.as_deref().unwrap_or("unknown error")
+                    ),
+                    WriteOutcome::Written | WriteOutcome::Dropped => {}
                 }
                 if let Some(metrics) = &metrics {
                     metrics.incr(&access_metric_key(&entry, version, country.as_deref()), 1);
@@ -479,7 +513,13 @@ pub fn spawn(
             }
             // Channel closed: flush the remaining data.
             if let Err(error) = writer.flush() {
-                log::error!("failed to flush usage log: {error}");
+                log::warn!("failed to flush usage log: {error}");
+            }
+            if writer.dropped_rows() > 0 {
+                log::warn!(
+                    "usage log: {} row(s) dropped due to a write failure",
+                    writer.dropped_rows()
+                );
             }
         })
         .expect("spawning the usage-log consumer thread");
@@ -494,10 +534,32 @@ pub fn spawn(
 
 /// Appends rows to `{log_dir}/servicelog_{YYYY-MM-DD}`, reopening when the day
 /// (derived from each entry's own timestamp) changes.
+///
+/// A persistent write failure (directory made unwritable, disk full, ...) is
+/// reported **once**; after that the writer stops attempting writes for the
+/// rest of that UTC day (further rows are dropped) so a run cannot flood the
+/// log with one error per request.  A new day clears the state and retries once.
 struct ServicelogWriter {
     log_dir: PathBuf,
     current_day: Option<String>,
     file: Option<std::fs::File>,
+    /// The day for which writing has been abandoned after a failure.
+    disabled_day: Option<String>,
+    /// The first write error (for the single summary log).
+    failure: Option<String>,
+    /// Rows dropped because writing was disabled for the day.
+    dropped_rows: u64,
+}
+
+/// Outcome of one [`ServicelogWriter::append`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteOutcome {
+    /// The row was written.
+    Written,
+    /// Writing failed for the first time (logged once, then disabled).
+    Failed,
+    /// Writing is disabled for this day; the row was dropped.
+    Dropped,
 }
 
 impl ServicelogWriter {
@@ -506,23 +568,60 @@ impl ServicelogWriter {
             log_dir,
             current_day: None,
             file: None,
+            disabled_day: None,
+            failure: None,
+            dropped_rows: 0,
         }
+    }
+
+    /// Whether writing is currently disabled for `day` due to a past failure.
+    fn is_disabled_for(&self, day: &str) -> bool {
+        self.disabled_day.as_deref() == Some(day)
+    }
+
+    /// The number of rows dropped because writing was disabled.
+    fn dropped_rows(&self) -> u64 {
+        self.dropped_rows
     }
 
     /// Append one row, rolling to the new day's file when the entry's UTC date
     /// changed (a request at 00:00 UTC goes to the new day).
-    fn append(&mut self, entry: &ServiceLogEntry, row: &str) -> std::io::Result<()> {
+    fn append(&mut self, entry: &ServiceLogEntry, row: &str) -> WriteOutcome {
         let day = entry_day(entry.now_us);
-        if self.current_day.as_deref() != Some(day.as_str()) {
+        // A new day resets a previous failure so writing is retried once.
+        if self.disabled_day.as_deref().is_some_and(|d| d != day) {
+            self.disabled_day = None;
+            self.failure = None;
+        }
+        if self.is_disabled_for(&day) {
+            self.dropped_rows += 1;
+            return WriteOutcome::Dropped;
+        }
+        match self.try_append(&day, row) {
+            Ok(()) => WriteOutcome::Written,
+            Err(error) => {
+                // Log once, then disable writing for the rest of the day.
+                self.failure = Some(error.to_string());
+                self.disabled_day = Some(day);
+                WriteOutcome::Failed
+            }
+        }
+    }
+
+    /// The actual open + write for `day`, returning an I/O error on failure.
+    fn try_append(&mut self, day: &str, row: &str) -> std::io::Result<()> {
+        if self.current_day.as_deref() != Some(day) {
             // Flush the old file before switching days.
-            self.flush()?;
+            if let Some(file) = &mut self.file {
+                file.flush()?;
+            }
             let path = self.log_dir.join(format!("servicelog_{day}"));
             let file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path)?;
             self.file = Some(file);
-            self.current_day = Some(day);
+            self.current_day = Some(day.to_string());
         }
         if let Some(file) = &mut self.file {
             file.write_all(row.as_bytes())?;
@@ -716,6 +815,79 @@ mod tests {
             content,
             "1700000000500000\t0\t10000\t0\t60\t0\t-\t-\tA\t190\t-\t-\t-\n"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `directory_is_writable` rejects missing dirs and files, accepts a writable
+    /// directory.
+    #[test]
+    fn directory_is_writable_checks_existence_and_write_access() {
+        let dir = temp_dir("writable");
+        assert!(directory_is_writable(&dir));
+        // No probe file is left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(leftovers.is_empty(), "probe left behind: {leftovers:?}");
+
+        assert!(!directory_is_writable(&dir.join("does-not-exist")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file (not a directory) is not writable as a servicelog dir, even if
+    /// the path is a regular file the process owns.
+    #[test]
+    fn directory_is_writable_rejects_a_regular_file() {
+        let dir = temp_dir("file-probe");
+        let file = dir.join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(!directory_is_writable(&file));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A write failure is reported once and then writing is disabled for the
+    /// rest of the day: extra rows are dropped, not re-logged or re-failed.
+    #[test]
+    fn writer_reports_a_failure_once_and_drops_later_rows() {
+        // A path whose parent is a regular file can never be a directory, so
+        // every write fails deterministically.
+        let base = temp_dir("writer-fail");
+        let not_a_dir = base.join("blocker");
+        std::fs::write(&not_a_dir, b"x").unwrap();
+
+        let mut writer = ServicelogWriter::new(not_a_dir);
+        let row = build_row(&entry(0, None), Some(190), None, None);
+
+        assert_eq!(writer.append(&entry(0, None), &row), WriteOutcome::Failed);
+        // Subsequent rows for the same day are dropped, not retried.
+        assert_eq!(writer.append(&entry(0, None), &row), WriteOutcome::Dropped);
+        assert_eq!(writer.append(&entry(0, None), &row), WriteOutcome::Dropped);
+        assert_eq!(writer.dropped_rows(), 2);
+        assert!(writer.failure.is_some());
+
+        // A new day retries once (and fails again once).
+        let mut next_day = entry(0, None);
+        next_day.now_us = 1_700_006_400_000_000; // 2023-11-15
+        assert_eq!(writer.append(&next_day, &row), WriteOutcome::Failed);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A writable directory writes every row (no spurious failures).
+    #[test]
+    fn writer_writes_all_rows_when_writable() {
+        let dir = temp_dir("writer-ok");
+        let mut writer = ServicelogWriter::new(dir.clone());
+        let row = build_row(&entry(0, None), Some(190), None, None);
+        for _ in 0..3 {
+            assert_eq!(writer.append(&entry(0, None), &row), WriteOutcome::Written);
+        }
+        writer.flush().unwrap();
+        assert_eq!(writer.dropped_rows(), 0);
+        let content = std::fs::read_to_string(dir.join("servicelog_2023-11-14")).unwrap();
+        assert_eq!(content.lines().count(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

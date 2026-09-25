@@ -364,15 +364,33 @@ impl Config {
     }
 
     /// The effective usage-log directory: an explicitly configured
-    /// `service_log_dir` (when it exists on disk), otherwise
-    /// [`DEFAULT_LOG_DIRECTORY`](crate::service_log::DEFAULT_LOG_DIRECTORY)
-    /// when that exists, otherwise `None` (logging disabled).
+    /// `service_log_dir`, otherwise
+    /// [`DEFAULT_LOG_DIRECTORY`](crate::service_log::DEFAULT_LOG_DIRECTORY).
+    ///
+    /// The directory must exist **and** be writable by the process (see
+    /// [`directory_is_writable`](crate::service_log::directory_is_writable));
+    /// otherwise `None` is returned and usage logging is disabled.  Existence
+    /// alone is not enough — `/var/log/blitzortung` may exist but not be
+    /// writable by the service user, which must not enable a consumer that then
+    /// fails on every row.
     pub fn service_log_directory(&self) -> Option<std::path::PathBuf> {
+        use crate::service_log::directory_is_writable;
+
+        self.candidate_service_log_directory()
+            .filter(|path| directory_is_writable(path))
+    }
+
+    /// The configured/default usage-log directory **candidate**, checking
+    /// existence only (not writability).
+    ///
+    /// Used to distinguish "disabled because nothing is configured" from
+    /// "a path was resolved but is unusable"; the latter gets a single startup
+    /// warning.  Returns `None` when nothing is configured at all.
+    pub fn candidate_service_log_directory(&self) -> Option<std::path::PathBuf> {
         use crate::service_log::{DEFAULT_LOG_DIRECTORY, LOG_DIR_ENV, LOG_DIR_ENV_ALIAS};
 
         if let Some(dir) = &self.service_log_dir {
-            let path = std::path::PathBuf::from(dir);
-            return path.is_dir().then_some(path);
+            return Some(std::path::PathBuf::from(dir));
         }
         if std::env::var_os(LOG_DIR_ENV).is_some() || std::env::var_os(LOG_DIR_ENV_ALIAS).is_some()
         {
@@ -380,8 +398,7 @@ impl Config {
             // `service_log_dir`; do not second-guess it with the default.
             return None;
         }
-        let default = std::path::PathBuf::from(DEFAULT_LOG_DIRECTORY);
-        default.is_dir().then_some(default)
+        Some(std::path::PathBuf::from(DEFAULT_LOG_DIRECTORY))
     }
 
     /// The GeoIP database path for the usage-log consumer: the configured
@@ -873,6 +890,43 @@ mod tests {
         std::fs::remove_dir_all(&alias).unwrap();
         std::fs::remove_dir_all(&alias_ini).unwrap();
         std::fs::remove_dir_all(&alias_target).unwrap();
+    }
+
+    /// A path that exists but cannot be used as a servicelog directory (a
+    /// regular file, or a missing directory) is treated as **disabled**, not
+    /// enabled: existence alone is not enough.
+    #[test]
+    fn service_log_directory_requires_a_writable_directory() {
+        // A regular file: exists, but not a usable directory.  Root cannot make
+        // a file writable-as-a-directory, so this is deterministic under CI.
+        let dir = ini_dir("service-log-notdir");
+        let file = dir.join("blocker");
+        std::fs::write(&file, b"x").unwrap();
+        let mut config = Config {
+            service_log_dir: Some(file.to_string_lossy().into_owned()),
+            ..Config::default()
+        };
+        assert_eq!(config.service_log_directory(), None);
+        // The candidate is still reported (for the startup warning).
+        assert_eq!(
+            config.candidate_service_log_directory().as_deref(),
+            Some(file.as_path())
+        );
+
+        // A missing directory is disabled too.
+        config.service_log_dir = Some("/nonexistent/bo-usage-log".into());
+        assert_eq!(config.service_log_directory(), None);
+
+        // A writable directory is enabled.
+        let ok = ini_dir("service-log-ok");
+        config.service_log_dir = Some(ok.to_string_lossy().into_owned());
+        assert_eq!(
+            config.service_log_directory().as_deref(),
+            Some(ok.as_path())
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&ok).unwrap();
     }
 
     /// `[webservice] geoip_db` / `BO_GEOIP_DB` (alias `BO_SERVICE_GEOIP_DB`)
