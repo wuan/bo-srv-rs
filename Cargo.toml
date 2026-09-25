@@ -31,8 +31,9 @@ path = "src/bin/bo-import-websocket.rs"
 [features]
 # Opt-in database integration tests (`tests/postgres_integration.rs`): they
 # start an ephemeral PostGIS container with testcontainers, so Docker is
-# required. Gated so the default `cargo test` (and the Docker-less coverage
-# job) do not depend on a running Docker daemon.
+# required. Gated so the default `cargo test` does not depend on a running
+# Docker daemon; the CI coverage job enables it (ubuntu host with Docker) so the
+# database suite is included in the Sonar report.
 db-integration = []
 
 [[test]]

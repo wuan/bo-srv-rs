@@ -14,7 +14,7 @@
 // part of the API, so silence the per-crate dead-code warnings.
 #![allow(dead_code)]
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, ImageExt};
@@ -104,6 +104,22 @@ impl TestDb {
         let (runtime, executor) = self.runtime_and_executor();
         (runtime, std::sync::Arc::new(executor))
     }
+
+    /// Remove every row and restart the `bigserial` sequence.
+    ///
+    /// The Python fixture recreates the schema before each test; the Rust
+    /// container is process-wide, so tests that assert exact row counts call
+    /// this while holding the [`serial`] guard.  `RESTART IDENTITY` keeps
+    /// `id`/`timestamp` values deterministic across tests.
+    pub fn truncate(
+        &self,
+        runtime: &tokio::runtime::Runtime,
+        executor: &dyn QueryExecutor,
+    ) {
+        runtime
+            .block_on(executor.execute("TRUNCATE strikes RESTART IDENTITY", &[]))
+            .expect("truncate strikes");
+    }
 }
 
 static TEST_DB: OnceLock<TestDb> = OnceLock::new();
@@ -111,4 +127,17 @@ static TEST_DB: OnceLock<TestDb> = OnceLock::new();
 /// The process-wide PostGIS container, started on first use.
 pub fn test_db() -> &'static TestDb {
     TEST_DB.get_or_init(TestDb::start)
+}
+
+/// Serializes tests that inspect or mutate the whole `strikes` table.
+///
+/// The container is shared by every test in a binary, so tests that assert
+/// exact row counts, [truncate](TestDb::truncate) the table, or read all rows
+/// must take this lock first.  A poisoned lock is recovered: one failing test
+/// should not cascade into the rest.
+static DATA_LOCK: Mutex<()> = Mutex::new(());
+
+/// Take the data lock; see [`DATA_LOCK`].
+pub fn serial() -> MutexGuard<'static, ()> {
+    DATA_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
