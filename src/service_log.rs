@@ -747,10 +747,17 @@ mod tests {
     /// does not drift).
     #[test]
     fn global_row_tab_pads_a_short_city() {
-        let row = build_row(&entry(0, None), Some(190), Some("DE"), Some("Berlin"));
+        let short = build_row(&entry(0, None), Some(190), Some("DE"), Some("X"));
+        // "X" (1 char) stays within the first tab block -> CITY_TABS tabs.
+        assert_eq!(
+            short,
+            "1700000000500000\tDE\tX\t\t\t\tA\t190\t0\t60\t10000\t0\t0"
+        );
+
+        let medium = build_row(&entry(0, None), Some(190), Some("DE"), Some("Berlin"));
         // "Berlin" (6 chars) stays within the first tab block -> CITY_TABS tabs.
         assert_eq!(
-            row,
+            medium,
             "1700000000500000\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t0\t0"
         );
 
@@ -760,23 +767,10 @@ mod tests {
             Some("DE"),
             Some("Frankfurt am Main"),
         );
+        // 17 chars span 2 full tab blocks -> 4 - 2 = 2 tabs.
         assert_eq!(
-            cells,
-            vec![
-                "1700000000500000",
-                "DE",
-                "Berlin",
-                "",
-                "",
-                "",
-                "A",
-                "190",
-                "0",
-                "60",
-                "10000",
-                "0",
-                "0"
-            ]
+            long,
+            "1700000000500000\tDE\tFrankfurt am Main\t\tA\t190\t0\t60\t10000\t0\t0"
         );
 
         // Padding tabs show up as empty segments on a naive split; ignoring
