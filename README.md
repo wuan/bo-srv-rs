@@ -249,12 +249,14 @@ characters:
 1700000000500000\tDE\tBerlin\t\tA\t190\t0\t60\t10000\t3\t0
 ```
 
-**City padding (tabs).** The `city` field is followed by **exactly two tab
-characters**, always — a constant padding (`CITY_PADDING_TABS = 2`) that does
-not depend on the city's length, the current column, or tab-stop width.  The
-city itself is **never truncated**.  This creates one empty alignment field
-between `city` and `platform`, so the city column always spans two tab widths
-and the columns that follow line up.
+**City padding (tabs).** The `city` field is followed by **computed tab
+padding**: enough tab characters that `platform` starts on the first 8-column
+tab stop at or beyond `city_start + CITY_MIN_WIDTH` (two tab widths), and never
+fewer than `CITY_MIN_TABS` (2) tabs.  It is implemented by
+`pad_city(city, city_start)` using `TAB_STOP = 8`, and the city is **never
+truncated** (a very long name may push the following columns off the grid).
+Short names therefore get an extra tab; long names may need only the minimum of
+two.
 
 > **Consequence:** because the padding is made of tabs, splitting a line on
 > `'\t'` yields **empty fields**.  The line therefore no longer has a fixed
@@ -659,9 +661,10 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   an int64 epoch-microsecond value (not `%.4f` seconds), the masked client-IP
   column is dropped, a client **platform** marker (`A` for Android) is added,
   and the local `x`/`y`/`data_area` columns are removed (a local request is
-identified by `region == -1`).  The `city` field is always followed by exactly
-two tabs (constant padding) so the following columns line up (never truncated);
-as a result a naive tab split yields empty segments that consumers must ignore.
+identified by `region == -1`).  The `city` field is followed by computed tab
+padding (at least two tabs / two tab widths wide) so the following columns line
+up (never truncated); as a result a naive tab split yields empty segments that
+consumers must ignore.
 Backpressure policy: a full queue drops entries with a single `WARN` (requests
 never block).  The servicelog directory must be writable beyond merely existing
 (a common `/var/log/blitzortung` on a locked down server), and a runtime write

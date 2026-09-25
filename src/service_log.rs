@@ -198,29 +198,56 @@ pub fn user_agent_version(user_agent: Option<&str>) -> Option<i64> {
     }
 }
 
-/// Fixed number of tab characters emitted after the `city` text, regardless of
-/// the city's length: always exactly two tabs.
-///
-/// This creates one empty alignment field between `city` and `platform` (the
-/// "additional tab"), so the city column always spans two tab widths and the
-/// columns that follow line up.  The width is **constant** — it does not depend
-/// on the city length, the current column, or the tab-stop width.
-pub const CITY_PADDING_TABS: usize = 2;
+/// Standard terminal tab-stop width (columns): a tab advances to the next
+/// multiple of this width.
+pub const TAB_STOP: usize = 8;
 
-/// Pad the `city` field with a fixed two-tab whitespace run.
+/// The `city` column is at least two tab widths wide: the `platform` field must
+/// start on a tab stop at or beyond `city_start_column + CITY_MIN_WIDTH`.
+pub const CITY_MIN_WIDTH: usize = 2 * TAB_STOP;
+
+/// The minimum number of tab characters emitted after the `city` text.
+pub const CITY_MIN_TABS: usize = 2;
+
+/// Advance `column` to the next 8-column tab stop.
 ///
-/// Always returns exactly [`CITY_PADDING_TABS`] tab characters; the city text is
-/// never truncated and the padding never varies with its length.
+/// A tab character moves the cursor to the next multiple of [`TAB_STOP`]
+/// (including the next one when the cursor already sits exactly on a stop), so
+/// this is the column at which the character after a single tab is written.
+fn next_tab_stop(column: usize) -> usize {
+    (column / TAB_STOP + 1) * TAB_STOP
+}
+
+/// The tab padding to emit after the `city` text, given the output column at
+/// which the city begins (`city_start`).
+///
+/// The padding has enough tab characters that the next character (the `platform`
+/// field) starts on the first tab stop at or beyond
+/// `city_start + CITY_MIN_WIDTH` — i.e. the `city` column is at least two tab
+/// widths wide — and never fewer than [`CITY_MIN_TABS`] tabs.
+///
+/// Concretely: starting from `end = city_start + city.chars().count()`, advance
+/// by [`next_tab_stop`] until reaching a stop `>= city_start + CITY_MIN_WIDTH`,
+/// counting the tabs; the count is then clamped to at least [`CITY_MIN_TABS`].
+/// The city text is never truncated.
 ///
 /// ## Consequence
 ///
-/// Because the padding is made of tabs, splitting a line on `'\t'` yields an
-/// **empty field** for the padding tab(s); the line therefore no longer has a
+/// Because the padding is made of tabs, splitting a line on `'\t'` yields
+/// **empty fields** for the padding tabs; the line therefore no longer has a
 /// fixed 10-element index layout.  Consumers must split on tabs and ignore empty
 /// segments (the 10 logical fields are still all present and in order), or use
 /// the column layout for display only.
-pub fn pad_city() -> String {
-    "\t".repeat(CITY_PADDING_TABS)
+pub fn pad_city(city: &str, city_start: usize) -> String {
+    let end = city_start + city.chars().count();
+    let target = city_start + CITY_MIN_WIDTH;
+    let mut column = next_tab_stop(end);
+    let mut tabs = 1;
+    while column < target {
+        column = next_tab_stop(column);
+        tabs += 1;
+    }
+    "\t".repeat(tabs.max(CITY_MIN_TABS))
 }
 
 /// Render one entry as the 10-logical-field tab-separated servicelog row.
@@ -228,8 +255,8 @@ pub fn pad_city() -> String {
 /// Field order:
 /// 1. `timestamp_us` — **int64 epoch microseconds, UTC**;
 /// 2. `country` — GeoIP ISO code, else `-`;
-/// 3. `city` — GeoIP English name, else `-`, followed by a fixed two-tab
-///    padding (see [`pad_city`]; never truncated);
+/// 3. `city` — GeoIP English name, else `-`, followed by computed tab padding
+///    (see [`pad_city`]; never truncated);
 /// 4. `platform` — `A` for Android, else `-`;
 /// 5. `version` — `bo-android-<n>` version, else `None`;
 /// 6. `minute_offset`;
@@ -239,7 +266,7 @@ pub fn pad_city() -> String {
 /// 10. `count_threshold`.
 ///
 /// The other fields are separated by single tabs; only the `city` field is
-/// tab-padded (see [`CITY_PADDING_TABS`] / [`pad_city`]).
+/// tab-padded (see [`TAB_STOP`] / [`CITY_MIN_WIDTH`] / [`pad_city`]).
 ///
 /// The raw client IP and the local `x`/`y`/`data_area` values are intentionally
 /// **not** written; a local request is distinguishable only by `region == -1`.
@@ -262,15 +289,25 @@ pub fn build_row(
 ) -> String {
     let platform = client_platform(entry.user_agent.as_deref(), version);
     let city_text = city.unwrap_or("-");
+    let timestamp = entry.now_us.to_string();
+    let country = country_code.unwrap_or("-");
+
+    // Track the output column (8-column tab stops) so the city padding lands
+    // `platform` on the right stop.  Every other separator is a single tab.
+    let mut column = timestamp.chars().count();
+    column = next_tab_stop(column); // single tab after timestamp
+    column += country.chars().count();
+    column = next_tab_stop(column); // single tab after country
+    let city_start = column;
 
     let mut row = String::new();
-    row.push_str(&entry.now_us.to_string());
+    row.push_str(&timestamp);
     row.push('\t');
-    row.push_str(country_code.unwrap_or("-"));
+    row.push_str(country);
     row.push('\t');
     row.push_str(city_text);
-    // Constant two-tab padding after the city name (does not depend on length).
-    row.push_str(&pad_city());
+    // Computed tab padding after the city name (at least two tab widths wide).
+    row.push_str(&pad_city(city_text, city_start));
     row.push_str(platform);
     row.push('\t');
     row.push_str(
@@ -729,73 +766,87 @@ mod tests {
         assert_eq!(user_agent_version(None), None);
     }
 
-    /// A short city is followed by exactly two tabs (constant padding).
+    /// City padding is computed from the city length and the city start column, so
+    /// `platform` lands on the tab stop at or beyond `city_start + 16`.  With the
+    /// actual preceding fields (`timestamp` 16 chars, country `DE`) the city starts
+    /// at column 32, so the target stop is 48 and all three names reach it in two
+    /// tabs.
     #[test]
-    fn global_row_tab_pads_a_short_city() {
-        let row = build_row(&entry(0, None), Some(190), Some("DE"), Some("Berlin"));
-        // Exactly two tabs after the city, regardless of its length.
+    fn global_row_tab_pads_by_city_length() {
+        // Hand-computed with 8-column tab stops: city_start = next_stop(16) + 2
+        // = 24 + 2 = 26 -> next_stop(26) = 32; target = 32 + 16 = 48.
+        //   "X"                 len 1  -> end 33 -> 40 -> 48 : 2 tabs
+        //   "Berlin"            len 6  -> end 38 -> 40 -> 48 : 2 tabs
+        //   "Frankfurt am Main" len 17 -> end 49 -> 56       : 1 tab -> min 2
+        let short = build_row(&entry(0, None), Some(190), Some("DE"), Some("X"));
         assert_eq!(
-            row,
+            short,
+            "1700000000500000\tDE\tX\t\tA\t190\t0\t60\t10000\t0\t0"
+        );
+
+        let medium = build_row(&entry(0, None), Some(190), Some("DE"), Some("Berlin"));
+        assert_eq!(
+            medium,
             "1700000000500000\tDE\tBerlin\t\tA\t190\t0\t60\t10000\t0\t0"
         );
-        // The two padding tabs show up as one empty segment on a naive split.
-        let cells: Vec<&str> = row.split('\t').collect();
-        assert_eq!(
-            cells,
-            vec![
-                "1700000000500000",
-                "DE",
-                "Berlin",
-                "",
-                "A",
-                "190",
-                "0",
-                "60",
-                "10000",
-                "0",
-                "0"
-            ]
+
+        let long = build_row(
+            &entry(0, None),
+            Some(190),
+            Some("DE"),
+            Some("Frankfurt am Main"),
         );
-        // Ignoring empty segments recovers exactly the 10 logical fields.
+        assert_eq!(
+            long,
+            "1700000000500000\tDE\tFrankfurt am Main\t\tA\t190\t0\t60\t10000\t0\t0"
+        );
+
+        // Padding tabs show up as empty segments on a naive split; ignoring
+        // them recovers exactly the 10 logical fields.
+        for row in [&short, &medium, &long] {
+            let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
+            assert_eq!(logical.len(), 10, "row: {row}");
+        }
+    }
+
+    /// A long city is never truncated (its line may not align).
+    #[test]
+    fn long_city_is_not_truncated() {
+        let long = "Sankt-Peterburg-Nikolaevsk"; // 27 chars
+        let row = build_row(&entry(0, None), Some(190), Some("RU"), Some(long));
+        assert!(row.contains(long));
         let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
+        assert_eq!(logical[2], long);
         assert_eq!(logical.len(), 10);
     }
 
-    /// A long city is never truncated and still gets exactly two padding tabs.
+    /// `pad_city` advances to the first stop >= `city_start + 16`, min two tabs.
     #[test]
-    fn long_city_is_not_truncated_and_gets_two_tabs() {
-        let long = "Sankt-Peterburg-Nikolaevsk"; // 27 chars
-        let row = build_row(&entry(0, None), Some(190), Some("RU"), Some(long));
-        // Same constant two-tab padding as a short city.
-        assert_eq!(
-            row,
-            "1700000000500000\tRU\tSankt-Peterburg-Nikolaevsk\t\tA\t190\t0\t60\t10000\t0\t0"
-        );
-        // The name is intact (no truncation).
-        assert!(row.contains(long));
-        let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
-        assert_eq!(
-            logical,
-            vec![
-                "1700000000500000",
-                "RU",
-                long,
-                "A",
-                "190",
-                "0",
-                "60",
-                "10000",
-                "0",
-                "0"
-            ]
-        );
+    fn pad_city_computes_tabs_from_city_length() {
+        // On the actual city_start (32, a tab stop): target 48.
+        assert_eq!(pad_city("X", 32), "\t\t"); // 33 -> 40 -> 48
+        assert_eq!(pad_city("Berlin", 32), "\t\t"); // 38 -> 40 -> 48
+        assert_eq!(pad_city("Frankfurt am Main", 32), "\t\t"); // 49 -> 56, min 2
+
+        // Off a tab stop (city_start 30): target 46; short names need an extra tab.
+        assert_eq!(pad_city("X", 30), "\t\t\t"); // 31 -> 32 -> 40 -> 48
+        assert_eq!(pad_city("Berlin", 30), "\t\t"); // 36 -> 40 -> 48
+        assert_eq!(pad_city("Frankfurt am Main", 30), "\t\t"); // 47 -> 48, min 2
+
+        // Minimum of two tabs is enforced even when one tab would reach the target.
+        assert_eq!(CITY_MIN_TABS, 2);
+        assert_eq!(pad_city("1234567890123456", 32), "\t\t"); // end 48 -> 56, 1 tab -> min 2
     }
 
-    /// `pad_city` is always exactly two tabs, independent of any input.
+    /// `next_tab_stop` advances to the next multiple of 8 (including from a stop).
     #[test]
-    fn pad_city_is_always_two_tabs() {
-        assert_eq!(pad_city(), "\t\t");
-        assert_eq!(CITY_PADDING_TABS, 2);
+    fn next_tab_stop_advances_to_multiple_of_eight() {
+        assert_eq!(next_tab_stop(0), 8);
+        assert_eq!(next_tab_stop(7), 8);
+        assert_eq!(next_tab_stop(8), 16);
+        assert_eq!(next_tab_stop(9), 16);
+        assert_eq!(next_tab_stop(16), 24);
+        assert_eq!(next_tab_stop(26), 32);
     }
 
     #[test]
