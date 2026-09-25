@@ -84,8 +84,8 @@ impl WebsocketOptions {
 
 /// Pick a random websocket server index from [`SERVER_INDICES`].
 pub fn random_server_index() -> u32 {
-    use rand::seq::SliceRandom;
-    let mut rng = rand::thread_rng();
+    use rand::seq::IndexedRandom;
+    let mut rng = rand::rng();
     *SERVER_INDICES.choose(&mut rng).unwrap_or(&1)
 }
 
