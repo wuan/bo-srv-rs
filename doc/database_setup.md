@@ -341,19 +341,80 @@ SELECT cron.schedule_in_database(
     'strikes-ensure-partitions',
     '0 * * * *',
     'SELECT strikes_ensure_partitions(7)',
-    'blitzortung');
+    'blitzortung', 'blitzortung');
 
 -- Drop old data once a day, keeping the two-day backfill margin.
 SELECT cron.schedule_in_database(
     'strikes-drop-old-partitions',
     '30 0 * * *',
     $$SELECT strikes_drop_old_partitions('2 days')$$,
-    'blitzortung');
+    'blitzortung', 'blitzortung');
 ```
 
 When a job fires the launcher opens a session to the named database and runs
 `command` there, so the functions resolve normally; the extension itself still
 has to be created in `postgres`.
+
+#### The `blitzortung` role and `.pgpass`
+
+`schedule_in_database` makes `pg_cron` open a **new** libpq connection to the
+target database on every run. Unlike an interactive `psql` session there is no
+terminal, so a password can never be typed: if `pg_hba.conf` requires
+`scram-sha-256`/`md5` for that connection and no password file is present, the
+run fails with `connection failed` *before* the function executes. That is the
+error seen in `cron.job_run_details`, not a problem with the SQL itself.
+
+The jobs above run as the application role `blitzortung` — the same role
+`bo-srv` / `bo-import` use (`BO_DB_USER`, default `blitzortung`). That role has
+to exist in the cluster, be allowed to log in, and be able to execute the
+maintenance functions:
+
+```sql
+CREATE ROLE blitzortung LOGIN PASSWORD '<password>';
+GRANT CONNECT ON DATABASE blitzortung TO blitzortung;
+
+-- Applied as `blitzortung`, tests/schema/strikes.sql already makes it the
+-- owner of the table, indexes and functions; otherwise grant the minimum:
+GRANT USAGE, CREATE ON SCHEMA public TO blitzortung;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO blitzortung;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO blitzortung;
+```
+
+`pg_cron` connects over TCP to `cron.host` / `cron.port` (default
+`localhost:5432`), and the password file is read by the **operating-system
+user that runs PostgreSQL** (usually `postgres`), not by the SQL role. The
+hostname in `.pgpass` must match `cron.host` literally (use `*` to match any).
+Create `~postgres/.pgpass` with mode `0600` and ownership `postgres` — libpq
+silently ignores a file with looser permissions:
+
+```bash
+sudo install -m 600 -o postgres -g postgres /dev/null /var/lib/postgresql/.pgpass
+sudo tee -a /var/lib/postgresql/.pgpass >/dev/null <<'EOF'
+# hostname:port:database:username:password
+localhost:5432:blitzortung:blitzortung:<password>
+EOF
+```
+
+Ensure `pg_hba.conf` has a matching line for the TCP connection pg_cron makes,
+e.g.:
+
+```
+host    blitzortung    blitzortung    127.0.0.1/32    scram-sha-256
+host    blitzortung    blitzortung    ::1/128         scram-sha-256
+```
+
+Reload the server after editing (`sudo systemctl reload postgresql`) and verify
+the credentials before re-scheduling:
+
+```bash
+PGPASSFILE=/var/lib/postgresql/.pgpass \
+  psql -h localhost -U blitzortung -d blitzortung -c 'SELECT 1'
+```
+
+If the password file lives elsewhere, point the server at it via the
+`PGPASSFILE` environment variable in the PostgreSQL systemd unit. To
+re-schedule a job that already failed, remove it first with
+`SELECT cron.unschedule('strikes-ensure-partitions');`.
 
 Verify the schedule and inspect recent runs:
 
@@ -364,6 +425,16 @@ SELECT jobid, status, start_time, end_time, return_message
 FROM cron.job_run_details
 ORDER BY start_time DESC
 LIMIT 10;
+```
+
+Remove a job by name or—more robust when names could collide or have
+changed—by its `jobid` from `cron.job`:
+
+```sql
+SELECT cron.unschedule('strikes-ensure-partitions');
+
+-- by id, e.g. jobid 1 from the listing above
+SELECT cron.unschedule(1);
 ```
 
 `pg_cron` records every run in `cron.job_run_details`, which grows unbounded;
