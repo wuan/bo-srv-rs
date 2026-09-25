@@ -1550,8 +1550,12 @@ mod tests {
         assert_eq!(cells[1], "1"); // region
         assert_eq!(cells[2], "10000"); // pre-clamp baselength
         assert_eq!(cells[4], "30"); // minute_length
-        assert_eq!(cells[6], "-"); // masked client
+        assert_eq!(cells[6], "-"); // country (no geoip db)
+        assert_eq!(cells[7], "-"); // city
+        assert_eq!(cells[8], "A"); // platform (bo-android user agent)
         assert_eq!(cells[9], "190"); // user agent version
+                                     // The raw client IP is never written.
+        assert!(!cells.contains(&"5.6.7.8"));
 
         let _ = std::fs::remove_dir_all(&log_dir);
     }

@@ -206,7 +206,7 @@ the Python two-step design (per-minute JSON reports plus the separate
    `get_local_strikes_grid` call is pushed onto a **bounded queue** (blocked or
    invalid requests are never recorded);
 2. a dedicated **background OS thread** consumes the queue, enriches each entry
-   (GeoIP country/city, `bo-android-<n>` version, masked client IP) and appends
+   (GeoIP country/city, client platform/version) and appends
    one tab-separated line per request to `{log_dir}/servicelog_{YYYY-MM-DD}`.
 
 **No `*.json` files are produced or consumed.**
@@ -235,11 +235,10 @@ An empty env value disables it explicitly.  When enabled the service logs
 ### File format
 
 Rows are appended to `{log_dir}/servicelog_{YYYY-MM-DD}`, 13 tab-separated
-fields, byte-identical to the Python tool's output so existing analysis still
-works:
+fields (one line per request):
 
 ```text
-1700000000500000\t3\t10000\t0\t60\t0\t-\tDE\tBerlin\t190\t-\t-\t-
+1700000000500000\t3\t10000\t0\t60\t0\tDE\tBerlin\tA\t190\t-\t-\t-
 ```
 
 | # | Field | Notes |
@@ -250,13 +249,17 @@ works:
 | 4 | `minute_offset` | |
 | 5 | `minute_length` | |
 | 6 | `count_threshold` | |
-| 7 | client IP | always masked to `-` for privacy |
-| 8 | country | GeoIP ISO code, else `-` |
-| 9 | city | GeoIP English city name, else `-` |
+| 7 | country | GeoIP ISO code, else `-` |
+| 8 | city | GeoIP English city name, else `-` |
+| 9 | platform | `A` for the Android client, else `-` |
 | 10 | version | `bo-android-<n>` client version, else `None` |
 | 11 | `local_x` | local grid only, else `-` |
 | 12 | `local_y` | local grid only, else `-` |
 | 13 | `data_area` | local grid only, else `-` |
+
+The raw client IP is **never** written.  The `platform` marker recognises the
+Blitzortung Android client (`A`); a missing or non-Android user agent yields `-`
+and its version stays `None`.
 
 The file is opened in **append** mode and stays open across days; when an
 entry's UTC date changes (e.g. the first request after `00:00` UTC) the writer
@@ -624,12 +627,13 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
 - **Usage logging runs in-process.** Instead of the Python two-step design
   (per-minute JSON reports written by `base.py` plus the `bo-webservice-insertlog`
   follow-up tool), the Rust port transforms and appends rows on a background
-  thread fed by a bounded queue.  The `servicelog_*` row format is identical, so
-  existing analysis keeps working, but there are no intermediate JSON files and
-  no standalone tool to schedule.  Backpressure policy: a full queue drops
-  entries with a single `WARN` (requests never block).  GeoIP is best-effort
-  (missing/unreadable db or not-found address -> `-`), where Python aborts on a
-  missing db.
+  thread fed by a bounded queue.  There are no intermediate JSON files and no
+  standalone tool to schedule.  The row is a refined 13-column format: the
+  timestamp is an int64 epoch-microsecond value (not `%.4f` seconds) and the
+  always-`-` masked client-IP column is replaced by a client **platform** marker
+  (`A` for Android).  Backpressure policy: a full queue drops entries with a
+  single `WARN` (requests never block).  GeoIP is best-effort (missing/unreadable
+  db or not-found address -> `-`), where Python aborts on a missing db.
 - **Usage-log directory and GeoIP path.** The Python service hard-codes
   `/var/log/blitzortung` (used only when it exists).  The Rust port additionally
   accepts `--servicelog` / `BO_SERVICE_SERVICELOG` /
@@ -637,5 +641,3 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   and `--geoip-db` / `BO_GEOIP_DB` / `[webservice] geoip_db`, with the flag
   precedence CLI > env > config and a default of disabled (the Python default
   `/var/log/blitzortung` is still used when it exists and nothing is set).
-  The row timestamp is an int64 epoch-microsecond value rather than the
-  Python `%.4f` seconds form.

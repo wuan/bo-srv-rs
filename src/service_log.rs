@@ -2,15 +2,16 @@
 //!
 //! Every successful `get_strikes_grid` / `get_global_strikes_grid` /
 //! `get_local_strikes_grid` request is pushed onto a bounded queue.  A dedicated
-//! **background OS thread** consumes the queue, enriches each entry (GeoIP,
-//! user-agent version, masked client IP) and appends one tab-separated row per
+//! **background OS thread** consumes the queue, enriches each entry (GeoIP
+//! country/city, client platform/version) and appends one tab-separated row per
 //! request to `{log_dir}/servicelog_{YYYY-MM-DD}`.
 //!
 //! This replaces the Python two-step design (`base.py` writing per-minute JSON
 //! reports + the `bo-webservice-insertlog` follow-up tool): there are **no JSON
-//! intermediate files**, the transform happens in-process, and the output line
-//! format is byte-identical to the Python `servicelog_*` rows so existing
-//! analysis/tooling keeps working.
+//! intermediate files** and the transform happens in-process.  The row is a
+//! refined version of the Python `servicelog_*` line (see [`build_row`]): the
+//! timestamp is an int64 epoch-microsecond value and the masked client-IP column
+//! is dropped in favour of a client **platform** marker.
 //!
 //! ## Backpressure
 //!
@@ -42,6 +43,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 
 use crate::metrics::Metrics;
+use crate::service::USER_AGENT_PREFIX;
 
 /// Environment variable overriding the usage-log directory
 /// (`BO_SERVICE_SERVICELOG`); `BO_SERVICE_LOG_DIR` is accepted as an alias.
@@ -194,23 +196,38 @@ pub fn user_agent_version(user_agent: Option<&str>) -> Option<i64> {
 
 /// Render one entry as the 13-field tab-separated servicelog row.
 ///
-/// Field order (shared with the Python `build_result_row`):
-/// `timestamp_us` (**int64 epoch microseconds, UTC**), `region`,
-/// `grid_baselength`, `minute_offset`, `minute_length`, `count_threshold`,
-/// `-` (masked IP), `country|'-'`, `city|'-'`, `version|None`, `local_x|'-'`,
-/// `local_y|'-'`, `data_area|'-'`.
+/// Field order:
+/// 1. `timestamp_us` — **int64 epoch microseconds, UTC**;
+/// 2. `region` — `0` global, clamped region for the region grid, `-1` local;
+/// 3. `grid_baselength` — the **pre-clamp** `original_grid_base_length`;
+/// 4. `minute_offset`;
+/// 5. `minute_length`;
+/// 6. `count_threshold`;
+/// 7. `country` — GeoIP ISO code, else `-`;
+/// 8. `city` — GeoIP English name, else `-`;
+/// 9. `platform` — `A` for Android, else `-`;
+/// 10. `version` — `bo-android-<n>` version, else `None`;
+/// 11. `local_x` / 12. `local_y` / 13. `data_area` — local grid only, else `-`.
+///
+/// The raw client IP is intentionally **never** written.
 ///
 /// The timestamp is the raw [`ServiceLogEntry::now_us`] value — exactly what
 /// the Python `current_data` entries recorded
 /// (`calendar.timegm(...) * 1_000_000 + microsecond`): an **int64 count of
 /// microseconds since the Unix epoch, in UTC**.  It is written as an integer
 /// (no `%.4f` seconds form) so no precision is lost.
+///
+/// `platform` and `version` are derived from [`ServiceLogEntry::user_agent`]
+/// via [`client_platform`] / [`user_agent_version`]: an Android client yields
+/// `A` and its integer version; any other (or absent) user agent yields `-`
+/// and `None` respectively.
 pub fn build_row(
     entry: &ServiceLogEntry,
     version: Option<i64>,
     country_code: Option<&str>,
     city: Option<&str>,
 ) -> String {
+    let platform = client_platform(entry.user_agent.as_deref(), version);
     let (local_x, local_y, data_area) = match entry.local {
         Some(local) => (
             local.x.to_string(),
@@ -227,9 +244,9 @@ pub fn build_row(
         entry.minute_offset.to_string(),
         entry.minute_length.to_string(),
         entry.count_threshold.to_string(),
-        "-".to_string(),
         country_code.unwrap_or("-").to_string(),
         city.unwrap_or("-").to_string(),
+        platform.to_string(),
         version
             .map(|v| v.to_string())
             .unwrap_or_else(|| "None".to_string()),
@@ -238,6 +255,19 @@ pub fn build_row(
         data_area,
     ]
     .join("\t")
+}
+
+/// The client platform marker for the servicelog `platform` column.
+///
+/// Currently only the Blitzortung Android client is recognised: a user agent
+/// whose version parses (`bo-android-<n>`) yields `A`.  Anything else — a
+/// missing user agent, or one that is not an Android client — yields `-`.
+pub fn client_platform(user_agent: Option<&str>, version: Option<i64>) -> &'static str {
+    if version.is_some() || user_agent.is_some_and(|ua| ua.starts_with(USER_AGENT_PREFIX)) {
+        "A"
+    } else {
+        "-"
+    }
 }
 
 /// The StatsD tag string for one entry (`emit_metrics` in the Python tool).
@@ -567,11 +597,11 @@ mod tests {
     }
 
     #[test]
-    fn global_row_has_thirteen_masked_fields() {
+    fn global_row_has_thirteen_fields_with_platform() {
         let row = build_row(&entry(0, None), Some(190), Some("DE"), Some("Berlin"));
         assert_eq!(
             row,
-            "1700000000500000\t0\t10000\t0\t60\t0\t-\tDE\tBerlin\t190\t-\t-\t-"
+            "1700000000500000\t0\t10000\t0\t60\t0\tDE\tBerlin\tA\t190\t-\t-\t-"
         );
         assert_eq!(row.split('\t').count(), 13);
     }
@@ -591,10 +621,40 @@ mod tests {
             None,
             None,
         );
+        // The entry's user agent is an Android one, so the platform stays `A`
+        // even though the (separately supplied) version is `None`.
         assert_eq!(
             row,
-            "1700000000500000\t-1\t10000\t0\t60\t0\t-\t-\t-\tNone\t101\t202\t5"
+            "1700000000500000\t-1\t10000\t0\t60\t0\t-\t-\tA\tNone\t101\t202\t5"
         );
+    }
+
+    /// A non-Android (or absent) user agent yields platform `-`.
+    #[test]
+    fn non_android_platform_is_dash() {
+        let mut e = entry(0, None);
+        e.user_agent = Some("Mozilla/5.0".into());
+        let row = build_row(&e, None, None, None);
+        let cells: Vec<&str> = row.split('\t').collect();
+        assert_eq!(cells[8], "-"); // platform
+        assert_eq!(cells[9], "None"); // version
+
+        let mut e = entry(0, None);
+        e.user_agent = None;
+        let row = build_row(&e, None, None, None);
+        let cells: Vec<&str> = row.split('\t').collect();
+        assert_eq!(cells[8], "-");
+        assert_eq!(cells[9], "None");
+    }
+
+    /// The raw client IP never appears in the row (the entry's client is
+    /// deliberately not serialised).
+    #[test]
+    fn row_never_contains_the_client_ip() {
+        let mut e = entry(0, None);
+        e.client = Some("203.0.113.7".into());
+        let row = build_row(&e, Some(190), Some("DE"), Some("Berlin"));
+        assert!(!row.contains("203.0.113.7"));
     }
 
     #[test]
@@ -654,7 +714,7 @@ mod tests {
         let content = std::fs::read_to_string(dir.join("servicelog_2023-11-14")).unwrap();
         assert_eq!(
             content,
-            "1700000000500000\t0\t10000\t0\t60\t0\t-\t-\t-\t190\t-\t-\t-\n"
+            "1700000000500000\t0\t10000\t0\t60\t0\t-\t-\tA\t190\t-\t-\t-\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -675,7 +735,7 @@ mod tests {
         let day2 = std::fs::read_to_string(dir.join("servicelog_2023-11-15")).unwrap();
         assert_eq!(
             day2,
-            "1700006400000000\t0\t10000\t0\t60\t0\t-\t-\t-\t190\t-\t-\t-\n"
+            "1700006400000000\t0\t10000\t0\t60\t0\t-\t-\tA\t190\t-\t-\t-\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
