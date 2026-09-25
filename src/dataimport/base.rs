@@ -3,16 +3,17 @@
 
 use std::time::Duration;
 
-use reqwest::blocking::Client;
+use reqwest::Client;
 use reqwest::StatusCode;
 
 use crate::config::Config;
 use crate::util::{log_path, time_intervals, Timer};
 
 /// A source of text lines (`TransportAbstract` / `FileTransport`).
-pub trait Transport {
+#[async_trait::async_trait]
+pub trait Transport: Send + Sync {
     /// Read all lines from `source`.
-    fn read_lines(&self, source: &str) -> Result<Vec<String>, TransportError>;
+    async fn read_lines(&self, source: &str) -> Result<Vec<String>, TransportError>;
 }
 
 /// Errors raised by the transports.
@@ -58,14 +59,29 @@ impl std::error::Error for TransportError {}
 /// Read lines from a local file (`FileTransport`).
 pub struct FileTransport;
 
+#[async_trait::async_trait]
 impl Transport for FileTransport {
-    fn read_lines(&self, source: &str) -> Result<Vec<String>, TransportError> {
-        let content = std::fs::read_to_string(source).map_err(TransportError::Io)?;
+    async fn read_lines(&self, source: &str) -> Result<Vec<String>, TransportError> {
+        let source = source.to_owned();
+        let content =
+            match tokio::task::spawn_blocking(move || std::fs::read_to_string(source)).await {
+                Ok(Ok(content)) => content,
+                Ok(Err(error)) => return Err(TransportError::Io(error)),
+                Err(error) => {
+                    return Err(TransportError::Io(std::io::Error::other(format!(
+                        "file read task failed: {error}"
+                    ))))
+                }
+            };
         Ok(content.lines().map(|l| l.to_string()).collect())
     }
 }
 
-/// HTTP transport with basic auth (`HttpFileTransport`).
+/// Asynchronous HTTP transport with basic auth (`HttpFileTransport`).
+///
+/// The importer runs inside Tokio, so this transport uses reqwest's async
+/// client rather than its blocking API.  Calling the blocking client from an
+/// async context can panic while its internal runtime is being dropped.
 ///
 /// Python uses a 60 second timeout; the `bo-import` CLI additionally relies on
 /// its whole-region timeout, so per-request failures surface as
@@ -100,16 +116,18 @@ impl HttpFileTransport {
     }
 }
 
+#[async_trait::async_trait]
 impl Transport for HttpFileTransport {
     /// `HttpFileTransport.read_lines`: GET with basic auth; a non-200 response
     /// yields no lines.
-    fn read_lines(&self, source: &str) -> Result<Vec<String>, TransportError> {
+    async fn read_lines(&self, source: &str) -> Result<Vec<String>, TransportError> {
         let mut timer = Timer::new();
         let response = self
             .client
             .get(source)
             .basic_auth(&self.username, Some(&self.password))
             .send()
+            .await
             .map_err(TransportError::Request)?;
 
         if response.status() != StatusCode::OK {
@@ -126,7 +144,7 @@ impl Transport for HttpFileTransport {
         }
         log::debug!("get '{}' ({:.3}s)", source, timer.lap());
 
-        let body = response.text().map_err(TransportError::Request)?;
+        let body = response.text().await.map_err(TransportError::Request)?;
         Ok(body.lines().map(|l| l.to_string()).collect())
     }
 }
@@ -202,7 +220,9 @@ impl BlitzortungDataPathGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use chrono::{TimeZone, Utc};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn not_found_is_missing() {
@@ -212,6 +232,37 @@ mod tests {
             "refused"
         ))
         .is_missing());
+    }
+
+    #[tokio::test]
+    async fn http_transport_can_read_from_async_runtime() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nline1\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let transport = HttpFileTransport::with_timeout(&Config::default(), Duration::from_secs(1));
+        let lines = tokio::time::timeout(
+            Duration::from_secs(2),
+            transport.read_lines(&format!("http://{address}/log")),
+        )
+        .await
+        .expect("HTTP request timed out")
+        .unwrap();
+        assert_eq!(lines, vec!["line1"]);
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("test server timed out")
+            .unwrap();
     }
 
     #[test]

@@ -9,8 +9,8 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use clap::Parser;
 
-use crate::data::Timestamp;
-use crate::dataimport::{StrikesBlitzortungDataProvider, Transport};
+use crate::data::{Strike, Timestamp};
+use crate::dataimport::{StrikeSink, StrikesBlitzortungDataProvider, Transport};
 use crate::db::StrikeDb;
 use crate::executor::QueryExecutor;
 use crate::metrics::Metrics;
@@ -114,60 +114,39 @@ pub async fn import_strikes_for<T: Transport>(
         }
     }
 
-    // `reference_time` before the fetch; `query_time` after it (Python:
-    // `imprt.import_strikes_for`).
+    // Stream the region's strikes into the database in bounded batches rather
+    // than collecting them all first: a single region can contain millions of
+    // strikes, which must not be held in memory at once.  `ChunkInserter`
+    // submits at most `STRIKE_BATCH_SIZE` rows per call (`StrikeDb::insert_many`
+    // applies any further PostgreSQL parameter-limit split) and commits after
+    // each complete `STRIKE_GROUP_SIZE` group.
     let reference_time = std::time::Instant::now();
     let provider = StrikesBlitzortungDataProvider::new(transport);
     let latest = latest_time.and_then(|t| t.datetime);
-    let mut strikes = provider.get_strikes_since_with_deadline(latest, region, deadline)?;
-    let query_time = std::time::Instant::now();
 
-    let mut strike_count: i64 = 0;
-    let mut strike_batch: Vec<crate::data::Strike> = Vec::new();
-    let mut start_time = std::time::Instant::now();
-    let global_start_time = start_time;
+    let mut inserter = ChunkInserter::new(db, executor, region);
+    provider
+        .get_strikes_since_with_deadline_into(
+            latest,
+            region,
+            deadline,
+            STRIKE_BATCH_SIZE,
+            &mut inserter,
+        )
+        .await?;
+    inserter.finish().await?;
 
-    for strike in strikes.drain(..) {
-        strike_batch.push(strike);
-        strike_count += 1;
-
-        if strike_batch.len() >= STRIKE_BATCH_SIZE {
-            db.insert_many(&strike_batch, Some(region as i64)).await?;
-            strike_batch.clear();
-
-            if strike_count % STRIKE_GROUP_SIZE == 0 {
-                executor.commit().await?;
-                let elapsed = start_time.elapsed().as_secs_f64().max(f64::EPSILON);
-                log::info!(
-                    "commit #{} ({:.1}/s) for region {}",
-                    strike_count,
-                    STRIKE_GROUP_SIZE as f64 / elapsed,
-                    region
-                );
-                start_time = std::time::Instant::now();
-            }
-        }
-    }
-
-    if !strike_batch.is_empty() {
-        db.insert_many(&strike_batch, Some(region as i64)).await?;
-    }
-    if strike_count > 0 {
-        executor.commit().await?;
-    }
-
-    let insert_time = std::time::Instant::now();
+    let strike_count = inserter.inserted;
+    let insert_seconds = inserter.insert_seconds;
+    // Fetch and insert are interleaved while streaming, so the `.get` phase is
+    // the total minus the time spent inside the database sink.
+    let get_seconds = (reference_time.elapsed().as_secs_f64() - insert_seconds).max(0.0);
 
     // `imprt.import_strikes_for`: `strikes.<region>` counter, `.count` gauge
     // and the `.get`/`.insert` phase timings.
-    metrics.for_import(
-        region,
-        strike_count.max(0) as u64,
-        query_time.duration_since(reference_time).as_secs_f64(),
-        insert_time.duration_since(query_time).as_secs_f64(),
-    );
+    metrics.for_import(region, strike_count as u64, get_seconds, insert_seconds);
 
-    let total = global_start_time.elapsed().as_secs_f64().max(f64::EPSILON);
+    let total = reference_time.elapsed().as_secs_f64().max(f64::EPSILON);
     log::info!(
         "imported {} strikes ({:.1}/s) for region {}",
         strike_count,
@@ -175,7 +154,81 @@ pub async fn import_strikes_for<T: Transport>(
         region
     );
 
-    Ok(strike_count as usize)
+    Ok(strike_count)
+}
+
+/// [`StrikeSink`] that inserts each batch and commits complete groups.
+///
+/// This is what keeps `bo-import`'s memory bounded: the provider hands over at
+/// most one `STRIKE_BATCH_SIZE` batch at a time and this sink persists it (and
+/// commits every `STRIKE_GROUP_SIZE` rows) before the next batch is fetched.
+struct ChunkInserter<'a> {
+    db: StrikeDb<'a>,
+    executor: &'a dyn QueryExecutor,
+    region: u32,
+    inserted: usize,
+    committed_groups: usize,
+    group_started: std::time::Instant,
+    insert_seconds: f64,
+}
+
+impl<'a> ChunkInserter<'a> {
+    fn new(db: StrikeDb<'a>, executor: &'a dyn QueryExecutor, region: u32) -> Self {
+        ChunkInserter {
+            db,
+            executor,
+            region,
+            inserted: 0,
+            committed_groups: 0,
+            group_started: std::time::Instant::now(),
+            insert_seconds: 0.0,
+        }
+    }
+
+    /// Commit a final partial group (if any).
+    async fn finish(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let group_size = STRIKE_GROUP_SIZE as usize;
+        if self.inserted > self.committed_groups * group_size {
+            let started = std::time::Instant::now();
+            self.executor.commit().await?;
+            self.insert_seconds += started.elapsed().as_secs_f64();
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl<'a> StrikeSink for ChunkInserter<'a> {
+    async fn accept(
+        &mut self,
+        strikes: &[Strike],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let started = std::time::Instant::now();
+        self.inserted += self
+            .db
+            .insert_many(strikes, Some(self.region as i64))
+            .await?;
+
+        // Commits are issued after each complete `STRIKE_GROUP_SIZE` group; use
+        // a division-based check so changing either constant cannot skip a
+        // commit at a group boundary.
+        let group_size = STRIKE_GROUP_SIZE as usize;
+        let groups = self.inserted / group_size;
+        while self.committed_groups < groups {
+            self.committed_groups += 1;
+            self.executor.commit().await?;
+            let elapsed = self.group_started.elapsed().as_secs_f64().max(f64::EPSILON);
+            log::info!(
+                "commit #{} ({:.1}/s) for region {}",
+                self.committed_groups * group_size,
+                group_size as f64 / elapsed,
+                self.region
+            );
+            self.group_started = std::time::Instant::now();
+        }
+        self.insert_seconds += started.elapsed().as_secs_f64();
+        Ok(())
+    }
 }
 
 /// `imprt.import_strikes`: iterate all regions, retrying connection errors.
@@ -289,8 +342,9 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl Transport for StubTransport {
-        fn read_lines(&self, _source: &str) -> Result<Vec<String>, TransportError> {
+        async fn read_lines(&self, _source: &str) -> Result<Vec<String>, TransportError> {
             let mut failures = self.remaining_failures.lock().unwrap();
             if *failures > 0 {
                 *failures -= 1;
@@ -319,8 +373,9 @@ mod tests {
     /// Transport that reports every requested log file as missing.
     struct MissingTransport;
 
+    #[async_trait::async_trait]
     impl Transport for MissingTransport {
-        fn read_lines(&self, _source: &str) -> Result<Vec<String>, TransportError> {
+        async fn read_lines(&self, _source: &str) -> Result<Vec<String>, TransportError> {
             Err(TransportError::NotFound)
         }
     }
@@ -365,6 +420,59 @@ mod tests {
         // The insert was pinned to the region.
         let (_, params) = &mock.executions()[0];
         assert_eq!(params[5], crate::executor::Param::Int(1));
+        let _ = &mut mock;
+    }
+
+    /// `import_strikes_for` reports the Python metric set through the sink.
+    /// The importer hands the database bounded batches and flushes the final
+    /// partial batch instead of trying to insert the whole region at once.
+    #[tokio::test]
+    async fn import_strikes_for_flushes_batches_and_tail() {
+        let now = Utc::now();
+        let base = now - Duration::hours(2) + Duration::seconds(1);
+        let mut mock = executor_with_latest(Some((now - Duration::hours(3), 0)));
+        let lines = (0..=STRIKE_BATCH_SIZE)
+            .map(|index| strike_line(base + Duration::milliseconds(index as i64)))
+            .collect();
+        let transport = StubTransport::new(lines, 0);
+
+        let count = import_strikes_for(&mock, &transport, 4, None, false, None, &NoopMetrics)
+            .await
+            .unwrap();
+        assert_eq!(count, STRIKE_BATCH_SIZE + 1);
+        assert_eq!(mock.execution_count(), 2);
+        assert_eq!(mock.executions()[0].1.len(), STRIKE_BATCH_SIZE * 9);
+        assert_eq!(mock.executions()[1].1.len(), 9);
+        for (_, params) in mock.executions() {
+            assert_eq!(params[5], crate::executor::Param::Int(4));
+        }
+        assert_eq!(mock.commit_count(), 1);
+        let _ = &mut mock;
+    }
+
+    /// Strikes are committed as they are streamed: a region larger than one
+    /// group is persisted in a first committed group plus a final partial
+    /// group, without ever buffering the whole region.
+    #[tokio::test]
+    async fn import_strikes_for_commits_multiple_groups_while_streaming() {
+        let now = Utc::now();
+        let base = now - Duration::hours(2) + Duration::seconds(1);
+        let mut mock = executor_with_latest(Some((now - Duration::hours(3), 0)));
+        let total = STRIKE_GROUP_SIZE as usize + 1;
+        let lines = (0..total)
+            .map(|index| strike_line(base + Duration::milliseconds(index as i64)))
+            .collect();
+        let transport = StubTransport::new(lines, 0);
+
+        let count = import_strikes_for(&mock, &transport, 2, None, false, None, &NoopMetrics)
+            .await
+            .unwrap();
+
+        assert_eq!(count, total);
+        // Ten 1,000-row batches plus the final single-row batch.
+        assert_eq!(mock.execution_count(), total.div_ceil(STRIKE_BATCH_SIZE));
+        // One commit at the 10,000-row boundary and one for the partial group.
+        assert_eq!(mock.commit_count(), 2);
         let _ = &mut mock;
     }
 
