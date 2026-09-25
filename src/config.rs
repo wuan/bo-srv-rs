@@ -94,6 +94,17 @@ pub struct Config {
     /// StatsD metric name prefix (`[statsd] prefix` / `BO_STATSD_PREFIX`),
     /// default `org.blitzortung.service`.
     pub statsd_prefix: String,
+    /// Usage-log directory (`[webservice] log_directory` /
+    /// `BO_SERVICE_LOG_DIR`); `None` disables the per-request usage logging.
+    /// The binary validates existence with
+    /// [`service_log::resolve_log_directory`](crate::service_log::resolve_log_directory),
+    /// which falls back to `/var/log/blitzortung` when it exists.
+    pub service_log_dir: Option<String>,
+    /// GeoIP database for the usage-log consumer (`[webservice] geoip_db` /
+    /// `BO_SERVICE_GEOIP_DB`); defaults to
+    /// [`service_log::DEFAULT_GEOIP_DB`](crate::service_log::DEFAULT_GEOIP_DB).
+    /// Best-effort: a missing/unreadable file yields `-` for country/city.
+    pub service_geoip_db: Option<String>,
 }
 
 impl Default for Config {
@@ -112,6 +123,8 @@ impl Default for Config {
             statsd_host: "localhost".into(),
             statsd_port: 8125,
             statsd_prefix: "org.blitzortung.service".into(),
+            service_log_dir: None,
+            service_geoip_db: None,
         }
     }
 }
@@ -208,6 +221,20 @@ impl Config {
                             config.protocol = protocol;
                         }
                     }
+                    if let Some(dir) = section.get("log_directory") {
+                        config.service_log_dir = if dir.is_empty() {
+                            None
+                        } else {
+                            Some(dir.clone())
+                        };
+                    }
+                    if let Some(db) = section.get("geoip_db") {
+                        config.service_geoip_db = if db.is_empty() {
+                            None
+                        } else {
+                            Some(db.clone())
+                        };
+                    }
                 }
                 if let Some(section) = ini.get("db") {
                     config.db_host = section.get("host").cloned().unwrap_or(config.db_host);
@@ -301,6 +328,15 @@ impl Config {
             config.statsd_prefix = v;
         }
 
+        // `BO_SERVICE_LOG_DIR` / `BO_SERVICE_GEOIP_DB` override the INI; an
+        // empty value disables the setting (usage logging / geoip path).
+        if let Some(v) = lookup("BO_SERVICE_LOG_DIR") {
+            config.service_log_dir = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Some(v) = lookup("BO_SERVICE_GEOIP_DB") {
+            config.service_geoip_db = if v.is_empty() { None } else { Some(v) };
+        }
+
         (config, diagnostics)
     }
 
@@ -318,6 +354,36 @@ impl Config {
     /// (`[statsd] host`/`port`, default `localhost:8125`).
     pub fn statsd_address(&self) -> (&str, u16) {
         (&self.statsd_host, self.statsd_port)
+    }
+
+    /// The effective usage-log directory: an explicitly configured
+    /// `service_log_dir` (when it exists on disk), otherwise
+    /// [`DEFAULT_LOG_DIRECTORY`](crate::service_log::DEFAULT_LOG_DIRECTORY)
+    /// when that exists, otherwise `None` (logging disabled).
+    pub fn service_log_directory(&self) -> Option<std::path::PathBuf> {
+        use crate::service_log::{DEFAULT_LOG_DIRECTORY, LOG_DIR_ENV};
+
+        if let Some(dir) = &self.service_log_dir {
+            let path = std::path::PathBuf::from(dir);
+            return path.is_dir().then_some(path);
+        }
+        if std::env::var_os(LOG_DIR_ENV).is_some() {
+            // An explicit (possibly empty) env value was already folded into
+            // `service_log_dir`; do not second-guess it with the default.
+            return None;
+        }
+        let default = std::path::PathBuf::from(DEFAULT_LOG_DIRECTORY);
+        default.is_dir().then_some(default)
+    }
+
+    /// The GeoIP database path for the usage-log consumer: the configured
+    /// `service_geoip_db`, else
+    /// [`DEFAULT_GEOIP_DB`](crate::service_log::DEFAULT_GEOIP_DB).
+    pub fn service_geoip_db(&self) -> std::path::PathBuf {
+        match &self.service_geoip_db {
+            Some(path) => std::path::PathBuf::from(path),
+            None => std::path::PathBuf::from(crate::service_log::DEFAULT_GEOIP_DB),
+        }
     }
 
     /// The PostgreSQL connection string used by tokio-postgres, built like
@@ -708,5 +774,95 @@ mod tests {
             config.db_connection_string(),
             "host='db server' port=5432 dbname=blitz user=u password=''"
         );
+    }
+
+    /// `[webservice] log_directory` / `BO_SERVICE_LOG_DIR` drive the usage-log
+    /// directory; env wins over the INI and an existing path is required.
+    #[test]
+    fn service_log_directory_from_ini_and_env() {
+        let dir = ini_dir("service-log");
+        let ini = dir.join("config.ini");
+        let log_dir = ini_dir("service-log-target");
+        std::fs::write(
+            &ini,
+            format!(
+                "[webservice]\nlog_directory = {}\n",
+                log_dir.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        // INI value is used.
+        let config = Config::from_env_with(|k| {
+            (k == "BO_CONFIG").then(|| ini.to_string_lossy().into_owned())
+        });
+        assert_eq!(
+            config.service_log_directory().as_deref(),
+            Some(log_dir.as_path())
+        );
+
+        // Env overrides the INI.
+        let other = ini_dir("service-log-env-target");
+        let config = Config::from_env_with(|k| match k {
+            "BO_CONFIG" => Some(ini.to_string_lossy().into_owned()),
+            "BO_SERVICE_LOG_DIR" => Some(other.to_string_lossy().into_owned()),
+            _ => None,
+        });
+        assert_eq!(
+            config.service_log_directory().as_deref(),
+            Some(other.as_path())
+        );
+
+        // An empty env value disables logging.
+        let config = Config::from_env_with(|k| match k {
+            "BO_CONFIG" => Some(ini.to_string_lossy().into_owned()),
+            "BO_SERVICE_LOG_DIR" => Some(String::new()),
+            _ => None,
+        });
+        assert_eq!(config.service_log_dir, None);
+
+        // A configured but non-existent directory is disabled.
+        let mut config = Config::from_env_with(|k| {
+            (k == "BO_CONFIG").then(|| ini.to_string_lossy().into_owned())
+        });
+        config.service_log_dir = Some("/nonexistent/bo-usage-log".into());
+        assert_eq!(config.service_log_directory(), None);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&log_dir).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
+    }
+
+    /// `[webservice] geoip_db` / `BO_SERVICE_GEOIP_DB` set the GeoIP database;
+    /// the default is the Python tool's path.
+    #[test]
+    fn service_geoip_db_from_ini_and_env() {
+        assert_eq!(
+            Config::default().service_geoip_db(),
+            std::path::PathBuf::from(crate::service_log::DEFAULT_GEOIP_DB)
+        );
+
+        let dir = ini_dir("service-geoip");
+        let ini = dir.join("config.ini");
+        std::fs::write(&ini, "[webservice]\ngeoip_db = /tmp/from-ini.mmdb\n").unwrap();
+        let config = Config::from_env_with(|k| {
+            (k == "BO_CONFIG").then(|| ini.to_string_lossy().into_owned())
+        });
+        assert_eq!(
+            config.service_geoip_db(),
+            std::path::PathBuf::from("/tmp/from-ini.mmdb")
+        );
+
+        let config = Config::from_env_with(|k| match k {
+            "BO_CONFIG" => Some(ini.to_string_lossy().into_owned()),
+            "BO_SERVICE_GEOIP_DB" => Some("/tmp/from-env.mmdb".into()),
+            _ => None,
+        });
+        assert_eq!(
+            config.service_geoip_db(),
+            std::path::PathBuf::from("/tmp/from-env.mmdb")
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
