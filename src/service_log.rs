@@ -43,15 +43,26 @@ use tokio::sync::mpsc;
 
 use crate::metrics::Metrics;
 
-/// Environment variable overriding the log directory (`BO_SERVICE_LOG_DIR`).
+/// Environment variable overriding the usage-log directory
+/// (`BO_SERVICE_SERVICELOG`); `BO_SERVICE_LOG_DIR` is accepted as an alias.
 /// An empty value disables usage logging.
-pub const LOG_DIR_ENV: &str = "BO_SERVICE_LOG_DIR";
+pub const LOG_DIR_ENV: &str = "BO_SERVICE_SERVICELOG";
+
+/// Alias of [`LOG_DIR_ENV`], kept for backwards compatibility.
+pub const LOG_DIR_ENV_ALIAS: &str = "BO_SERVICE_LOG_DIR";
 
 /// The Python service's default log directory (`cli/webservice.py`).
 pub const DEFAULT_LOG_DIRECTORY: &str = "/var/log/blitzortung";
 
-/// Default GeoIP database path (`--geoip-db` default of the Python tool).
+/// Default GeoIP database path (the Python tool's default).
 pub const DEFAULT_GEOIP_DB: &str = "/var/lib/GeoIP/GeoLite2-City.mmdb";
+
+/// Environment variable overriding the GeoIP database path (`BO_GEOIP_DB`);
+/// `BO_SERVICE_GEOIP_DB` is accepted as an alias.
+pub const GEOIP_DB_ENV: &str = "BO_GEOIP_DB";
+
+/// Alias of [`GEOIP_DB_ENV`], kept for backwards compatibility.
+pub const GEOIP_DB_ENV_ALIAS: &str = "BO_SERVICE_GEOIP_DB";
 
 /// Bounded queue capacity.  A full queue drops entries (with a single warning)
 /// instead of blocking the request path.
@@ -168,26 +179,6 @@ pub fn local_entry(
     }
 }
 
-/// Determine the effective log directory.
-///
-/// Mirrors the Python `cli/webservice.py`: a directory is only used when it
-/// exists, otherwise usage logging is disabled.  Precedence:
-///
-/// 1. an explicit `lookup(LOG_DIR_ENV)` value (empty string disables logging);
-/// 2. [`DEFAULT_LOG_DIRECTORY`] when it exists;
-/// 3. no logging.
-pub fn resolve_log_directory(lookup: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    if let Some(value) = lookup(LOG_DIR_ENV) {
-        if value.is_empty() {
-            return None;
-        }
-        let path = PathBuf::from(&value);
-        return path.is_dir().then_some(path);
-    }
-    let default = PathBuf::from(DEFAULT_LOG_DIRECTORY);
-    default.is_dir().then_some(default)
-}
-
 /// `user_agent_version`: parse `bo-android-<n>` from the user agent's first
 /// whitespace-separated word.  Returns `None` when it does not match.
 pub fn user_agent_version(user_agent: Option<&str>) -> Option<i64> {
@@ -204,17 +195,22 @@ pub fn user_agent_version(user_agent: Option<&str>) -> Option<i64> {
 /// Render one entry as the 13-field tab-separated servicelog row.
 ///
 /// Field order (shared with the Python `build_result_row`):
-/// `ts_seconds(%.4f)`, `region`, `grid_baselength`, `minute_offset`,
-/// `minute_length`, `count_threshold`, `-` (masked IP), `country|'-'`,
-/// `city|'-'`, `version|None`, `local_x|'-'`, `local_y|'-'`, `data_area|'-'`.
+/// `timestamp_us` (**int64 epoch microseconds, UTC**), `region`,
+/// `grid_baselength`, `minute_offset`, `minute_length`, `count_threshold`,
+/// `-` (masked IP), `country|'-'`, `city|'-'`, `version|None`, `local_x|'-'`,
+/// `local_y|'-'`, `data_area|'-'`.
+///
+/// The timestamp is the raw [`ServiceLogEntry::now_us`] value — exactly what
+/// the Python `current_data` entries recorded
+/// (`calendar.timegm(...) * 1_000_000 + microsecond`): an **int64 count of
+/// microseconds since the Unix epoch, in UTC**.  It is written as an integer
+/// (no `%.4f` seconds form) so no precision is lost.
 pub fn build_row(
     entry: &ServiceLogEntry,
     version: Option<i64>,
     country_code: Option<&str>,
     city: Option<&str>,
 ) -> String {
-    // Python: `timestamp_microseconds / 1000000` rendered with `%.4f`.
-    let ts_seconds = entry.now_us as f64 / 1_000_000.0;
     let (local_x, local_y, data_area) = match entry.local {
         Some(local) => (
             local.x.to_string(),
@@ -224,7 +220,8 @@ pub fn build_row(
         None => ("-".to_string(), "-".to_string(), "-".to_string()),
     };
     [
-        format!("{ts_seconds:.4}"),
+        // Epoch microseconds (int64), matching the Python tuple's first field.
+        entry.now_us.to_string(),
         entry.region.to_string(),
         entry.grid_baselength.to_string(),
         entry.minute_offset.to_string(),
@@ -574,7 +571,7 @@ mod tests {
         let row = build_row(&entry(0, None), Some(190), Some("DE"), Some("Berlin"));
         assert_eq!(
             row,
-            "1700000000.5000\t0\t10000\t0\t60\t0\t-\tDE\tBerlin\t190\t-\t-\t-"
+            "1700000000500000\t0\t10000\t0\t60\t0\t-\tDE\tBerlin\t190\t-\t-\t-"
         );
         assert_eq!(row.split('\t').count(), 13);
     }
@@ -596,7 +593,7 @@ mod tests {
         );
         assert_eq!(
             row,
-            "1700000000.5000\t-1\t10000\t0\t60\t0\t-\t-\t-\tNone\t101\t202\t5"
+            "1700000000500000\t-1\t10000\t0\t60\t0\t-\t-\t-\tNone\t101\t202\t5"
         );
     }
 
@@ -609,28 +606,6 @@ mod tests {
         assert_eq!(cells[1], "3");
         assert_eq!(cells[2], "2000");
         assert_eq!(cells[9], "42");
-    }
-
-    #[test]
-    fn resolve_log_directory_prefers_env_and_requires_existence() {
-        let dir = temp_dir("resolve");
-        let dir_str = dir.to_string_lossy().into_owned();
-        assert_eq!(
-            resolve_log_directory(|k| (k == LOG_DIR_ENV).then(|| dir_str.clone())).as_deref(),
-            Some(dir.as_path())
-        );
-        assert_eq!(
-            resolve_log_directory(|k| (k == LOG_DIR_ENV).then(|| "/nonexistent/x".to_string())),
-            None
-        );
-        assert_eq!(
-            resolve_log_directory(|k| (k == LOG_DIR_ENV).then(String::new)),
-            None
-        );
-        if !PathBuf::from(DEFAULT_LOG_DIRECTORY).is_dir() {
-            assert_eq!(resolve_log_directory(|_| None), None);
-        }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -679,7 +654,7 @@ mod tests {
         let content = std::fs::read_to_string(dir.join("servicelog_2023-11-14")).unwrap();
         assert_eq!(
             content,
-            "1700000000.5000\t0\t10000\t0\t60\t0\t-\t-\t-\t190\t-\t-\t-\n"
+            "1700000000500000\t0\t10000\t0\t60\t0\t-\t-\t-\t190\t-\t-\t-\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -700,7 +675,7 @@ mod tests {
         let day2 = std::fs::read_to_string(dir.join("servicelog_2023-11-15")).unwrap();
         assert_eq!(
             day2,
-            "1700006400.0000\t0\t10000\t0\t60\t0\t-\t-\t-\t190\t-\t-\t-\n"
+            "1700006400000000\t0\t10000\t0\t60\t0\t-\t-\t-\t190\t-\t-\t-\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

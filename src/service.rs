@@ -1543,6 +1543,10 @@ mod tests {
         assert_eq!(lines.len(), 1);
         let cells: Vec<&str> = lines[0].split('\t').collect();
         assert_eq!(cells.len(), 13);
+        // Field 1 is an int64 epoch-microsecond count (not seconds/float).
+        let ts_us: i64 = cells[0].parse().expect("timestamp must be an integer");
+        assert!(ts_us > 1_000_000_000_000_000, "got {ts_us}");
+        assert!(!cells[0].contains('.'), "timestamp must not be a float");
         assert_eq!(cells[1], "1"); // region
         assert_eq!(cells[2], "10000"); // pre-clamp baselength
         assert_eq!(cells[4], "30"); // minute_length
