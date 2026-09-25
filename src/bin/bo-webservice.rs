@@ -24,6 +24,7 @@ use clap::Parser;
 use blitzortung_srv::config::{Config, Protocol};
 use blitzortung_srv::executor::QueryExecutor;
 use blitzortung_srv::metrics::{Metrics, StatsDMetrics};
+use blitzortung_srv::service_log::UsageLogConsumer;
 use blitzortung_srv::{http, postgres::PostgresExecutor, service::Service, transport};
 
 /// Build the service metrics sink.
@@ -106,6 +107,37 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .enable_all()
         .build()?;
 
+    // Usage logging (`base.Blitzortung(log_directory=..)`): only when a log
+    // directory exists.  A missing directory disables it entirely (no queue, no
+    // consumer thread).  The consumer runs on its own OS thread because GeoIP
+    // and file appends are blocking.
+    let usage_consumer: Option<UsageLogConsumer>;
+    let usage_sender = match config.service_log_directory() {
+        Some(directory) => {
+            let geoip_db = config.service_geoip_db();
+            log::info!(
+                "writing per-request usage log to {} (geoip db {})",
+                directory.display(),
+                geoip_db.display()
+            );
+            // A separate sender-side metrics handle so the consumer can emit
+            // `access` counters under the service prefix.
+            let consumer_metrics = build_metrics(&config);
+            let (sender, consumer) = blitzortung_srv::service_log::spawn(
+                directory,
+                Some(geoip_db),
+                Some(consumer_metrics),
+            );
+            usage_consumer = Some(consumer);
+            Some(sender)
+        }
+        None => {
+            log::debug!("usage logging disabled (no log directory configured/existing)");
+            usage_consumer = None;
+            None
+        }
+    };
+
     runtime.block_on(async move {
         // Build the executor lazily: startup must NOT connect to the database,
         // so a missing/unreachable database cannot make the service exit.  Each
@@ -115,21 +147,75 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let metrics: Arc<dyn Metrics> = build_metrics(&config);
         let executor = PostgresExecutor::lazy(&config)?.with_metrics(metrics.clone());
         let executor: Arc<dyn QueryExecutor> = Arc::new(executor);
-        let service: Arc<Service<Arc<dyn Metrics>>> = Arc::new(Service::with_parts(
+        let mut service: Service<Arc<dyn Metrics>> = Service::with_parts(
             executor,
             blitzortung_srv::cache::ServiceCache::new(),
             metrics,
             std::collections::HashSet::new(),
-        ));
+        );
+        if let Some(sender) = usage_sender {
+            service = service.with_service_log(sender);
+        }
+        let service: Arc<Service<Arc<dyn Metrics>>> = Arc::new(service);
 
         let address = format!("0.0.0.0:{port}");
         log::info!("bo-service listening on {address} ({})", protocol.as_str());
-        match protocol {
-            Protocol::Http => http::run(&address, service).await?,
-            Protocol::Lsp => transport::run(&address, service).await?,
+        // Run until SIGINT/SIGTERM.  Shutdown drops the `Arc<Service>` (and with
+        // it the usage-log sender), so the consumer drains the remaining entries
+        // and flushes the file before we join it below.
+        let serve = async {
+            match protocol {
+                Protocol::Http => http::run(&address, service).await,
+                Protocol::Lsp => transport::run(&address, service).await,
+            }
+        };
+        tokio::select! {
+            result = serve => result?,
+            _ = shutdown_signal() => {
+                log::info!("shutdown signal received; draining usage log");
+            }
         }
-        Ok(())
-    })
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })?;
+
+    if let Some(consumer) = usage_consumer {
+        consumer.shutdown();
+    }
+    Ok(())
+}
+
+/// Resolve when the process receives `SIGINT`/`SIGTERM` (Ctrl-C, `systemctl
+/// stop`).  Falls back to never resolving when no signal handler can be
+/// installed, so the service simply keeps running.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(error) => {
+                log::warn!("could not install SIGTERM handler: {error}");
+                std::future::pending::<()>().await;
+                return;
+            }
+        };
+        let mut int = match signal(SignalKind::interrupt()) {
+            Ok(signal) => signal,
+            Err(error) => {
+                log::warn!("could not install SIGINT handler: {error}");
+                std::future::pending::<()>().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 #[cfg(test)]
