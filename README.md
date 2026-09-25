@@ -42,16 +42,26 @@ cargo run --bin bo-webservice
 
 # override the listening port (also: -p)
 cargo run --bin bo-webservice -- --port 8300
+
+# enable the usage log into a directory
+cargo run --bin bo-webservice -- --servicelog /var/log/blitzortung
+
+# override the GeoIP database used by the usage-log consumer
+cargo run --bin bo-webservice -- --servicelog /var/log/blitzortung \
+  --geoip-db /var/lib/GeoIP/GeoLite2-City.mmdb
 ```
 
-The `bo-webservice` binary accepts `-p, --port <PORT>` and `--protocol <http|lsp>`
-(plus `-h/--help` and `-V/--version`).  Both settings resolve with the
-precedence **CLI > env > config file > default**:
+The `bo-webservice` binary accepts `-p, --port <PORT>`, `--protocol <http|lsp>`,
+`--servicelog <DIR>` and `--geoip-db <PATH>` (plus `-h/--help` and
+`-V/--version`).  All settings resolve with the precedence
+**CLI > env > config file > default**:
 
 | Setting | CLI | env | INI (`[webservice]`) | default |
 | --- | --- | --- | --- | --- |
 | port | `--port`/`-p` | `BO_SERVICE_PORT` | `port` | `8080` |
 | protocol | `--protocol` | `BO_SERVICE_PROTOCOL` | `protocol` | `http` |
+| servicelog dir | `--servicelog` | `BO_SERVICE_SERVICELOG` | `servicelog` | disabled |
+| GeoIP db | `--geoip-db` | `BO_GEOIP_DB` | `geoip_db` | `/var/lib/GeoIP/GeoLite2-City.mmdb` |
 
 ### HTTP mode (default) and Nginx
 
@@ -142,6 +152,8 @@ Environment variables supplement/override the file (explicit env vars win):
 | `BO_STATSD_HOST` | `localhost` | StatsD receiver host |
 | `BO_STATSD_PORT` | `8125` | StatsD receiver UDP port |
 | `BO_STATSD_PREFIX` | `org.blitzortung.service` | StatsD metric name prefix |
+| `BO_SERVICE_SERVICELOG` | *(disabled)* | usage-log **directory** (empty disables it); alias `BO_SERVICE_LOG_DIR` |
+| `BO_GEOIP_DB` | `/var/lib/GeoIP/GeoLite2-City.mmdb` | GeoIP database for the usage-log consumer; alias `BO_SERVICE_GEOIP_DB` |
 
 The PostgreSQL schema is the normal blitzortung one; the service only reads
 `strikes` rows (the `strikes` table with a `geog` geography column, a
@@ -182,6 +194,140 @@ PID and priority, so `journalctl` does not show a duplicated
 `-p warning`, `-o verbose` or `-o json` to filter or inspect fields). Anywhere
 else (interactive shell, the macOS dev machine) logging falls back to the usual
 `env_logger` output on stderr.
+
+## Usage logging
+
+Besides the access lines above, the service keeps the Python `base.py`
+**per-request usage aggregation** (`Blitzortung.current_data`) — but instead of
+the Python two-step design (per-minute JSON reports plus the separate
+`bo-webservice-insertlog` tool), the transform runs **in-process**:
+
+1. every *successful* `get_strikes_grid` / `get_global_strikes_grid` /
+   `get_local_strikes_grid` call is pushed onto a **bounded queue** (blocked or
+   invalid requests are never recorded);
+2. a dedicated **background OS thread** consumes the queue, enriches each entry
+   (GeoIP country/city, client platform/version) and appends
+   one tab-separated line per request to `{log_dir}/servicelog_{YYYY-MM-DD}`.
+
+**No `*.json` files are produced or consumed.**
+
+### Enabling and location
+
+Servicelog writing is **off unless a directory is explicitly configured**.
+There is **no implicit default**: nothing is written (no consumer thread, no
+file opened, no warnings) when no directory is set, even if
+`/var/log/blitzortung` exists.  Enable it with the usual precedence
+**CLI > env > config**:
+
+1. `--servicelog <DIR>` (CLI);
+2. `BO_SERVICE_SERVICELOG` env var (alias `BO_SERVICE_LOG_DIR`);
+3. `[webservice] servicelog = /path` in `blitzortung.conf` (alias
+   `log_directory`);
+4. otherwise: **disabled quiet** (no queue and no consumer thread are created).
+
+`<path>` is a **directory** that will contain the daily
+`servicelog_YYYY-MM-DD` files (matching the Python layout).  If the path looks
+like a file — it has an extension, e.g. `/var/log/blitzortung/servicelog.log` —
+its parent directory is used (documented behaviour).
+
+An **explicitly configured** directory must exist **and be writable** by the
+service user; existence alone is not enough (`/var/log/blitzortung` often exists
+but is not writable).  An unusable explicit directory — missing, not writable,
+or not a directory — disables the consumer with a **single** `WARN` at startup
+naming the path and the reason.  Explicit-but-unusable is **warn-and-disable**,
+not a startup failure, so a bad value never prevents the service from running.
+An empty env value disables it quietly.  When enabled the service logs
+`writing per-request usage log to <dir>` at startup.
+
+### File format
+
+Rows are appended to `{log_dir}/servicelog_{YYYY-MM-DD}`, 10 logical fields (one
+line per request).  Tabs are shown as `\t` here; the file contains real tab
+characters:
+
+```text
+1700000000500000\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t3\t0
+```
+
+**City padding (tabs).** The `city` field is padded with **tab characters**, not
+spaces.  The field reserves four 8-column tab stops (`CITY_TABS = 4`,
+`TAB_STOP = 8`): `pad_city(city)` emits four tabs for a city shorter than one
+tab block and one tab less for every further full block, never below a single
+separator tab.  A city that fits the reservation therefore pushes `platform` to
+the same column, while a longer city is never truncated and simply pushes the
+following columns further right.
+
+> **Consequence:** because the padding is made of tabs, splitting a line on
+> `'\t'` yields **empty fields**.  The line therefore no longer has a fixed
+> 10-element index layout.  Consumers must split on tabs and **ignore empty
+> segments** (the 10 logical fields are still all present and in order), or treat
+> the column positions as display-only.
+
+| # | Logical field | Notes |
+| --- | --- | --- |
+| 1 | `timestamp_us` | request time as an **int64 count of microseconds since the Unix epoch (UTC)** — the exact `current_data` value, no precision loss |
+| 2 | country | GeoIP ISO code, else `-` |
+| 3 | city | GeoIP English city name, else `-`; always followed by two tabs (never truncated) |
+| 4 | platform | `A` for the Android client, else `-` |
+| 5 | version | `bo-android-<n>` client version, else `None` |
+| 6 | `minute_offset` | |
+| 7 | `minute_length` | |
+| 8 | `grid_baselength` | the **pre-clamp** `original_grid_base_length` |
+| 9 | `region` | `0` global, clamped region for the region grid, `-1` local |
+| 10 | `count_threshold` | |
+
+Neither the raw client IP nor the local `x`/`y`/`data_area` values are written;
+a local request is distinguishable only by `region == -1`.  The `platform`
+marker recognises the Blitzortung Android client (`A`); a missing or non-Android
+user agent yields `-` and its version stays `None`.
+
+The file is opened in **append** mode and stays open across days; when an
+entry's UTC date changes (e.g. the first request after `00:00` UTC) the writer
+flushes and switches to the new day's file, so one process run can span many
+days.
+
+### GeoIP
+
+Country/city come from a pure-Rust MaxMind DB reader (`maxminddb`).  The default
+database is `/var/lib/GeoIP/GeoLite2-City.mmdb`, overridable with
+`--geoip-db <PATH>` / `[webservice] geoip_db` / `BO_GEOIP_DB` (alias
+`BO_SERVICE_GEOIP_DB`).  GeoIP is **best-effort**: a
+missing or unreadable database, an unparseable address, or an address that is
+not found all yield `-` and never fail the consumer (the Python tool aborts when
+the database is missing).
+
+### Backpressure
+
+The queue is **bounded**.  The request path uses `try_send`: when the queue is
+full the entry is **dropped** and a single `WARN` is logged (not one per drop).
+Requests therefore never block, fail or hang because of usage logging; under
+sustained overload some usage rows are lost instead of slowing the service down.
+
+### Write failures
+
+A directory that becomes unwritable at runtime (permissions change, disk full,
+...) does **not** produce one error per row.  The first write failure is logged
+once at `WARN`; then writing is disabled for the rest of that UTC day (further
+rows are silently dropped) with a single summary at shutdown.  The next UTC day
+clears the state and retries once.  Requests are never affected.
+
+### Shutdown and flush
+
+On `SIGINT`/`SIGTERM` the service stops accepting requests, the usage-log sender
+is dropped so the consumer **drains the remaining queued entries and flushes the
+file**, and the process then joins the consumer thread before exiting.  Entries
+queued at shutdown are not lost.  (A hard `SIGKILL`, power loss, or a process
+crash cannot be handled — the OS reclaims the process before the drain runs.)
+
+### Metrics (optional)
+
+When the service's StatsD sender is configured, the consumer also emits the
+Python tool's `access,<tags>` counter under the `org.blitzortung.service`
+prefix:
+
+```text
+org.blitzortung.service.access,version=190,region=3,minutes=60,offset=0,grid=10000,data_area=101x202-5,country=DE:1|c
+```
 
 ## Metrics
 
@@ -362,6 +508,8 @@ histogram bins (empty when `minute_length <= 10`).
   to `$1..$N` positional parameters
 - `service` — the JSON-RPC method handlers with Python-identical validation,
   response shapes, caching and metrics reporting
+- `service_log` — the in-process usage-log pipeline: the bounded queue, the
+  background consumer thread, row formatting and best-effort GeoIP
 - `jsonrpc` — JSON-RPC parsing/dispatch and the pre-1.0 / v1 / v2 envelope
   dialects
 - `metrics` — the `Metrics` trait, the service and importer metric helpers, the
@@ -504,3 +652,28 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   `cli/db.py` grid path only works against a mocked result). The Rust port
   builds a `data.GridData` directly and renders the arcgrid/ascii map as
   `cli/db.py` intends.
+- **Usage logging runs in-process.** Instead of the Python two-step design
+  (per-minute JSON reports written by `base.py` plus the `bo-webservice-insertlog`
+  follow-up tool), the Rust port transforms and appends rows on a background
+  thread fed by a bounded queue.  There are no intermediate JSON files and no
+  standalone tool to schedule.  The row is a 10-column format: the timestamp is
+  an int64 epoch-microsecond value (not `%.4f` seconds), the masked client-IP
+  column is dropped, a client **platform** marker (`A` for Android) is added,
+  and the local `x`/`y`/`data_area` columns are removed (a local request is
+identified by `region == -1`).  The `city` field is padded with tabs (four
+8-column tab stops, one tab less per full block, at least one) so the following
+columns line up (never truncated); as a result a naive tab split yields empty
+segments that consumers must ignore.
+Backpressure policy: a full queue drops entries with a single `WARN` (requests
+never block).  The servicelog directory must be writable beyond merely existing
+(a common `/var/log/blitzortung` on a locked down server), and a runtime write
+failure is reported once and then suppressed for the rest of the day instead
+of erroring per row.  GeoIP is best-effort (missing/unreadable db or not-found
+address -> `-`), where Python aborts on a missing db.
+- **Usage-log directory and GeoIP path.** The Python service hard-codes
+  `/var/log/blitzortung` (used only when it exists).  The Rust port instead
+  requires an explicit directory via `--servicelog` / `BO_SERVICE_SERVICELOG` /
+  `[webservice] servicelog` (aliases `BO_SERVICE_LOG_DIR` / `log_directory`) and
+  is **disabled when nothing is configured** — there is no implicit
+  `/var/log/blitzortung` fallback.  The GeoIP path is `--geoip-db` /
+  `BO_GEOIP_DB` / `[webservice] geoip_db`, with precedence CLI > env > config.

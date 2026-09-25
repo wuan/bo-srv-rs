@@ -20,6 +20,7 @@ use crate::executor::{QueryExecutor, Row};
 use crate::geom::{Grid, GridFactory, LocalGrid};
 use crate::metrics::Metrics;
 use crate::query::{global_grid_query, grid_query, histogram_query, TimeInterval};
+use crate::service_log::{epoch_microseconds, UsageLogSender};
 
 pub const SRID: i64 = 4326;
 /// `JSON_CONTENT_TYPE` in `base.py`.
@@ -191,6 +192,9 @@ pub struct Service<M: Metrics = crate::metrics::NoopMetrics> {
     /// `check_count`: a monotonically increasing counter for `jsonrpc_check`.
     check_count: AtomicI64,
     minute_constraints: TimeConstraint,
+    /// Per-request usage logging.  `None` disables the aggregation entirely
+    /// (no queue, no consumer thread, no file writes).
+    service_log: Option<UsageLogSender>,
 }
 
 impl<M: Metrics> Service<M> {
@@ -207,6 +211,27 @@ impl<M: Metrics> Service<M> {
             forbidden_ips,
             check_count: AtomicI64::new(0),
             minute_constraints: TimeConstraint::new(DEFAULT_MINUTE_LENGTH, MAX_MINUTES_PER_DAY),
+            service_log: None,
+        }
+    }
+
+    /// Attach the usage-log pipeline (`base.Blitzortung(log_directory=..)`).
+    /// Consumes `self` for the builder chain used by the `bo-webservice` bin.
+    pub fn with_service_log(mut self, service_log: UsageLogSender) -> Self {
+        self.service_log = Some(service_log);
+        self
+    }
+
+    /// Record one successful grid request
+    /// (`base.current_data['get_strikes_grid'].append(...)`).
+    ///
+    /// Non-blocking: the entry is pushed onto the bounded queue with
+    /// `try_send`.  A missing handle silently does nothing; a full queue drops
+    /// the entry (the consumer logs a single warning), so usage logging can
+    /// never change a response, block or abort a request.
+    fn record_usage(&self, entry: crate::service_log::ServiceLogEntry) {
+        if let Some(log) = &self.service_log {
+            log.record(entry);
         }
     }
 
@@ -610,7 +635,20 @@ impl<M: Metrics> Service<M> {
             .map_err(service_error)?;
         let _ = request.fix_bad_accept_header();
 
-        let _ = (original_grid_base_length, minute_offset);
+        // `base.jsonrpc_get_strikes_grid`: record the request (pre-clamp
+        // `original_grid_base_length`, clamped `region`).
+        let now = Utc::now();
+        self.record_usage(crate::service_log::region_entry(
+            epoch_microseconds(now),
+            minute_length,
+            original_grid_base_length,
+            minute_offset,
+            region,
+            count_threshold,
+            client.clone(),
+            request.user_agent.clone(),
+        ));
+
         self.metrics.for_strikes(
             minute_length,
             region,
@@ -705,7 +743,18 @@ impl<M: Metrics> Service<M> {
             .map_err(service_error)?;
         let _ = request.fix_bad_accept_header();
 
-        let _ = (original_grid_base_length, minute_offset);
+        // `base.jsonrpc_get_global_strikes_grid`: region 0, pre-clamp baselength.
+        let now = Utc::now();
+        self.record_usage(crate::service_log::global_entry(
+            epoch_microseconds(now),
+            minute_length,
+            original_grid_base_length,
+            minute_offset,
+            count_threshold,
+            client.clone(),
+            request.user_agent.clone(),
+        ));
+
         self.metrics.for_global_strikes(
             minute_length,
             self.cache.global_strikes(minute_offset).get_ratio(),
@@ -792,7 +841,21 @@ impl<M: Metrics> Service<M> {
             .await
             .map_err(service_error)?;
 
-        let _ = (original_grid_base_length, minute_offset);
+        // `base.jsonrpc_get_local_strikes_grid`: region -1 plus x/y/data_area.
+        let now = Utc::now();
+        self.record_usage(crate::service_log::local_entry(
+            epoch_microseconds(now),
+            minute_length,
+            original_grid_base_length,
+            minute_offset,
+            count_threshold,
+            client.clone(),
+            request.user_agent.clone(),
+            x,
+            y,
+            data_area,
+        ));
+
         self.metrics.for_local_strikes(
             minute_length,
             data_area,
@@ -1414,6 +1477,230 @@ mod tests {
                 "strikes_grid.cache_hits:0.5|g".to_string(),
             ]
         );
+    }
+
+    fn usage_log_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("bo-svc-usage-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn read_servicelog(dir: &std::path::Path, day: &str) -> String {
+        std::fs::read_to_string(dir.join(format!("servicelog_{day}"))).unwrap_or_default()
+    }
+
+    fn today() -> String {
+        crate::service_log::entry_day(crate::service_log::epoch_microseconds(Utc::now()))
+    }
+
+    /// Recording a region-grid request must not change the response and must
+    /// write the Python servicelog row (pre-clamp baselength, clamped region).
+    #[tokio::test]
+    async fn jsonrpc_get_strikes_grid_records_usage_entry() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows(
+            "TRUNC((ST_X",
+            vec![Row::new(vec![
+                DBValue::Int(0),
+                DBValue::Int(1),
+                DBValue::Int(4),
+                DBValue::Timestamp(ts(1_699_999_500)),
+            ])],
+        );
+        mock.add_rows("-extract( epoch", vec![]);
+        let log_dir = usage_log_dir("region");
+        let (tx, consumer) = crate::service_log::spawn(log_dir.clone(), None, None);
+
+        let metrics = crate::metrics::RecordingMetrics::new();
+        let service: Service<crate::metrics::RecordingMetrics> =
+            Service::with_parts(Arc::new(mock), ServiceCache::new(), metrics, HashSet::new())
+                .with_service_log(tx);
+        let mut req = req_with("5.6.7.8");
+
+        let response = service
+            .jsonrpc_get_strikes_grid(
+                &mut req,
+                &json!(30),
+                &json!(10_000),
+                &json!(0),
+                &json!(1),
+                &json!(0),
+            )
+            .await
+            .unwrap();
+        // The response is unaffected by recording (still the grid object).
+        assert!(response.get("r").is_some());
+
+        // Drop the service (releasing the sender) and join the consumer.
+        drop(service);
+        consumer.shutdown();
+
+        let lines: Vec<String> = read_servicelog(&log_dir, &today())
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(lines.len(), 1);
+        // City padding is made of tabs, so a naive split yields empty
+        // segments; ignore them to recover the 10 logical fields.
+        let logical: Vec<&str> = lines[0].split('\t').filter(|s| !s.is_empty()).collect();
+        assert_eq!(logical.len(), 10);
+        // Field 1 is an int64 epoch-microsecond count (not seconds/float).
+        let ts_us: i64 = logical[0].parse().expect("timestamp must be an integer");
+        assert!(ts_us > 1_000_000_000_000_000, "got {ts_us}");
+        assert!(!logical[0].contains('.'), "timestamp must not be a float");
+        assert_eq!(logical[1], "-"); // country (no geoip db)
+        assert_eq!(logical[2], "-"); // city
+        assert_eq!(logical[3], "A"); // platform (bo-android user agent)
+        assert_eq!(logical[4], "190"); // user agent version
+        assert_eq!(logical[6], "30"); // minute_length
+        assert_eq!(logical[7], "10000"); // pre-clamp grid_baselength
+        assert_eq!(logical[8], "1"); // region
+                                     // The raw client IP is never written.
+        assert!(!lines[0].contains("5.6.7.8"));
+
+        let _ = std::fs::remove_dir_all(&log_dir);
+    }
+
+    /// A local-grid request writes the 10-field row with region `-1` (the local
+    /// x/y/data_area are no longer part of the line).
+    #[tokio::test]
+    async fn jsonrpc_get_local_strikes_grid_records_usage_entry() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows("TRUNC((ST_X", vec![]);
+        mock.add_rows("-extract( epoch", vec![]);
+        let log_dir = usage_log_dir("local");
+        let (tx, consumer) = crate::service_log::spawn(log_dir.clone(), None, None);
+        let metrics = crate::metrics::RecordingMetrics::new();
+        let service: Service<crate::metrics::RecordingMetrics> =
+            Service::with_parts(Arc::new(mock), ServiceCache::new(), metrics, HashSet::new())
+                .with_service_log(tx);
+        let mut req = req_with("5.6.7.8");
+
+        let _ = service
+            .jsonrpc_get_local_strikes_grid(
+                &mut req,
+                &json!(101),
+                &json!(202),
+                &json!(10_000),
+                &json!(30),
+                &json!(0),
+                &json!(0),
+                &json!(5),
+            )
+            .await
+            .unwrap();
+
+        drop(service);
+        consumer.shutdown();
+        let content = read_servicelog(&log_dir, &today());
+        let line = content.lines().next().unwrap();
+        let logical: Vec<&str> = line.split('\t').filter(|s| !s.is_empty()).collect();
+        assert_eq!(logical.len(), 10);
+        assert_eq!(logical[8], "-1"); // region -1 for local
+                                      // Local coordinates are no longer written.
+        assert!(!line.contains("101"));
+        assert!(!line.contains("202"));
+        assert!(!logical.contains(&"5"));
+
+        let _ = std::fs::remove_dir_all(&log_dir);
+    }
+
+    /// A global-grid request writes region `0`.
+    #[tokio::test]
+    async fn jsonrpc_get_global_strikes_grid_records_usage_entry() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows("ROUND((ST_X", vec![]);
+        mock.add_rows("-extract( epoch", vec![]);
+        let log_dir = usage_log_dir("global");
+        let (tx, consumer) = crate::service_log::spawn(log_dir.clone(), None, None);
+        let metrics = crate::metrics::RecordingMetrics::new();
+        let service: Service<crate::metrics::RecordingMetrics> =
+            Service::with_parts(Arc::new(mock), ServiceCache::new(), metrics, HashSet::new())
+                .with_service_log(tx);
+        let mut req = req_with("5.6.7.8");
+
+        let _ = service
+            .jsonrpc_get_global_strikes_grid(
+                &mut req,
+                &json!(30),
+                &json!(25_000),
+                &json!(0),
+                &json!(0),
+            )
+            .await
+            .unwrap();
+
+        drop(service);
+        consumer.shutdown();
+        let content = read_servicelog(&log_dir, &today());
+        let logical: Vec<&str> = content
+            .lines()
+            .next()
+            .unwrap()
+            .split('\t')
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(logical.len(), 10);
+        assert_eq!(logical[8], "0"); // region 0 for global
+
+        let _ = std::fs::remove_dir_all(&log_dir);
+    }
+
+    /// A blocked request is not recorded (`base.py` returns before the append).
+    #[tokio::test]
+    async fn blocked_requests_are_not_recorded() {
+        let log_dir = usage_log_dir("blocked");
+        let (tx, consumer) = crate::service_log::spawn(log_dir.clone(), None, None);
+        let metrics = crate::metrics::RecordingMetrics::new();
+        let service: Service<crate::metrics::RecordingMetrics> = Service::with_parts(
+            Arc::new(MockExecutor::new()),
+            ServiceCache::new(),
+            metrics,
+            HashSet::new(),
+        )
+        .with_service_log(tx);
+        // No user agent -> forbidden.
+        let mut req = Request::default();
+        let _ = service
+            .jsonrpc_get_strikes_grid(
+                &mut req,
+                &json!(60),
+                &json!(10_000),
+                &json!(0),
+                &json!(1),
+                &json!(0),
+            )
+            .await
+            .unwrap();
+        drop(service);
+        consumer.shutdown();
+        // No servicelog file is created for a blocked request.
+        let entries: Vec<_> = std::fs::read_dir(&log_dir).unwrap().flatten().collect();
+        assert!(entries.is_empty(), "no servicelog file expected");
+        let _ = std::fs::remove_dir_all(&log_dir);
+    }
+
+    /// Requests succeed with usage logging disabled (no consumer, no queue).
+    #[tokio::test]
+    async fn requests_succeed_without_usage_logging() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows("TRUNC((ST_X", vec![]);
+        mock.add_rows("-extract( epoch", vec![]);
+        let service = Service::new(Arc::new(mock));
+        let mut req = req_with("5.6.7.8");
+        let response = service
+            .jsonrpc_get_strikes_grid(
+                &mut req,
+                &json!(30),
+                &json!(10_000),
+                &json!(0),
+                &json!(1),
+                &json!(0),
+            )
+            .await
+            .unwrap();
+        assert!(response.get("r").is_some());
     }
 
     #[tokio::test]

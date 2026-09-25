@@ -68,6 +68,11 @@ rand = "0.10"
 flate2 = "1"
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 
+# Pure-Rust MaxMind DB reader for the in-process usage-log consumer's GeoIP
+# lookup (replaces the Python `geoip2` reader).  Lookups are best-effort: a
+# missing or unreadable database, or an address that is not present, yields `-`.
+maxminddb = "0.32"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 # Ephemeral PostGIS container for the database integration suite. The
@@ -76,6 +81,9 @@ tokio = { version = "1", features = ["full"] }
 # own `runtime.block_on`).
 testcontainers = { version = "0.27", features = ["blocking"] }
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
+# Builds a tiny synthetic MaxMind DB in the tests so the usage-log GeoIP
+# success path can be exercised without shipping a real GeoLite2 database.
+maxminddb-writer = "0.1"
 
 # Native systemd journal logging: when the service runs under systemd its
 # stdout/stderr is captured by journald, which owns the timestamp/PID/priority.

@@ -3,3 +3,7 @@ config.yml
 
 .envrc
 /.idea/
+
+# Local coverage reports (cargo tarpaulin / llvm-cov).
+/cobertura.xml
+/tarpaulin-report.json
