@@ -598,6 +598,58 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn distinct_keys_are_cached_independently() {
+        let cache = ObjectCache::new(60, None, None);
+        let now = 1_000.0;
+        assert_eq!(
+            cache.get_at("a", || async { Ok(json!(1)) }, now).await,
+            json!(1)
+        );
+        assert_eq!(
+            cache.get_at("b", || async { Ok(json!(2)) }, now).await,
+            json!(2)
+        );
+        assert_eq!(cache.get_size(), 2);
+        // both are hits, served from their own slot
+        assert_eq!(
+            cache.get_at("a", || async { Ok(json!(99)) }, now).await,
+            json!(1)
+        );
+        assert_eq!(
+            cache.get_at("b", || async { Ok(json!(99)) }, now).await,
+            json!(2)
+        );
+        // 2 hits out of 4 gets total
+        assert_eq!(cache.get_ratio(), 0.5);
+    }
+
+    #[tokio::test]
+    async fn clear_drops_entries_and_resets_counters() {
+        let cache = ObjectCache::new(60, None, None);
+        assert_eq!(
+            cache.get("k", || async { Ok(json!(1)) }).await,
+            json!(1)
+        );
+        assert_eq!(cache.get_size(), 1);
+
+        cache.clear();
+
+        assert_eq!(cache.get_size(), 0);
+        assert_eq!(cache.get_ratio(), 0.0);
+        // after a clear the value is recomputed, confirming counters/entries
+        // were actually reset
+        assert_eq!(
+            cache.get("k", || async { Ok(json!(2)) }).await,
+            json!(2)
+        );
+    }
+
+    #[test]
+    fn get_ratio_is_zero_before_any_get() {
+        assert_eq!(ObjectCache::new(60, None, None).get_ratio(), 0.0);
+    }
+
     #[test]
     fn service_cache_selects_by_minute_offset() {
         let cache = ServiceCache::new();
@@ -606,6 +658,30 @@ mod tests {
         assert_eq!(cache.local_strikes(0).get_time_to_live(), 20);
         assert_eq!(cache.local_strikes(-5).get_time_to_live(), 60);
         assert_eq!(cache.global_strikes(0).get_time_to_live(), 20);
+        assert_eq!(cache.global_strikes(-5).get_time_to_live(), 60);
         assert_eq!(cache.histogram.get_time_to_live(), 60);
+    }
+
+    #[tokio::test]
+    async fn local_caches_are_size_capped() {
+        let cache = ServiceCache::new_with_cleanup(None);
+        let current = cache.local_strikes(0);
+        let history = cache.local_strikes(-5);
+
+        for i in 0..ServiceCache::LOCAL_CACHE_SIZE_CURRENT + 5 {
+            let key = format!("current-{i}");
+            current
+                .get_at(&key, || async { Ok(json!(i)) }, 1_000.0)
+                .await;
+        }
+        assert_eq!(current.get_size(), ServiceCache::LOCAL_CACHE_SIZE_CURRENT);
+
+        for i in 0..ServiceCache::LOCAL_CACHE_SIZE_HISTORY + 5 {
+            let key = format!("history-{i}");
+            history
+                .get_at(&key, || async { Ok(json!(i)) }, 1_000.0)
+                .await;
+        }
+        assert_eq!(history.get_size(), ServiceCache::LOCAL_CACHE_SIZE_HISTORY);
     }
 }
