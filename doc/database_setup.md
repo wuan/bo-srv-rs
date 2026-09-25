@@ -327,23 +327,33 @@ version. The target is PostgreSQL 18 (`postgresql-18-cron`).
 #### Scheduling the maintenance jobs
 
 Schedule the partition functions (adjust `ahead`/`keep` if the ingest delay
-changes). Jobs run as the role that owns `cron.database_name` by default, so
-either schedule them from a role that can execute the functions, or name the
-target database explicitly with `cron.schedule_in_database`:
+changes). The `cron.*` objects live only in `cron.database_name` (`postgres`),
+but the functions are defined in the `blitzortung` database, so jobs must name
+that target database explicitly with `cron.schedule_in_database`. Its signature
+is `(job_name, schedule, command, database, username DEFAULT NULL, active
+DEFAULT true)`; provide `username` if the default (the role running the
+`cron.schedule_in_database` call) cannot connect to `blitzortung` or lacks
+`EXECUTE` on the functions:
 
 ```sql
 -- Keep a one-week lookahead; run hourly so a missed run cannot exhaust it.
-SELECT cron.schedule(
+SELECT cron.schedule_in_database(
     'strikes-ensure-partitions',
     '0 * * * *',
-    $$SELECT strikes_ensure_partitions(7)$$);
+    'SELECT strikes_ensure_partitions(7)',
+    'blitzortung');
 
 -- Drop old data once a day, keeping the two-day backfill margin.
-SELECT cron.schedule(
+SELECT cron.schedule_in_database(
     'strikes-drop-old-partitions',
     '30 0 * * *',
-    $$SELECT strikes_drop_old_partitions('2 days')$$);
+    $$SELECT strikes_drop_old_partitions('2 days')$$,
+    'blitzortung');
 ```
+
+When a job fires the launcher opens a session to the named database and runs
+`command` there, so the functions resolve normally; the extension itself still
+has to be created in `postgres`.
 
 Verify the schedule and inspect recent runs:
 
