@@ -61,8 +61,9 @@ clap = { version = "4", features = ["derive"] }
 # CLI data import tools (bo-import / bo-update): blocking HTTP with basic auth.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 # bo-import-websocket: async websocket client.
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 rand = "0.10"
+
 # gzip response compression in the HTTP transport (txjsonrpc `handle_compression`).
 flate2 = "1"
 
