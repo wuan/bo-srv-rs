@@ -194,7 +194,7 @@ async fn run_once(
     // on_open: send the initialization message and start the keepalive.
     log::info!("{INITIALIZATION_MESSAGE}");
     write
-        .send(Message::Text(INITIALIZATION_MESSAGE.to_string()))
+        .send(Message::Text(INITIALIZATION_MESSAGE.to_string().into()))
         .await?;
 
     // Keepalive: send `{}` every 30s (dropped when the socket closes).
@@ -207,7 +207,7 @@ async fn run_once(
         interval.tick().await;
         loop {
             interval.tick().await;
-            if write.send(Message::Text("{}".to_string())).await.is_err() {
+            if write.send(Message::Text("{}".to_string().into())).await.is_err() {
                 log::info!("refresher exiting");
                 return;
             }
