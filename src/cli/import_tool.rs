@@ -22,6 +22,11 @@ pub const REGIONS: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 10, 18, 19];
 pub const RETRY_COUNT: usize = 5;
 /// Wall-clock budget per region attempt (`stopit.SignalTimeout(300)`).
 pub const REGION_TIMEOUT_SECONDS: u64 = 300;
+/// Per-request HTTP timeout used by `bo-import`.
+///
+/// Kept short so an unresponsive (typically missing) log file cannot stall a
+/// region for long; the provider skips such files and continues.
+pub const REQUEST_TIMEOUT_SECONDS: u64 = 10;
 /// `cli/imprt.py` batch size for `insert_many`.
 pub const STRIKE_BATCH_SIZE: usize = 1000;
 /// `cli/imprt.py` commit grouping size.
@@ -311,6 +316,15 @@ mod tests {
         )
     }
 
+    /// Transport that reports every requested log file as missing.
+    struct MissingTransport;
+
+    impl Transport for MissingTransport {
+        fn read_lines(&self, _source: &str) -> Result<Vec<String>, TransportError> {
+            Err(TransportError::NotFound)
+        }
+    }
+
     fn executor_with_latest(latest: Option<(DateTime<Utc>, i64)>) -> MockExecutor {
         let mut mock = MockExecutor::new();
         match latest {
@@ -383,6 +397,20 @@ mod tests {
             .unwrap();
         assert_eq!(count, 0);
         assert_eq!(mock.commit_count(), 0);
+        let _ = &mut mock;
+    }
+
+    #[tokio::test]
+    async fn import_strikes_skips_missing_files_without_retry() {
+        let mut mock = executor_with_latest(None);
+        let transport = MissingTransport;
+        let (strikes, errors) =
+            import_strikes(&mock, &transport, &[1], None, true, false, &NoopMetrics).await;
+        assert_eq!(strikes, 0);
+        assert_eq!(errors, 0);
+        // A missing file must not restart the region: only the latest-time
+        // lookup runs, no retry (which would query it `RETRY_COUNT` times).
+        assert_eq!(mock.call_count(), 1);
         let _ = &mut mock;
     }
 

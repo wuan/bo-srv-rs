@@ -478,7 +478,11 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   the import.
 - **Per-region timeout is cooperative.** Python wraps each `bo-import` region
   in `stopit.SignalTimeout(300)`; the Rust port checks the deadline between log
-  downloads and uses a 30 second per-request HTTP timeout.
+  downloads and uses a 10 second per-request HTTP timeout.
+- **Missing log files are skipped.** A log file that is not on the server (HTTP
+  404) or that the server never answers (request timeout) is logged at `DEBUG`
+  and skipped; it does not abort the region, so the importer no longer restarts
+  a region from the beginning because of a single missing ten-minute log.
 - **Write transactions.** `QueryExecutor::execute` runs each statement in its
   own implicit transaction (tokio-postgres autocommit); `commit()`/`rollback()`
   are accepted for compatibility (`insert_many` is already a single

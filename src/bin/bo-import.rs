@@ -39,10 +39,13 @@ fn main() {
         ),
     };
 
-    // Per-file HTTP timeout: the task pins this at 30 seconds (the Python
-    // `HttpFileTransport` default is 60s); the overall per-region budget is
+    // Per-file HTTP timeout: kept short so an unresponsive (typically
+    // missing) log file is skipped quickly; the overall per-region budget is
     // enforced cooperatively in `import_strikes`.
-    let transport = HttpFileTransport::with_timeout(&config, std::time::Duration::from_secs(30));
+    let transport = HttpFileTransport::with_timeout(
+        &config,
+        std::time::Duration::from_secs(import_tool::REQUEST_TIMEOUT_SECONDS),
+    );
     let (strikes, errors) = runtime.block_on(import_tool::import_strikes(
         &executor,
         &transport,

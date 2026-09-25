@@ -20,6 +20,27 @@ pub trait Transport {
 pub enum TransportError {
     Request(reqwest::Error),
     Io(std::io::Error),
+    /// The requested log file is not available on the server (HTTP 404).
+    NotFound,
+}
+
+impl TransportError {
+    /// Whether this error merely means the requested log file is not present on
+    /// the server, as opposed to a genuine transport failure.
+    ///
+    /// A missing file is reported as an HTTP 404, but the server can also leave
+    /// the request unanswered until the client times out; both are treated as
+    /// "missing" so the importer can skip the file instead of retrying the whole
+    /// region.
+    pub fn is_missing(&self) -> bool {
+        match self {
+            TransportError::NotFound => true,
+            TransportError::Request(error) => {
+                error.is_timeout() || error.status() == Some(reqwest::StatusCode::NOT_FOUND)
+            }
+            TransportError::Io(_) => false,
+        }
+    }
 }
 
 impl std::fmt::Display for TransportError {
@@ -27,6 +48,7 @@ impl std::fmt::Display for TransportError {
         match self {
             TransportError::Request(e) => write!(f, "{e}"),
             TransportError::Io(e) => write!(f, "{e}"),
+            TransportError::NotFound => write!(f, "file not found"),
         }
     }
 }
@@ -97,6 +119,9 @@ impl Transport for HttpFileTransport {
                 source,
                 timer.lap()
             );
+            if response.status() == StatusCode::NOT_FOUND {
+                return Err(TransportError::NotFound);
+            }
             return Ok(Vec::new());
         }
         log::debug!("get '{}' ({:.3}s)", source, timer.lap());
@@ -178,6 +203,16 @@ impl BlitzortungDataPathGenerator {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn not_found_is_missing() {
+        assert!(TransportError::NotFound.is_missing());
+        assert!(!TransportError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "refused"
+        ))
+        .is_missing());
+    }
 
     #[test]
     fn data_path_defaults() {

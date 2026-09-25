@@ -47,8 +47,9 @@ impl<'a, T: Transport> StrikesBlitzortungDataProvider<'a, T> {
     /// region's log and yield strikes with a valid timestamp newer than
     /// `latest_strike`.
     ///
-    /// Parse errors are logged and skipped (`builder.BuilderError`); transport
-    /// errors abort the current region.
+    /// Parse errors are logged and skipped (`builder.BuilderError`); a log file
+    /// that is missing on the server (404 or request timeout) is skipped, while
+    /// other transport errors abort the current region.
     pub fn get_strikes_since(
         &self,
         latest_strike: Option<DateTime<Utc>>,
@@ -86,10 +87,14 @@ impl<'a, T: Transport> StrikesBlitzortungDataProvider<'a, T> {
 
             let mut strike_count = 0usize;
             let timer = Timer::new();
-            let lines = self
-                .transport
-                .read_lines(&target_url)
-                .map_err(ImportError::Transport)?;
+            let lines = match self.transport.read_lines(&target_url) {
+                Ok(lines) => lines,
+                Err(error) if error.is_missing() => {
+                    log::debug!("missing log file {target_url}: {error}, skipping");
+                    continue;
+                }
+                Err(error) => return Err(ImportError::Transport(error)),
+            };
             for line in lines {
                 match build_strike_from_line(&line) {
                     Ok(strike) => {
@@ -150,6 +155,50 @@ mod tests {
         fn read_lines(&self, _source: &str) -> Result<Vec<String>, TransportError> {
             Ok(self.outputs.lock().unwrap().pop().unwrap_or_default())
         }
+    }
+
+    /// Transport whose first call reports a missing file, whose second call
+    /// serves `lines`, and whose later calls are empty.
+    struct MissingThenOnceTransport {
+        state: Mutex<u8>,
+        lines: Vec<String>,
+    }
+
+    impl Transport for MissingThenOnceTransport {
+        fn read_lines(&self, _source: &str) -> Result<Vec<String>, TransportError> {
+            let mut state = self.state.lock().unwrap();
+            match *state {
+                0 => {
+                    *state = 1;
+                    Err(TransportError::NotFound)
+                }
+                1 => {
+                    *state = 2;
+                    Ok(self.lines.clone())
+                }
+                _ => Ok(Vec::new()),
+            }
+        }
+    }
+
+    #[test]
+    fn provider_skips_missing_files_and_continues() {
+        let now = Utc::now();
+        let line = format!(
+            "{}789 pos;48.5;-10.2;500.5 str;45.2 dev;250.0 sta;5;10;1,2,3",
+            now.format("%Y-%m-%d %H:%M:%S.%6f")
+        );
+        let transport = MissingThenOnceTransport {
+            state: Mutex::new(0),
+            lines: vec![line],
+        };
+        let provider = StrikesBlitzortungDataProvider::new(&transport);
+        // Three ten-minute slots: the first is missing, the second serves the
+        // strike, the third is empty.
+        let strikes = provider
+            .get_strikes_since(Some(now - Duration::minutes(20)), 1)
+            .unwrap();
+        assert_eq!(strikes.len(), 1);
     }
 
     #[test]
