@@ -241,32 +241,37 @@ An empty env value disables it quietly.  When enabled the service logs
 
 ### File format
 
-Rows are appended to `{log_dir}/servicelog_{YYYY-MM-DD}`, 13 tab-separated
+Rows are appended to `{log_dir}/servicelog_{YYYY-MM-DD}`, 10 tab-separated
 fields (one line per request):
 
 ```text
-1700000000500000\t3\t10000\t0\t60\t0\tDE\tBerlin\tA\t190\t-\t-\t-
+1700000000500000\tDE\tBerlin              \tA\t190\t0\t60\t10000\t3\t0
 ```
+
+The `city` field is padded with trailing spaces to a fixed width
+(`CITY_FIELD_WIDTH = 20`) so the columns that follow line up when the file is
+viewed with tabs expanded.  It is **never truncated**: a city longer than the
+width is written as-is and its line simply does not align.  The padding is
+inside the single `city` field (spaces, not tabs), so the line always has
+exactly 10 fields and parsing by index keeps working.
 
 | # | Field | Notes |
 | --- | --- | --- |
 | 1 | `timestamp_us` | request time as an **int64 count of microseconds since the Unix epoch (UTC)** — the exact `current_data` value, no precision loss |
-| 2 | `region` | `0` global, clamped region for the region grid, `-1` local |
-| 3 | `grid_baselength` | the **pre-clamp** `original_grid_base_length` |
-| 4 | `minute_offset` | |
-| 5 | `minute_length` | |
-| 6 | `count_threshold` | |
-| 7 | country | GeoIP ISO code, else `-` |
-| 8 | city | GeoIP English city name, else `-` |
-| 9 | platform | `A` for the Android client, else `-` |
-| 10 | version | `bo-android-<n>` client version, else `None` |
-| 11 | `local_x` | local grid only, else `-` |
-| 12 | `local_y` | local grid only, else `-` |
-| 13 | `data_area` | local grid only, else `-` |
+| 2 | country | GeoIP ISO code, else `-` |
+| 3 | city | GeoIP English city name, else `-`, space-padded to width 20 (no truncation) |
+| 4 | platform | `A` for the Android client, else `-` |
+| 5 | version | `bo-android-<n>` client version, else `None` |
+| 6 | `minute_offset` | |
+| 7 | `minute_length` | |
+| 8 | `grid_baselength` | the **pre-clamp** `original_grid_base_length` |
+| 9 | `region` | `0` global, clamped region for the region grid, `-1` local |
+| 10 | `count_threshold` | |
 
-The raw client IP is **never** written.  The `platform` marker recognises the
-Blitzortung Android client (`A`); a missing or non-Android user agent yields `-`
-and its version stays `None`.
+Neither the raw client IP nor the local `x`/`y`/`data_area` values are written;
+a local request is distinguishable only by `region == -1`.  The `platform`
+marker recognises the Blitzortung Android client (`A`); a missing or non-Android
+user agent yields `-` and its version stays `None`.
 
 The file is opened in **append** mode and stays open across days; when an
 entry's UTC date changes (e.g. the first request after `00:00` UTC) the writer
@@ -643,16 +648,18 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   (per-minute JSON reports written by `base.py` plus the `bo-webservice-insertlog`
   follow-up tool), the Rust port transforms and appends rows on a background
   thread fed by a bounded queue.  There are no intermediate JSON files and no
-  standalone tool to schedule.  The row is a refined 13-column format: the
-  timestamp is an int64 epoch-microsecond value (not `%.4f` seconds) and the
-  always-`-` masked client-IP column is replaced by a client **platform** marker
-  (`A` for Android).  Backpressure policy: a full queue drops entries with a
-  single `WARN` (requests never block).  The servicelog directory must be
-  writable beyond merely existing (a common `/var/log/blitzortung` on a locked
-  down server), and a runtime write failure is reported once and then suppressed
-  for the rest of the day instead of erroring per row.  GeoIP is best-effort
-  (missing/unreadable db or not-found address -> `-`), where Python aborts on a
-  missing db.
+  standalone tool to schedule.  The row is a 10-column format: the timestamp is
+  an int64 epoch-microsecond value (not `%.4f` seconds), the masked client-IP
+  column is dropped, a client **platform** marker (`A` for Android) is added,
+  and the local `x`/`y`/`data_area` columns are removed (a local request is
+  identified by `region == -1`).  The `city` field is space-padded to a fixed
+  width so the following columns line up (never truncated).  Backpressure
+  policy: a full queue drops entries with a single `WARN` (requests never
+  block).  The servicelog directory must be writable beyond merely existing (a
+  common `/var/log/blitzortung` on a locked down server), and a runtime write
+  failure is reported once and then suppressed for the rest of the day instead
+  of erroring per row.  GeoIP is best-effort (missing/unreadable db or not-found
+  address -> `-`), where Python aborts on a missing db.
 - **Usage-log directory and GeoIP path.** The Python service hard-codes
   `/var/log/blitzortung` (used only when it exists).  The Rust port instead
   requires an explicit directory via `--servicelog` / `BO_SERVICE_SERVICELOG` /

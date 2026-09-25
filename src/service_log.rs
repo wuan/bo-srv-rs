@@ -9,9 +9,10 @@
 //! This replaces the Python two-step design (`base.py` writing per-minute JSON
 //! reports + the `bo-webservice-insertlog` follow-up tool): there are **no JSON
 //! intermediate files** and the transform happens in-process.  The row is a
-//! refined version of the Python `servicelog_*` line (see [`build_row`]): the
-//! timestamp is an int64 epoch-microsecond value and the masked client-IP column
-//! is dropped in favour of a client **platform** marker.
+//! 10-field line (see [`build_row`]): an int64 epoch-microsecond timestamp,
+//! country/city, a client **platform** marker, the version, then the request
+//! parameters.  The old masked-IP and local `x`/`y`/`data_area` columns are
+//! gone.
 //!
 //! ## Backpressure
 //!
@@ -67,12 +68,16 @@ pub const GEOIP_DB_ENV_ALIAS: &str = "BO_SERVICE_GEOIP_DB";
 /// instead of blocking the request path.
 pub const QUEUE_CAPACITY: usize = 65_536;
 
-/// One recorded grid request.  Field order mirrors the Python `current_data`
-/// tuple so the derived row matches the old `servicelog_*` output exactly.
+/// One recorded grid request, carrying the raw fields that [`build_row`]
+/// renders into the servicelog line.
 ///
 /// `region` is `0` for the global flavour, the clamped region for the region
 /// flavour and `-1` for the local flavour.  `grid_baselength` is the
 /// **pre-clamp** value (`original_grid_base_length` in `base.py`).
+///
+/// `client` and `local` are retained for the GeoIP lookup and the optional
+/// StatsD tags; neither the raw client IP nor the local `x`/`y`/`data_area`
+/// values are written to the log line (see [`build_row`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceLogEntry {
     /// Epoch microseconds of the request.
@@ -191,22 +196,33 @@ pub fn user_agent_version(user_agent: Option<&str>) -> Option<i64> {
     }
 }
 
-/// Render one entry as the 13-field tab-separated servicelog row.
+/// Fixed width (in characters) the `city` field is padded to with trailing
+/// spaces, so the tab-separated columns that follow line up when the log is
+/// viewed with tabs expanded.
+///
+/// The city is **never truncated**: a name longer than this width is written
+/// as-is and its line simply does not align.  The padding is inside the single
+/// `city` field (spaces, not tabs), so the line always has exactly 10 fields and
+/// parsing by index keeps working.
+pub const CITY_FIELD_WIDTH: usize = 20;
+
+/// Render one entry as the 10-field tab-separated servicelog row.
 ///
 /// Field order:
 /// 1. `timestamp_us` — **int64 epoch microseconds, UTC**;
-/// 2. `region` — `0` global, clamped region for the region grid, `-1` local;
-/// 3. `grid_baselength` — the **pre-clamp** `original_grid_base_length`;
-/// 4. `minute_offset`;
-/// 5. `minute_length`;
-/// 6. `count_threshold`;
-/// 7. `country` — GeoIP ISO code, else `-`;
-/// 8. `city` — GeoIP English name, else `-`;
-/// 9. `platform` — `A` for Android, else `-`;
-/// 10. `version` — `bo-android-<n>` version, else `None`;
-/// 11. `local_x` / 12. `local_y` / 13. `data_area` — local grid only, else `-`.
+/// 2. `country` — GeoIP ISO code, else `-`;
+/// 3. `city` — GeoIP English name, else `-`, padded with trailing spaces to
+///    [`CITY_FIELD_WIDTH`] (never truncated);
+/// 4. `platform` — `A` for Android, else `-`;
+/// 5. `version` — `bo-android-<n>` version, else `None`;
+/// 6. `minute_offset`;
+/// 7. `minute_length`;
+/// 8. `grid_baselength` — the **pre-clamp** `original_grid_base_length`;
+/// 9. `region` — `0` global, clamped region for the region grid, `-1` local;
+/// 10. `count_threshold`.
 ///
-/// The raw client IP is intentionally **never** written.
+/// The raw client IP and the local `x`/`y`/`data_area` values are intentionally
+/// **not** written; a local request is distinguishable only by `region == -1`.
 ///
 /// The timestamp is the raw [`ServiceLogEntry::now_us`] value — exactly what
 /// the Python `current_data` entries recorded
@@ -225,31 +241,23 @@ pub fn build_row(
     city: Option<&str>,
 ) -> String {
     let platform = client_platform(entry.user_agent.as_deref(), version);
-    let (local_x, local_y, data_area) = match entry.local {
-        Some(local) => (
-            local.x.to_string(),
-            local.y.to_string(),
-            local.data_area.to_string(),
-        ),
-        None => ("-".to_string(), "-".to_string(), "-".to_string()),
-    };
+    // Pad the city to a fixed width with trailing spaces (no truncation); a
+    // longer name is emitted unchanged.
+    let city = format!("{:<width$}", city.unwrap_or("-"), width = CITY_FIELD_WIDTH);
     [
         // Epoch microseconds (int64), matching the Python tuple's first field.
         entry.now_us.to_string(),
-        entry.region.to_string(),
-        entry.grid_baselength.to_string(),
-        entry.minute_offset.to_string(),
-        entry.minute_length.to_string(),
-        entry.count_threshold.to_string(),
         country_code.unwrap_or("-").to_string(),
-        city.unwrap_or("-").to_string(),
+        city,
         platform.to_string(),
         version
             .map(|v| v.to_string())
             .unwrap_or_else(|| "None".to_string()),
-        local_x,
-        local_y,
-        data_area,
+        entry.minute_offset.to_string(),
+        entry.minute_length.to_string(),
+        entry.grid_baselength.to_string(),
+        entry.region.to_string(),
+        entry.count_threshold.to_string(),
     ]
     .join("\t")
 }
@@ -693,13 +701,29 @@ mod tests {
     }
 
     #[test]
-    fn global_row_has_thirteen_fields_with_platform() {
+    fn global_row_has_ten_fields_with_padded_city() {
         let row = build_row(&entry(0, None), Some(190), Some("DE"), Some("Berlin"));
+        // city is padded with trailing spaces to CITY_FIELD_WIDTH.
         assert_eq!(
             row,
-            "1700000000500000\t0\t10000\t0\t60\t0\tDE\tBerlin\tA\t190\t-\t-\t-"
+            format!(
+                "1700000000500000\tDE\t{:<20}\tA\t190\t0\t60\t10000\t0\t0",
+                "Berlin"
+            )
         );
-        assert_eq!(row.split('\t').count(), 13);
+        assert_eq!(row.split('\t').count(), 10);
+        // The padding is inside the city field (spaces, not tabs).
+        assert_eq!(row.split('\t').nth(2), Some("Berlin              "));
+    }
+
+    /// A city longer than [`CITY_FIELD_WIDTH`] is written as-is (no truncation).
+    #[test]
+    fn long_city_is_not_truncated() {
+        let long = "Sankt-Peterburg-Nikolaevsk"; // 27 chars > 20
+        let row = build_row(&entry(0, None), Some(190), Some("RU"), Some(long));
+        let cells: Vec<&str> = row.split('\t').collect();
+        assert_eq!(cells[2], long);
+        assert_eq!(cells.len(), 10);
     }
 
     #[test]
@@ -718,11 +742,17 @@ mod tests {
             None,
         );
         // The entry's user agent is an Android one, so the platform stays `A`
-        // even though the (separately supplied) version is `None`.
+        // even though the (separately supplied) version is `None`.  The local
+        // x/y/data_area are no longer part of the line; only `region == -1`
+        // distinguishes a local request.
         assert_eq!(
             row,
-            "1700000000500000\t-1\t10000\t0\t60\t0\t-\t-\tA\tNone\t101\t202\t5"
+            format!(
+                "1700000000500000\t-\t{:<20}\tA\tNone\t0\t60\t10000\t-1\t0",
+                "-"
+            )
         );
+        assert_eq!(row.split('\t').count(), 10);
     }
 
     /// A non-Android (or absent) user agent yields platform `-`.
@@ -732,25 +762,35 @@ mod tests {
         e.user_agent = Some("Mozilla/5.0".into());
         let row = build_row(&e, None, None, None);
         let cells: Vec<&str> = row.split('\t').collect();
-        assert_eq!(cells[8], "-"); // platform
-        assert_eq!(cells[9], "None"); // version
+        assert_eq!(cells[3], "-"); // platform
+        assert_eq!(cells[4], "None"); // version
 
         let mut e = entry(0, None);
         e.user_agent = None;
         let row = build_row(&e, None, None, None);
         let cells: Vec<&str> = row.split('\t').collect();
-        assert_eq!(cells[8], "-");
-        assert_eq!(cells[9], "None");
+        assert_eq!(cells[3], "-");
+        assert_eq!(cells[4], "None");
     }
 
-    /// The raw client IP never appears in the row (the entry's client is
-    /// deliberately not serialised).
+    /// Neither the raw client IP nor the local x/y/data_area values appear in
+    /// the row.
     #[test]
-    fn row_never_contains_the_client_ip() {
-        let mut e = entry(0, None);
+    fn row_never_contains_the_client_ip_or_local_coords() {
+        let mut e = entry(
+            -1,
+            Some(LocalGridLog {
+                x: 101,
+                y: 202,
+                data_area: 5,
+            }),
+        );
         e.client = Some("203.0.113.7".into());
         let row = build_row(&e, Some(190), Some("DE"), Some("Berlin"));
         assert!(!row.contains("203.0.113.7"));
+        assert!(!row.contains("101"));
+        assert!(!row.contains("202"));
+        assert_eq!(row.split('\t').count(), 10);
     }
 
     #[test]
@@ -759,9 +799,10 @@ mod tests {
         e.grid_baselength = 2_000; // below MIN_GRID_BASE_LENGTH
         let row = build_row(&e, Some(42), None, None);
         let cells: Vec<&str> = row.split('\t').collect();
-        assert_eq!(cells[1], "3");
-        assert_eq!(cells[2], "2000");
-        assert_eq!(cells[9], "42");
+        assert_eq!(cells[7], "2000"); // pre-clamp grid_baselength
+        assert_eq!(cells[8], "3"); // region
+        assert_eq!(cells[4], "42"); // version
+        assert_eq!(cells.len(), 10);
     }
 
     #[test]
@@ -810,7 +851,10 @@ mod tests {
         let content = std::fs::read_to_string(dir.join("servicelog_2023-11-14")).unwrap();
         assert_eq!(
             content,
-            "1700000000500000\t0\t10000\t0\t60\t0\t-\t-\tA\t190\t-\t-\t-\n"
+            format!(
+                "1700000000500000\t-\t{:<20}\tA\t190\t0\t60\t10000\t0\t0\n",
+                "-"
+            )
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -904,7 +948,10 @@ mod tests {
         let day2 = std::fs::read_to_string(dir.join("servicelog_2023-11-15")).unwrap();
         assert_eq!(
             day2,
-            "1700006400000000\t0\t10000\t0\t60\t0\t-\t-\tA\t190\t-\t-\t-\n"
+            format!(
+                "1700006400000000\t-\t{:<20}\tA\t190\t0\t60\t10000\t0\t0\n",
+                "-"
+            )
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
