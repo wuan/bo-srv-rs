@@ -1,11 +1,14 @@
 //! SQL query construction, ported from `blitzortung/db/query.py` and
 //! `blitzortung/db/query_builder.py`.
 //!
-//! The generated SQL text uses psycopg2-style `%(name)s` placeholders so that
-//! it is byte-for-byte identical with the Python implementation; parameters
-//! are tracked by name like the Python `Query.parameters` dict.  Use
-//! [`Query::to_postgres`] / [`Query::parameters`] to obtain the `$1, $2, ...`
-//! form with parameters in the same order for tokio-postgres.
+//! The generated SQL text uses psycopg2-style `%(name)s` placeholders and
+//! tracks parameters by name like the Python `Query.parameters` dict.  It
+//! matches the Python implementation except for the queries that always read
+//! coordinates in SRID 4326 ([`strikes_query`], [`grid_query`],
+//! [`global_grid_query`]): those access `geog::geometry` directly instead of
+//! the no-op `ST_Transform(geog::geometry, 4326)`.  Use [`Query::to_postgres`]
+//! / [`Query::parameters`] to obtain the `$1, $2, ...` form with parameters in
+//! the same order for tokio-postgres.
 
 use chrono::{DateTime, Utc};
 
@@ -514,20 +517,17 @@ pub fn select_key_query(
 /// `strikes` method: select columns, time interval, optional id interval,
 /// `ORDER BY id`.
 pub fn strikes_query(time_interval: &TimeInterval, id_interval: Option<IdInterval>) -> Query {
-    let mut q = Query::new("strikes")
-        .set_columns(&[
-            "id",
-            "\"timestamp\"",
-            "nanoseconds",
-            "ST_X(ST_Transform(geog::geometry, %(srid)s)) AS x",
-            "ST_Y(ST_Transform(geog::geometry, %(srid)s)) AS y",
-            "altitude",
-            "amplitude",
-            "error2d",
-            "stationcount",
-        ])
-        .param("srid", Param::Int(4326))
-        .cast("srid", "integer");
+    let mut q = Query::new("strikes").set_columns(&[
+        "id",
+        "\"timestamp\"",
+        "nanoseconds",
+        "ST_X(geog::geometry) AS x",
+        "ST_Y(geog::geometry) AS y",
+        "altitude",
+        "amplitude",
+        "error2d",
+        "stationcount",
+    ]);
     q = add_time_interval(q, time_interval);
     if let Some(id) = id_interval {
         q = q
@@ -552,13 +552,11 @@ pub fn grid_query(
     let mut q = Query::new("strikes");
     q = q
         .set_columns(&[
-            "TRUNC((ST_X(ST_Transform(geog::geometry, %(srid)s)) - %(xmin)s) / %(xdiv)s)::integer AS rx",
-            "TRUNC((ST_Y(ST_Transform(geog::geometry, %(srid)s)) - %(ymin)s) / %(ydiv)s)::integer AS ry",
+            "TRUNC((ST_X(geog::geometry) - %(xmin)s) / %(xdiv)s)::integer AS rx",
+            "TRUNC((ST_Y(geog::geometry) - %(ymin)s) / %(ydiv)s)::integer AS ry",
             "count(*) AS strike_count",
             "max(\"timestamp\") as \"timestamp\"",
         ])
-        .param("srid", Param::Int(4326))
-        .cast("srid", "integer")
         .param("xmin", Param::Float(grid.x_min))
         .cast("xmin", "double precision")
         .param("xdiv", Param::Float(grid.x_div))
@@ -598,13 +596,11 @@ pub fn global_grid_query(grid: &Grid, time_interval: &TimeInterval, count_thresh
     let mut q = Query::new("strikes");
     q = q
         .set_columns(&[
-            "ROUND((ST_X(ST_Transform(geog::geometry, %(srid)s)) - %(xdiv)s * 0.5) / %(xdiv)s)::integer AS rx",
-            "ROUND((ST_Y(ST_Transform(geog::geometry, %(srid)s)) - %(ydiv)s * 0.5) / %(ydiv)s)::integer AS ry",
+            "ROUND((ST_X(geog::geometry) - %(xdiv)s * 0.5) / %(xdiv)s)::integer AS rx",
+            "ROUND((ST_Y(geog::geometry) - %(ydiv)s * 0.5) / %(ydiv)s)::integer AS ry",
             "count(*) AS strike_count",
             "max(\"timestamp\") as \"timestamp\"",
         ])
-        .param("srid", Param::Int(4326))
-        .cast("srid", "integer")
         .param("xdiv", Param::Float(grid.x_div))
         .cast("xdiv", "double precision")
         .param("ydiv", Param::Float(grid.y_div))
@@ -690,26 +686,26 @@ mod tests {
     }
 
     #[test]
-    fn strikes_sql_matches_python() {
+    fn strikes_query_omits_noop_transform() {
         let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
         let q = strikes_query(&interval, Some(IdInterval { start: 100 }));
         let expected = "SELECT id, \"timestamp\", nanoseconds, \
-             ST_X(ST_Transform(geog::geometry, %(srid)s)) AS x, \
-             ST_Y(ST_Transform(geog::geometry, %(srid)s)) AS y, \
+             ST_X(geog::geometry) AS x, \
+             ST_Y(geog::geometry) AS y, \
              altitude, amplitude, error2d, stationcount \
              FROM strikes WHERE \"timestamp\" >= %(start_time)s AND \"timestamp\" < %(end_time)s \
              AND id >= %(start_id)s ORDER BY id";
         assert_eq!(q.to_sql(), expected);
-        assert_eq!(q.parameters().len(), 4); // srid, start_time, end_time, start_id
+        assert_eq!(q.parameters().len(), 3); // start_time, end_time, start_id
                                              // The PostgreSQL rendering adds explicit casts (see `Query::casts`).
         assert_eq!(
             q.to_postgres(),
             "SELECT id, \"timestamp\", nanoseconds, \
-             ST_X(ST_Transform(geog::geometry, $1::integer)) AS x, \
-             ST_Y(ST_Transform(geog::geometry, $1::integer)) AS y, \
+             ST_X(geog::geometry) AS x, \
+             ST_Y(geog::geometry) AS y, \
              altitude, amplitude, error2d, stationcount \
-             FROM strikes WHERE \"timestamp\" >= $2::timestamptz AND \"timestamp\" < $3::timestamptz \
-             AND id >= $4::bigint ORDER BY id"
+             FROM strikes WHERE \"timestamp\" >= $1::timestamptz AND \"timestamp\" < $2::timestamptz \
+             AND id >= $3::bigint ORDER BY id"
         );
     }
 
@@ -739,15 +735,15 @@ mod tests {
         let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
         let grid = Grid::new(-25.0, 56.0, 27.0, 71.0, 0.14, 0.08);
         let sql = grid_query(&grid, &interval, Some(1), 0).to_postgres();
-        assert!(sql.contains("geog::geometry, $1::integer)"));
+        assert!(!sql.contains("ST_Transform"));
         assert!(!sql.contains("%(xmin)s"));
-        assert!(sql.contains("$2::double precision")); // xmin
-        assert!(sql.contains("$7::integer")); // envelope_srid
-        assert!(sql.contains("region = $10::smallint"));
+        assert!(sql.contains("$1::double precision")); // xmin
+        assert!(sql.contains("$6::integer")); // envelope_srid
+        assert!(sql.contains("region = $9::smallint"));
     }
 
     #[test]
-    fn grid_query_sql_matches_python() {
+    fn grid_query_omits_noop_transform() {
         let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
         let grid = Grid::new(
             -25.0,
@@ -759,8 +755,8 @@ mod tests {
         );
         let q = grid_query(&grid, &interval, Some(1), 0);
         let expected = "SELECT \
-             TRUNC((ST_X(ST_Transform(geog::geometry, %(srid)s)) - %(xmin)s) / %(xdiv)s)::integer AS rx, \
-             TRUNC((ST_Y(ST_Transform(geog::geometry, %(srid)s)) - %(ymin)s) / %(ydiv)s)::integer AS ry, \
+             TRUNC((ST_X(geog::geometry) - %(xmin)s) / %(xdiv)s)::integer AS rx, \
+             TRUNC((ST_Y(geog::geometry) - %(ymin)s) / %(ydiv)s)::integer AS ry, \
              count(*) AS strike_count, max(\"timestamp\") as \"timestamp\" \
              FROM strikes WHERE \
              ST_GeomFromWKB(%(envelope)s, %(envelope_srid)s) && geog AND \
@@ -770,14 +766,13 @@ mod tests {
         assert_eq!(q.to_sql(), expected);
         // Param order follows SQL token order
         let params = q.parameters();
-        assert_eq!(params.len(), 10);
-        assert!(matches!(params[0], Param::Int(4326))); // srid
-        assert!(matches!(params[1], Param::Float(_))); // xmin
-        assert!(matches!(params[5], Param::Bytea(_))); // envelope
-        assert!(matches!(params[6], Param::Int(4326))); // envelope_srid
-        assert!(matches!(params[7], Param::Timestamp(_))); // start_time
-        assert!(matches!(params[8], Param::Timestamp(_))); // end_time
-        assert!(matches!(params[9], Param::Int(1))); // region
+        assert_eq!(params.len(), 9);
+        assert!(matches!(params[0], Param::Float(_))); // xmin
+        assert!(matches!(params[4], Param::Bytea(_))); // envelope
+        assert!(matches!(params[5], Param::Int(4326))); // envelope_srid
+        assert!(matches!(params[6], Param::Timestamp(_))); // start_time
+        assert!(matches!(params[7], Param::Timestamp(_))); // end_time
+        assert!(matches!(params[8], Param::Int(1))); // region
     }
 
     #[test]
@@ -793,11 +788,11 @@ mod tests {
         );
         let q = grid_query(&grid, &interval, None, 0);
         assert!(!q.to_sql().contains("region"));
-        assert_eq!(q.parameters().len(), 9);
+        assert_eq!(q.parameters().len(), 8);
     }
 
     #[test]
-    fn global_grid_query_sql_matches_python() {
+    fn global_grid_query_omits_noop_transform() {
         let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
         let grid = Grid::new(
             -180.0,
@@ -809,17 +804,17 @@ mod tests {
         );
         let q = global_grid_query(&grid, &interval, 0);
         let expected = "SELECT \
-             ROUND((ST_X(ST_Transform(geog::geometry, %(srid)s)) - %(xdiv)s * 0.5) / %(xdiv)s)::integer AS rx, \
-             ROUND((ST_Y(ST_Transform(geog::geometry, %(srid)s)) - %(ydiv)s * 0.5) / %(ydiv)s)::integer AS ry, \
+             ROUND((ST_X(geog::geometry) - %(xdiv)s * 0.5) / %(xdiv)s)::integer AS rx, \
+             ROUND((ST_Y(geog::geometry) - %(ydiv)s * 0.5) / %(ydiv)s)::integer AS ry, \
              count(*) AS strike_count, max(\"timestamp\") as \"timestamp\" \
              FROM strikes WHERE \
              \"timestamp\" >= %(start_time)s AND \"timestamp\" < %(end_time)s \
              GROUP BY rx, ry";
         assert_eq!(q.to_sql(), expected);
-        // srid, xdiv, ydiv, start_time, end_time = 5 parameters
+        // xdiv, ydiv, start_time, end_time = 4 parameters
         let params = q.parameters();
-        assert_eq!(params.len(), 5);
-        assert!(matches!(params[0], Param::Int(4326)));
+        assert_eq!(params.len(), 4);
+        assert!(matches!(params[0], Param::Float(_)));
         assert!(matches!(params[1], Param::Float(_)));
     }
 
@@ -894,22 +889,22 @@ mod tests {
     #[test]
     fn repeated_named_params_map_to_single_positional() {
         let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
-        let grid = Grid::new(
-            -25.0,
-            56.8605750930044,
-            27.0,
-            71.94746107673467,
-            0.14017221762500753,
-            0.08865376938211966,
-        );
-        let q = grid_query(&grid, &interval, Some(1), 0);
+        let area = Area::from_polygon(&[vec![
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 2.0],
+            [0.0, 0.0],
+        ]])
+        .unwrap();
+        let q = select_query(&interval, Some(&area), None, 4326);
         let sql = q.to_postgres();
-        // srid appears twice in the SQL but only once as a positional param
-        assert!(sql.contains("ST_X(ST_Transform(geog::geometry, $1::integer)"));
-        assert!(sql.contains("ST_Y(ST_Transform(geog::geometry, $1::integer)"));
-        // region is the tenth distinct parameter
-        assert!(sql.contains("region = $10::smallint"));
-        assert_eq!(q.parameters().len(), 10);
+        // `srid` appears in both coordinate transforms and in the three
+        // geometry calls, but is a single positional parameter.
+        assert!(sql.contains("ST_X(ST_Transform(geog::geometry, $1::integer))"));
+        assert!(sql.contains("ST_Y(ST_Transform(geog::geometry, $1::integer))"));
+        assert_eq!(sql.matches("$1::integer").count(), 5);
+        assert_eq!(q.parameters().len(), 5); // srid, start, end, envelope, geometry
     }
 
     #[test]

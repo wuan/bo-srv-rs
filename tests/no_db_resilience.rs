@@ -38,7 +38,7 @@ fn config_for_dead_port() -> Config {
 
 /// A lazy executor + service wired exactly like `main.rs` does.
 fn service_with_dead_database() -> Service<NoopMetrics> {
-    let executor = PostgresExecutor::lazy(&config_for_dead_port());
+    let executor = PostgresExecutor::lazy(&config_for_dead_port()).unwrap();
     let executor: Arc<dyn bo_service::executor::QueryExecutor> = Arc::new(executor);
     Service::with_parts(
         executor,
@@ -127,7 +127,7 @@ fn legacy_dialect_without_database_returns_a_fault() {
 /// (no panic/hang) and only the first failure is logged.
 #[tokio::test]
 async fn repeated_failures_are_logged_once() {
-    let executor = Arc::new(PostgresExecutor::lazy(&config_for_dead_port()));
+    let executor = Arc::new(PostgresExecutor::lazy(&config_for_dead_port()).unwrap());
     let tracker = executor.failures().clone();
     let executor: Arc<dyn bo_service::executor::QueryExecutor> = executor;
     let service = Service::with_parts(
@@ -192,7 +192,7 @@ fn live_database_serves_and_dead_port_faults() {
             }
         }
     }
-    let live_executor = PostgresExecutor::lazy(&live);
+    let live_executor = PostgresExecutor::lazy(&live).unwrap();
     let rows = rt
         .block_on(live_executor.query("SELECT 1", &[]))
         .expect("live query");
@@ -202,7 +202,7 @@ fn live_database_serves_and_dead_port_faults() {
     // 2) Dead port: the same request shape must fault (and not panic/hang).
     let dead_service = {
         let executor: Arc<dyn bo_service::executor::QueryExecutor> =
-            Arc::new(PostgresExecutor::lazy(&config_for_dead_port()));
+            Arc::new(PostgresExecutor::lazy(&config_for_dead_port()).unwrap());
         Service::with_parts(
             executor,
             bo_service::cache::ServiceCache::new(),

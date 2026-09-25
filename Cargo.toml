@@ -66,6 +66,7 @@ rand = "0.10"
 
 # gzip response compression in the HTTP transport (txjsonrpc `handle_compression`).
 flate2 = "1"
+deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

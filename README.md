@@ -33,7 +33,7 @@ cargo test --features db-integration --test postgres_integration -- --nocapture
 ```
 
 Set `BLITZORTUNG_TEST_POSTGIS_IMAGE` to override the default
-`imresamu/postgis:16-3.5` image.
+`imresamu/postgis:18-3.6` image.
 
 ## Run
 

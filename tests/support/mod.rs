@@ -7,7 +7,7 @@
 //! database or `DATABASE_URL`.
 //!
 //! The image defaults to the multi-arch community build
-//! (`imresamu/postgis:16-3.5`) and can be overridden with
+//! (`imresamu/postgis:18-3.6`) and can be overridden with
 //! `BLITZORTUNG_TEST_POSTGIS_IMAGE`, like the Python suite.
 
 // Each integration-test crate that pulls this in as `mod support;` only uses
@@ -28,7 +28,7 @@ use bo_service::postgres::PostgresExecutor;
 /// Docker entrypoint runs everything in `/docker-entrypoint-initdb.d`).
 const SCHEMA_SQL: &[u8] = include_bytes!("../schema/strikes.sql");
 
-const DEFAULT_IMAGE: &str = "imresamu/postgis:16-3.5";
+const DEFAULT_IMAGE: &str = "imresamu/postgis:18-3.6";
 const DB_NAME: &str = "blitzortung";
 const DB_USER: &str = "blitzortung";
 const DB_PASSWORD: &str = "blitzortung";

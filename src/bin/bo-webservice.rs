@@ -107,11 +107,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     runtime.block_on(async move {
         // Build the executor lazily: startup must NOT connect to the database,
         // so a missing/unreachable database cannot make the service exit.  Each
-        // request (re)connects on demand; while the database is down it is
-        // answered with a per-request JSON-RPC fault instead of hanging.
-        let executor = PostgresExecutor::lazy(&config);
-        let executor: Arc<dyn QueryExecutor> = Arc::new(executor);
+        // request checks out (creating on demand) a pooled connection; while the
+        // database is down it is answered with a per-request JSON-RPC fault
+        // instead of hanging.
         let metrics: Arc<dyn Metrics> = build_metrics(&config);
+        let executor = PostgresExecutor::lazy(&config)?.with_metrics(metrics.clone());
+        let executor: Arc<dyn QueryExecutor> = Arc::new(executor);
         let service: Arc<Service<Arc<dyn Metrics>>> = Arc::new(Service::with_parts(
             executor,
             bo_service::cache::ServiceCache::new(),
