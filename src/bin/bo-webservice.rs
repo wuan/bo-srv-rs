@@ -3,7 +3,6 @@
 //! Run:
 //!
 //! ```text
-//! export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 //! cargo run --bin bo-webservice
 //! ```
 //!

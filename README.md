@@ -6,8 +6,8 @@
 # bo-srv-rs
 
 Rust port of the [blitzortung](https://blitzortung.org) JSON-RPC webservice,
-taken from `blitzortung/service/base.py` and friends on `origin/main` of this
-repository (async I/O on Tokio instead of Twisted).
+ported from the Python `blitzortung` package (`blitzortung/service/base.py` and
+friends; async I/O on Tokio instead of Twisted).
 
 The port speaks JSON-RPC with the legacy pre-1.0 dialect for Android clients
 (`treat_zero_id_as_pre1 = True`).  Two transports are supported: **HTTP/1.1**
@@ -17,10 +17,7 @@ socket (opt-in, `--protocol lsp`).
 
 ## Build & test
 
-The checked-in Rust toolchain is broken on this machine; use the stable one:
-
 ```sh
-export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 cargo build
 cargo test
 ```
@@ -41,7 +38,6 @@ Set `BLITZORTUNG_TEST_POSTGIS_IMAGE` to override the default
 ## Run
 
 ```sh
-export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 cargo run --bin bo-webservice
 
 # override the listening port (also: -p)
@@ -352,8 +348,9 @@ histogram bins (empty when `minute_length <= 10`).
   response shapes, caching and metrics reporting
 - `jsonrpc` — JSON-RPC parsing/dispatch and the pre-1.0 / v1 / v2 envelope
   dialects
-- `metrics` — the `Metrics` trait (no-op for production, recording impl for
-  tests) plus the service and importer metric helpers and the StatsD sender
+- `metrics` — the `Metrics` trait, the service and importer metric helpers, the
+  StatsD sender (with a no-op fallback when the socket can't be created) and a
+  recording impl for tests
 - `transport` — LSP-style `Content-Length` framing, header parsing, and the TCP
   accept loop
 - `http` — HTTP/1.1 transport (`POST /`, `GET ?request=`, JSONP, keep-alive,
@@ -387,8 +384,6 @@ names match bo-python's `pyproject.toml` `[project.scripts]` entries:
 | `bo-import-websocket` | `cli/imprt_websocket.py` | Live websocket strike import |
 
 ```sh
-export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
-
 # last hour, UTC, text output
 cargo run --bin bo-db
 # explicit interval and area, ECDF-like grid
@@ -406,14 +401,15 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
 
 ## Documented differences from the Python implementation
 
-- **No statsd daemon.** Metric reporting goes through a `Metrics` trait with
-  a no-op production implementation (names match `service/metrics.py`);
-  there is no `TimingState` instrumentation.
+- **No `TimingState` object.** Timings are recorded directly through the
+  `Metrics` trait (`strikes_grid.total`, `db.pool_wait`, ...) at the points the
+  Python `TimingState.log_timing` would, without a separate timing-state helper.
 - **Sequential per-connection handling.** Requests on one connection are
   answered strictly in order; the Twisted service's deferred scheduling is
   not reproduced.  A single tokio-postgres client replaces the connection
   pool (`connection_count` is accepted for compatibility; the multiplexed
-  client serves all connections).
+  client serves all connections and is reconnected on demand after a dropped
+  connection, so a missing database does not crash the service).
 - **Async database path.** `QueryExecutor` is asynchronous (`async fn
   query`/`execute`) and the service handlers `.await` it, so a slow query never
   pins a runtime worker thread and concurrency is not capped by the worker
