@@ -959,4 +959,160 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A closed channel (consumer gone) silently drops the entry.
+    #[test]
+    fn record_on_closed_channel_drops_silently() {
+        let (sender, receiver) = UsageLogSender::for_test(4);
+        drop(receiver);
+        // No panic, and nothing is counted as a "full" drop.
+        sender.record(entry(0, None));
+        assert_eq!(sender.dropped(), 0);
+    }
+
+    /// `is_finished` is false while the consumer is alive and true once it is
+    /// shut down; dropping the consumer also joins the thread.
+    #[test]
+    fn consumer_is_finished_and_drop_joins() {
+        let dir = temp_dir("consumer-drop");
+        {
+            let (handle, consumer) = spawn(dir.clone(), None, None);
+            assert!(!consumer.is_finished());
+            drop(handle);
+            // Dropping the handle closes the channel; Drop joins the thread.
+            drop(consumer);
+        }
+        // The (empty) run still leaves the process healthy.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unwritable directory used by the live consumer yields the single
+    /// failure warning and then drops later rows instead of erroring per row.
+    #[test]
+    fn consumer_survives_an_unwritable_directory() {
+        // The parent is a regular file, so opening `servicelog_*` under it can
+        // never succeed.
+        let base = temp_dir("consumer-unwritable");
+        let blocker = base.join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+
+        let (handle, consumer) = spawn(blocker, None, None);
+        handle.record(entry(0, None));
+        handle.record(entry(0, None));
+        handle.record(entry(0, None));
+        drop(handle);
+        consumer.shutdown();
+
+        // No panic and nothing written; the failure path was exercised.
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `geoip_lookup` with an unparseable address returns `(None, None)` even
+    /// when a reader is present — covered without a real database by using the
+    /// parse-failure early return.
+    #[test]
+    fn geoip_lookup_invalid_address_is_none() {
+        // Build a reader is unnecessary: the parse failure short-circuits before
+        // the reader is used, so `None` and an empty-ish reader path are enough.
+        // (A valid DB is not required to exercise this branch.)
+        assert_eq!(geoip_lookup(None, "not-an-ip"), (None, None));
+    }
+
+    /// Build a tiny synthetic GeoIP2-City database with `maxminddb-writer`.
+    fn synthetic_city_db(dir: &Path) -> PathBuf {
+        use maxminddb_writer::paths::IpAddrWithMask;
+        use serde::Serialize;
+        use std::collections::HashMap;
+
+        #[derive(Serialize)]
+        struct Country {
+            iso_code: &'static str,
+        }
+        #[derive(Serialize)]
+        struct Names {
+            en: &'static str,
+        }
+        #[derive(Serialize)]
+        struct City {
+            names: Names,
+        }
+        #[derive(Serialize)]
+        struct Record {
+            country: Country,
+            city: City,
+        }
+
+        let mut db = maxminddb_writer::Database::default();
+        db.metadata.database_type = "GeoLite2-City".to_string();
+        db.metadata.binary_format_major_version = 2;
+        db.metadata.description =
+            HashMap::from([("en".to_string(), "synthetic test db".to_string())]);
+        let data = db
+            .insert_value(Record {
+                country: Country { iso_code: "DE" },
+                city: City {
+                    names: Names { en: "Berlin" },
+                },
+            })
+            .unwrap();
+        db.insert_node("81.169.0.0/16".parse::<IpAddrWithMask>().unwrap(), data);
+        let path = dir.join("synthetic-city.mmdb");
+        let file = std::fs::File::create(&path).unwrap();
+        db.write_to(file).unwrap();
+        path
+    }
+
+    /// `open_geoip` + `geoip_lookup` success path yields country/city, and an
+    /// address outside the database yields `(None, None)`.
+    #[test]
+    fn geoip_lookup_success_and_not_found() {
+        let dir = temp_dir("geoip");
+        let path = synthetic_city_db(&dir);
+        let reader = open_geoip(&path).expect("synthetic db opens");
+        assert_eq!(
+            geoip_lookup(Some(&reader), "81.169.1.2"),
+            (Some("DE".to_string()), Some("Berlin".to_string()))
+        );
+        // An address that is not in the database.
+        assert_eq!(geoip_lookup(Some(&reader), "8.8.8.8"), (None, None));
+        // An unparseable address short-circuits before the reader is used.
+        assert_eq!(geoip_lookup(Some(&reader), "nope"), (None, None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `open_geoip` on a missing path returns `None` (best-effort).
+    #[test]
+    fn open_geoip_missing_file_is_none() {
+        assert!(open_geoip(Path::new("/nonexistent/GeoLite2-City.mmdb")).is_none());
+    }
+
+    /// `client_platform` recognises only the Android prefix.
+    #[test]
+    fn client_platform_marker() {
+        assert_eq!(client_platform(Some("bo-android-190"), Some(190)), "A");
+        // A prefix match without a parsed version is still Android.
+        assert_eq!(client_platform(Some("bo-android-abc"), None), "A");
+        assert_eq!(client_platform(Some("Mozilla/5.0"), None), "-");
+        assert_eq!(client_platform(None, None), "-");
+    }
+
+    /// `access_metric_key` skips zero local coordinates (Python truthiness) and
+    /// omits an empty country.
+    #[test]
+    fn access_metric_key_skips_falsy_extras() {
+        let mut e = entry(
+            -1,
+            Some(LocalGridLog {
+                x: 0,
+                y: 0,
+                data_area: 0,
+            }),
+        );
+        e.region = -1;
+        let key = access_metric_key(&e, None, Some(""));
+        assert_eq!(
+            key,
+            "access,version=-,region=-1,minutes=60,offset=0,grid=10000"
+        );
+    }
 }

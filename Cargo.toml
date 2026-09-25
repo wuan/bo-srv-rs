@@ -81,6 +81,9 @@ tokio = { version = "1", features = ["full"] }
 # own `runtime.block_on`).
 testcontainers = { version = "0.27", features = ["blocking"] }
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
+# Builds a tiny synthetic MaxMind DB in the tests so the usage-log GeoIP
+# success path can be exercised without shipping a real GeoLite2 database.
+maxminddb-writer = "0.1"
 
 # Native systemd journal logging: when the service runs under systemd its
 # stdout/stderr is captured by journald, which owns the timestamp/PID/priority.
