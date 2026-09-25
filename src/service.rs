@@ -1541,21 +1541,23 @@ mod tests {
             .map(str::to_string)
             .collect();
         assert_eq!(lines.len(), 1);
-        let cells: Vec<&str> = lines[0].split('\t').collect();
-        assert_eq!(cells.len(), 10);
+        // City padding is made of tabs, so a naive split yields empty
+        // segments; ignore them to recover the 10 logical fields.
+        let logical: Vec<&str> = lines[0].split('\t').filter(|s| !s.is_empty()).collect();
+        assert_eq!(logical.len(), 10);
         // Field 1 is an int64 epoch-microsecond count (not seconds/float).
-        let ts_us: i64 = cells[0].parse().expect("timestamp must be an integer");
+        let ts_us: i64 = logical[0].parse().expect("timestamp must be an integer");
         assert!(ts_us > 1_000_000_000_000_000, "got {ts_us}");
-        assert!(!cells[0].contains('.'), "timestamp must not be a float");
-        assert_eq!(cells[1], "-"); // country (no geoip db)
-        assert_eq!(cells[2].trim_end(), "-"); // city (padded with spaces)
-        assert_eq!(cells[3], "A"); // platform (bo-android user agent)
-        assert_eq!(cells[4], "190"); // user agent version
-        assert_eq!(cells[6], "30"); // minute_length
-        assert_eq!(cells[7], "10000"); // pre-clamp grid_baselength
-        assert_eq!(cells[8], "1"); // region
-                                   // The raw client IP is never written.
-        assert!(!cells.contains(&"5.6.7.8"));
+        assert!(!logical[0].contains('.'), "timestamp must not be a float");
+        assert_eq!(logical[1], "-"); // country (no geoip db)
+        assert_eq!(logical[2], "-"); // city
+        assert_eq!(logical[3], "A"); // platform (bo-android user agent)
+        assert_eq!(logical[4], "190"); // user agent version
+        assert_eq!(logical[6], "30"); // minute_length
+        assert_eq!(logical[7], "10000"); // pre-clamp grid_baselength
+        assert_eq!(logical[8], "1"); // region
+                                     // The raw client IP is never written.
+        assert!(!lines[0].contains("5.6.7.8"));
 
         let _ = std::fs::remove_dir_all(&log_dir);
     }
@@ -1592,13 +1594,14 @@ mod tests {
         drop(service);
         consumer.shutdown();
         let content = read_servicelog(&log_dir, &today());
-        let cells: Vec<&str> = content.lines().next().unwrap().split('\t').collect();
-        assert_eq!(cells.len(), 10);
-        assert_eq!(cells[8], "-1"); // region -1 for local
-                                    // Local coordinates are no longer written.
-        assert!(!cells.contains(&"101"));
-        assert!(!cells.contains(&"202"));
-        assert!(!cells.contains(&"5"));
+        let line = content.lines().next().unwrap();
+        let logical: Vec<&str> = line.split('\t').filter(|s| !s.is_empty()).collect();
+        assert_eq!(logical.len(), 10);
+        assert_eq!(logical[8], "-1"); // region -1 for local
+                                      // Local coordinates are no longer written.
+        assert!(!line.contains("101"));
+        assert!(!line.contains("202"));
+        assert!(!logical.contains(&"5"));
 
         let _ = std::fs::remove_dir_all(&log_dir);
     }
@@ -1631,9 +1634,15 @@ mod tests {
         drop(service);
         consumer.shutdown();
         let content = read_servicelog(&log_dir, &today());
-        let cells: Vec<&str> = content.lines().next().unwrap().split('\t').collect();
-        assert_eq!(cells.len(), 10);
-        assert_eq!(cells[8], "0"); // region 0 for global
+        let logical: Vec<&str> = content
+            .lines()
+            .next()
+            .unwrap()
+            .split('\t')
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(logical.len(), 10);
+        assert_eq!(logical[8], "0"); // region 0 for global
 
         let _ = std::fs::remove_dir_all(&log_dir);
     }
