@@ -246,17 +246,16 @@ line per request).  Tabs are shown as `\t` here; the file contains real tab
 characters:
 
 ```text
-1700000000500000\tDE\tBerlin\t\tA\t190\t0\t60\t10000\t3\t0
+1700000000500000\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t3\t0
 ```
 
-**City padding (tabs).** The `city` field is followed by **computed tab
-padding**: enough tab characters that `platform` starts on the first 8-column
-tab stop at or beyond `city_start + CITY_MIN_WIDTH` (two tab widths), and never
-fewer than `CITY_MIN_TABS` (2) tabs.  It is implemented by
-`pad_city(city, city_start)` using `TAB_STOP = 8`, and the city is **never
-truncated** (a very long name may push the following columns off the grid).
-Short names therefore get an extra tab; long names may need only the minimum of
-two.
+**City padding (tabs).** The `city` field is padded with **tab characters**, not
+spaces.  The field reserves four 8-column tab stops (`CITY_TABS = 4`,
+`TAB_STOP = 8`): `pad_city(city)` emits four tabs for a city shorter than one
+tab block and one tab less for every further full block, never below a single
+separator tab.  A city that fits the reservation therefore pushes `platform` to
+the same column, while a longer city is never truncated and simply pushes the
+following columns further right.
 
 > **Consequence:** because the padding is made of tabs, splitting a line on
 > `'\t'` yields **empty fields**.  The line therefore no longer has a fixed
@@ -661,10 +660,10 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   an int64 epoch-microsecond value (not `%.4f` seconds), the masked client-IP
   column is dropped, a client **platform** marker (`A` for Android) is added,
   and the local `x`/`y`/`data_area` columns are removed (a local request is
-identified by `region == -1`).  The `city` field is followed by computed tab
-padding (at least two tabs / two tab widths wide) so the following columns line
-up (never truncated); as a result a naive tab split yields empty segments that
-consumers must ignore.
+identified by `region == -1`).  The `city` field is padded with tabs (four
+8-column tab stops, one tab less per full block, at least one) so the following
+columns line up (never truncated); as a result a naive tab split yields empty
+segments that consumers must ignore.
 Backpressure policy: a full queue drops entries with a single `WARN` (requests
 never block).  The servicelog directory must be writable beyond merely existing
 (a common `/var/log/blitzortung` on a locked down server), and a runtime write
