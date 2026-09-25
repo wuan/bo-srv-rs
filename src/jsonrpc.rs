@@ -529,6 +529,7 @@ pub async fn dispatch<M: Metrics>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::{Row, Value as ExecValue};
     use crate::mock::MockExecutor;
 
     fn service() -> Service<crate::metrics::NoopMetrics> {
@@ -868,5 +869,273 @@ mod tests {
         let v = parse(&body);
         assert!(v.is_array());
         assert_eq!(v[0], json!({}));
+    }
+
+    #[test]
+    fn outcome_labels() {
+        assert_eq!(Outcome::Success.label(), "ok");
+        assert_eq!(Outcome::Blocked("blocked ip".to_string()).label(), "BLOCKED");
+        assert_eq!(
+            Outcome::Fault {
+                code: FAILURE,
+                message: "boom".to_string(),
+            }
+            .label(),
+            "fault"
+        );
+    }
+
+    /// A service whose database query fails, to exercise the fault path of
+    /// every grid dispatch arm without needing result rows.
+    fn service_with_db_error() -> Service<crate::metrics::NoopMetrics> {
+        let mut mock = MockExecutor::new();
+        mock.add_error("FROM strikes", "database unavailable");
+        Service::new(std::sync::Arc::new(mock))
+    }
+
+    /// A service that returns one grid row so the success path can be checked.
+    fn service_with_grid_row() -> Service<crate::metrics::NoopMetrics> {
+        let mut mock = MockExecutor::new();
+        mock.add_rows(
+            "FROM strikes",
+            vec![Row::new(vec![
+                ExecValue::Int(0),
+                ExecValue::Int(1),
+                ExecValue::Int(2),
+                ExecValue::Timestamp(chrono::Utc::now()),
+            ])],
+        );
+        Service::new(std::sync::Arc::new(mock))
+    }
+
+    #[test]
+    fn missing_method_is_invalid_request_v2() {
+        let service = service();
+        let body = process(
+            &service,
+            &mut Request::default(),
+            r#"{"jsonrpc":"2.0","id":1}"#,
+        )
+        .expect_response();
+        let v = parse(&body);
+        assert_eq!(v["error"]["code"], INVALID_REQUEST);
+        assert_eq!(v["error"]["message"], "Invalid Request: missing method");
+        assert_eq!(v["id"], 1);
+    }
+
+    #[test]
+    fn missing_method_legacy_is_v1_fault() {
+        let service = service();
+        // A truthy id selects the 1.0 dialect even without a version field.
+        let body = process(&service, &mut Request::default(), r#"{"id":1}"#).expect_response();
+        let v = parse(&body);
+        assert_eq!(v["error"]["faultCode"], INVALID_REQUEST);
+        assert_eq!(v["result"], Value::Null);
+        assert_eq!(v["id"], 1);
+    }
+
+    #[test]
+    fn non_finite_version_field_is_a_legacy_fault() {
+        for version in ["inf", "nan", "-inf"] {
+            let service = service();
+            let body = format!(
+                r#"{{"jsonrpc":"{version}","id":5,"method":"check","params":[]}}"#
+            );
+            let v = parse(&process(&service, &mut Request::default(), &body).expect_response());
+            // float("inf") parses but `int()` raises -> pre-1.0 INVALID_JSONRPC.
+            assert_eq!(v["faultCode"], INVALID_REQUEST, "version {version}");
+            assert!(v.get("id").is_none(), "version {version}");
+        }
+    }
+
+    #[test]
+    fn explicit_version_one_gets_v1_object() {
+        let service = service();
+        let body = process(
+            &service,
+            &mut Request::default(),
+            r#"{"jsonrpc":"1.0","id":5,"method":"check","params":[]}"#,
+        )
+        .expect_response();
+        let v = parse(&body);
+        assert_eq!(v["result"]["count"], 1);
+        assert_eq!(v["error"], Value::Null);
+        assert_eq!(v["id"], 5);
+        assert!(v.get("jsonrpc").is_none());
+    }
+
+    #[test]
+    fn empty_string_id_is_pre1() {
+        let service = service();
+        let v = parse(
+            &process(
+                &service,
+                &mut Request::default(),
+                r#"{"method":"check","params":[],"id":""}"#,
+            )
+            .expect_response(),
+        );
+        assert!(v.is_array(), "expected bare array, got {v}");
+    }
+
+    #[test]
+    fn false_id_is_pre1() {
+        let service = service();
+        let v = parse(
+            &process(
+                &service,
+                &mut Request::default(),
+                r#"{"method":"check","params":[],"id":false}"#,
+            )
+            .expect_response(),
+        );
+        assert!(v.is_array(), "expected bare array, got {v}");
+    }
+
+    #[test]
+    fn string_id_is_v1_and_rendered_in_meta() {
+        let service = service();
+        let result = process(
+            &service,
+            &mut Request::default(),
+            r#"{"method":"check","params":[],"id":"abc"}"#,
+        );
+        assert_eq!(result.meta.id, "abc");
+        let v = parse(&result.expect_response());
+        assert_eq!(v["id"], "abc");
+        assert_eq!(v["result"]["count"], 1);
+    }
+
+    #[test]
+    fn named_params_are_resolved_for_specified_method() {
+        let service = service();
+        // Object params for a method with a real parameter spec; the missing
+        // optional fields fall back to defaults and the request is blocked
+        // (no headers) before touching the database.
+        let v = parse(
+            &process(
+                &service,
+                &mut Request::default(),
+                r#"{"method":"get_strikes_grid","params":{"minute_length":60},"id":1}"#,
+            )
+            .expect_response(),
+        );
+        assert_eq!(v["result"], json!({}));
+    }
+
+    #[test]
+    fn named_params_missing_required_is_a_fault() {
+        let service = service();
+        let v = parse(
+            &process(
+                &service,
+                &mut Request::default(),
+                r#"{"method":"get_strikes_grid","params":{"region":1},"id":1}"#,
+            )
+            .expect_response(),
+        );
+        // Legacy (V1) fault: the code lives in `faultCode`.
+        assert_eq!(v["error"]["faultCode"], FAILURE);
+        assert_eq!(
+            v["error"]["faultString"],
+            "missing 1 required positional argument: 'minute_length'"
+        );
+    }
+
+    #[test]
+    fn meta_missing_params_summary_is_null() {
+        let service = service();
+        let result = dispatch(
+            &service,
+            &mut Request::default(),
+            r#"{"method":"check","id":1}"#,
+        );
+        assert_eq!(result.meta.id, "1");
+        assert_eq!(result.meta.params, "null");
+    }
+
+    #[test]
+    fn get_strikes_defaults_offset_argument() {
+        let service = service();
+        // Only the required `minute_length` is given; `id_or_offset` defaults.
+        let v = parse(
+            &process(
+                &service,
+                &mut Request::default(),
+                r#"{"jsonrpc":"2.0","id":4,"method":"get_strikes","params":[60]}"#,
+            )
+            .expect_response(),
+        );
+        assert_eq!(v["result"], Value::Null);
+    }
+
+    #[test]
+    fn grid_success_returns_result_object() {
+        let service = service_with_grid_row();
+        let result = process(
+            &service,
+            &mut allowed_request(),
+            r#"{"jsonrpc":"2.0","id":9,"method":"get_strikes_grid","params":[10,10000,0,1,0]}"#,
+        );
+        assert_eq!(result.meta.outcome, Some(Outcome::Success));
+        let v = parse(&result.expect_response());
+        assert!(v["result"].is_object(), "expected grid object, got {v}");
+        assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn grid_database_failure_is_a_fault() {
+        let service = service_with_db_error();
+        let v = parse(
+            &process(
+                &service,
+                &mut allowed_request(),
+                r#"{"jsonrpc":"2.0","id":9,"method":"get_strikes_grid","params":[10,10000,0,1,0]}"#,
+            )
+            .expect_response(),
+        );
+        assert_eq!(v["error"]["code"], FAILURE);
+    }
+
+    #[test]
+    fn raster_and_strokes_raster_dispatch_and_fault() {
+        for method in ["get_strikes_raster", "get_strokes_raster"] {
+            let service = service_with_db_error();
+            let body = format!(
+                r#"{{"jsonrpc":"2.0","id":9,"method":"{method}","params":[10,10000,0,1]}}"#
+            );
+            let result = process(&service, &mut allowed_request(), &body);
+            assert_eq!(result.meta.method.as_deref(), Some(method));
+            let v = parse(&result.expect_response());
+            assert_eq!(v["error"]["code"], FAILURE, "method {method}");
+        }
+    }
+
+    #[test]
+    fn global_grid_dispatch_and_fault() {
+        let service = service_with_db_error();
+        let v = parse(
+            &process(
+                &service,
+                &mut allowed_request(),
+                r#"{"jsonrpc":"2.0","id":9,"method":"get_global_strikes_grid","params":[10,25000,0,0]}"#,
+            )
+            .expect_response(),
+        );
+        assert_eq!(v["error"]["code"], FAILURE);
+    }
+
+    #[test]
+    fn local_grid_dispatch_and_fault() {
+        let service = service_with_db_error();
+        let v = parse(
+            &process(
+                &service,
+                &mut allowed_request(),
+                r#"{"jsonrpc":"2.0","id":9,"method":"get_local_strikes_grid","params":[1,1,10000,10,0,0,5]}"#,
+            )
+            .expect_response(),
+        );
+        assert_eq!(v["error"]["code"], FAILURE);
     }
 }

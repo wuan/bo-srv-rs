@@ -19,7 +19,7 @@ jobs:
   # and the PostGIS testcontainer's mapped port is on localhost. The database
   # integration suite is enabled during the coverage run via `--features
   # db-integration`, so its tests are included in the Sonar report.
-  build:
+  Build:
     runs-on: ubuntu-latest
     env:
       toolchain: stable
