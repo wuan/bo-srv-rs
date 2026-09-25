@@ -148,9 +148,9 @@ Observability, currently all off: `shared_preload_libraries =
 
 ### 3. Application / schema follow-ups
 
-- **Single DB connection.** The service shares one `tokio_postgres::Client`
-  (`src/postgres.rs`); `db_connection_count` is parsed but unused, so queries
-  serialise. A real connection pool is the main throughput fix.
+- **Done:** the service now uses a `deadpool-postgres` connection pool
+  (`src/postgres.rs`) sized from `db_connection_count`, so up to that many
+  statements run in parallel instead of sharing one multiplexed socket.
 - **No prepared-statement reuse.** `client.query(...)` re-plans every request;
   use `prepare_cached` / a statement cache.
 - **Done:** the no-op `ST_Transform(geog::geometry, 4326)` was replaced with a

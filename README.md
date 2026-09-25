@@ -136,7 +136,7 @@ Environment variables supplement/override the file (explicit env vars win):
 | `BO_DB_NAME` | `blitzortung` | database name |
 | `BO_DB_USER` | `blitzortung` | database user |
 | `BO_DB_PASSWORD` | *(empty)* | database password |
-| `BO_DB_CONNECTION_COUNT` | `3` | desired pool size (informational; see below) |
+| `BO_DB_CONNECTION_COUNT` | `3` | database connection pool size |
 | `BO_BLITZORTUNG_USERNAME` | *(empty)* | `[auth]` username |
 | `BO_BLITZORTUNG_PASSWORD` | *(empty)* | `[auth]` password |
 | `BO_STATSD_HOST` | `localhost` | StatsD receiver host |
@@ -336,9 +336,11 @@ histogram bins (empty when `minute_length <= 10`).
   params) -> rows`) the service layer awaits; `async-trait` keeps it usable as
   `Arc<dyn QueryExecutor>`
 - `mock` — in-memory, async executor for tests (no PostgreSQL needed)
-- `postgres` — production executor over tokio-postgres (single shared client;
-  tokio-postgres multiplexes queries over its connection).  Queries are awaited
-  directly, so the executor never blocks a runtime worker thread
+- `postgres` — production executor over a `deadpool-postgres` connection pool
+  (sized from `db_connection_count`; connections are created on demand and dead
+  sockets are recycled).  Queries are awaited directly, so the executor never
+  blocks a runtime worker thread; each request checks out a connection and
+  reports the wait as `db.pool_wait`
 - `cache` — `ObjectCache` (TTL + optional LRU size + in-flight single-flight
   coalescing) and the `ServiceCache` layout
 - `query` — SQL generation matching `blitzortung/db/query.py` /
@@ -406,10 +408,10 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   Python `TimingState.log_timing` would, without a separate timing-state helper.
 - **Sequential per-connection handling.** Requests on one connection are
   answered strictly in order; the Twisted service's deferred scheduling is
-  not reproduced.  A single tokio-postgres client replaces the connection
-  pool (`connection_count` is accepted for compatibility; the multiplexed
-  client serves all connections and is reconnected on demand after a dropped
-  connection, so a missing database does not crash the service).
+  not reproduced.  Database work uses a `deadpool-postgres` pool sized from
+  `connection_count`; each request checks out a connection (created on demand
+  and recycled when its socket dies), so a missing database does not crash the
+  service.
 - **Async database path.** `QueryExecutor` is asynchronous (`async fn
   query`/`execute`) and the service handlers `.await` it, so a slow query never
   pins a runtime worker thread and concurrency is not capped by the worker

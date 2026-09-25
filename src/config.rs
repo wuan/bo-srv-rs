@@ -77,6 +77,7 @@ pub struct Config {
     pub db_user: String,
     pub db_password: String,
     /// `Config.get_db_connection_count`, default 3 (the txpostgres default).
+    /// Sizes the database connection pool (`src/postgres.rs`).
     pub db_connection_count: u32,
     /// HTTP basic-auth username for the protected Blitzortung data feeds
     /// (`Config.get_username`, `[auth] username`).
