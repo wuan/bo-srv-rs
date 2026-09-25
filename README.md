@@ -42,16 +42,26 @@ cargo run --bin bo-webservice
 
 # override the listening port (also: -p)
 cargo run --bin bo-webservice -- --port 8300
+
+# enable the usage log into a directory
+cargo run --bin bo-webservice -- --servicelog /var/log/blitzortung
+
+# override the GeoIP database used by the usage-log consumer
+cargo run --bin bo-webservice -- --servicelog /var/log/blitzortung \
+  --geoip-db /var/lib/GeoIP/GeoLite2-City.mmdb
 ```
 
-The `bo-webservice` binary accepts `-p, --port <PORT>` and `--protocol <http|lsp>`
-(plus `-h/--help` and `-V/--version`).  Both settings resolve with the
-precedence **CLI > env > config file > default**:
+The `bo-webservice` binary accepts `-p, --port <PORT>`, `--protocol <http|lsp>`,
+`--servicelog <DIR>` and `--geoip-db <PATH>` (plus `-h/--help` and
+`-V/--version`).  All settings resolve with the precedence
+**CLI > env > config file > default**:
 
 | Setting | CLI | env | INI (`[webservice]`) | default |
 | --- | --- | --- | --- | --- |
 | port | `--port`/`-p` | `BO_SERVICE_PORT` | `port` | `8080` |
 | protocol | `--protocol` | `BO_SERVICE_PROTOCOL` | `protocol` | `http` |
+| servicelog dir | `--servicelog` | `BO_SERVICE_SERVICELOG` | `servicelog` | disabled |
+| GeoIP db | `--geoip-db` | `BO_GEOIP_DB` | `geoip_db` | `/var/lib/GeoIP/GeoLite2-City.mmdb` |
 
 ### HTTP mode (default) and Nginx
 
@@ -142,8 +152,8 @@ Environment variables supplement/override the file (explicit env vars win):
 | `BO_STATSD_HOST` | `localhost` | StatsD receiver host |
 | `BO_STATSD_PORT` | `8125` | StatsD receiver UDP port |
 | `BO_STATSD_PREFIX` | `org.blitzortung.service` | StatsD metric name prefix |
-| `BO_SERVICE_LOG_DIR` | `/var/log/blitzortung` if it exists | usage-log directory (empty disables it) |
-| `BO_SERVICE_GEOIP_DB` | `/var/lib/GeoIP/GeoLite2-City.mmdb` | GeoIP database for the usage-log consumer |
+| `BO_SERVICE_SERVICELOG` | *(disabled)* | usage-log **directory** (empty disables it); alias `BO_SERVICE_LOG_DIR` |
+| `BO_GEOIP_DB` | `/var/lib/GeoIP/GeoLite2-City.mmdb` | GeoIP database for the usage-log consumer; alias `BO_SERVICE_GEOIP_DB` |
 
 The PostgreSQL schema is the normal blitzortung one; the service only reads
 `strikes` rows (the `strikes` table with a `geog` geography column, a
@@ -205,14 +215,22 @@ the Python two-step design (per-minute JSON reports plus the separate
 
 A log directory must exist.  Resolution order:
 
-1. `[webservice] log_directory = /path` in `blitzortung.conf`, or the
-   `BO_SERVICE_LOG_DIR` env var (which wins over the INI);
-2. `/var/log/blitzortung`, when that directory exists (the Python default);
-3. otherwise usage logging is disabled entirely — **no queue and no consumer
-   thread are created**.
+Servicelog writing is **disabled by default**.  Enable it by providing a
+directory, resolved with the usual precedence **CLI > env > config > default**:
 
-An empty `BO_SERVICE_LOG_DIR` disables it explicitly.  When enabled the service
-logs `writing per-request usage log to <dir>` at startup.
+1. `--servicelog <DIR>` (CLI);
+2. `BO_SERVICE_SERVICELOG` env var (alias `BO_SERVICE_LOG_DIR`);
+3. `[webservice] servicelog = /path` in `blitzortung.conf` (alias
+   `log_directory`);
+4. default: **disabled** (no queue and no consumer thread are created).
+
+`<path>` is a **directory** that will contain the daily
+`servicelog_YYYY-MM-DD` files (matching the Python layout).  If the path looks
+like a file — it has an extension, e.g. `/var/log/blitzortung/servicelog.log` —
+its parent directory is used (documented behaviour).  A configured directory
+must exist; otherwise the service logs a warning and disables usage logging.
+An empty env value disables it explicitly.  When enabled the service logs
+`writing per-request usage log to <dir>` at startup.
 
 ### File format
 
@@ -221,12 +239,12 @@ fields, byte-identical to the Python tool's output so existing analysis still
 works:
 
 ```text
-1700000000.5000\t3\t10000\t0\t60\t0\t-\tDE\tBerlin\t190\t-\t-\t-
+1700000000500000\t3\t10000\t0\t60\t0\t-\tDE\tBerlin\t190\t-\t-\t-
 ```
 
 | # | Field | Notes |
 | --- | --- | --- |
-| 1 | `ts_seconds` | request epoch seconds, `%.4f` |
+| 1 | `timestamp_us` | request time as an **int64 count of microseconds since the Unix epoch (UTC)** — the exact `current_data` value, no precision loss |
 | 2 | `region` | `0` global, clamped region for the region grid, `-1` local |
 | 3 | `grid_baselength` | the **pre-clamp** `original_grid_base_length` |
 | 4 | `minute_offset` | |
@@ -249,7 +267,8 @@ days.
 
 Country/city come from a pure-Rust MaxMind DB reader (`maxminddb`).  The default
 database is `/var/lib/GeoIP/GeoLite2-City.mmdb`, overridable with
-`[webservice] geoip_db` / `BO_SERVICE_GEOIP_DB`.  GeoIP is **best-effort**: a
+`--geoip-db <PATH>` / `[webservice] geoip_db` / `BO_GEOIP_DB` (alias
+`BO_SERVICE_GEOIP_DB`).  GeoIP is **best-effort**: a
 missing or unreadable database, an unparseable address, or an address that is
 not found all yield `-` and never fail the consumer (the Python tool aborts when
 the database is missing).
@@ -613,6 +632,10 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   missing db.
 - **Usage-log directory and GeoIP path.** The Python service hard-codes
   `/var/log/blitzortung` (used only when it exists).  The Rust port additionally
-  accepts `[webservice] log_directory` / `BO_SERVICE_LOG_DIR` and
-  `[webservice] geoip_db` / `BO_SERVICE_GEOIP_DB`, keeping the same existence
-  check and `/var/log/blitzortung` default.
+  accepts `--servicelog` / `BO_SERVICE_SERVICELOG` /
+  `[webservice] servicelog` (aliases `BO_SERVICE_LOG_DIR` / `log_directory`)
+  and `--geoip-db` / `BO_GEOIP_DB` / `[webservice] geoip_db`, with the flag
+  precedence CLI > env > config and a default of disabled (the Python default
+  `/var/log/blitzortung` is still used when it exists and nothing is set).
+  The row timestamp is an int64 epoch-microsecond value rather than the
+  Python `%.4f` seconds form.
