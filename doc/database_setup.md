@@ -349,6 +349,15 @@ SELECT cron.schedule_in_database(
     '30 0 * * *',
     $$SELECT strikes_drop_old_partitions('2 days')$$,
     'blitzortung', 'blitzortung');
+
+-- Prune the extension's own run history, which grows without bound. It
+-- lives in the cron database (`postgres`), so a plain `cron.schedule`
+-- (which runs in `cron.database_name`) is enough; no target DB is named.
+SELECT cron.schedule(
+    'cron-history-cleanup',
+    '0 1 * * *',
+    $$DELETE FROM cron.job_run_details
+      WHERE end_time < now() - interval '7 days'$$);
 ```
 
 When a job fires the launcher opens a session to the named database and runs
@@ -437,8 +446,9 @@ SELECT cron.unschedule('strikes-ensure-partitions');
 SELECT cron.unschedule(1);
 ```
 
-`pg_cron` records every run in `cron.job_run_details`, which grows unbounded;
-prune it periodically (or add it to the drop job), e.g.:
+`pg_cron` records every run in `cron.job_run_details`, which grows unbounded.
+The `cron-history-cleanup` job above prunes it once a day; to do it by hand, or
+to change the retention window, the equivalent statement is:
 
 ```sql
 DELETE FROM cron.job_run_details
