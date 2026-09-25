@@ -249,14 +249,12 @@ characters:
 1700000000500000\tDE\tBerlin\t\tA\t190\t0\t60\t10000\t3\t0
 ```
 
-**City padding (tabs).** The `city` field is padded with **tab characters**, not
-spaces.  Tab stops are assumed every 8 columns: after the city text the writer
-emits tabs so the next field (`platform`) starts on the next 8-column tab stop,
-with a **minimum of two tabs** after the city name.  This is implemented by
-`pad_city(city, column)` (using `TAB_STOP = 8` and `CITY_MIN_TABS = 2`), which is
-given the current output column at which the city begins.  The city is **never
-truncated**: a longer name simply spans more tab stops and pushes the following
-columns further right.
+**City padding (tabs).** The `city` field is followed by **exactly two tab
+characters**, always — a constant padding (`CITY_PADDING_TABS = 2`) that does
+not depend on the city's length, the current column, or tab-stop width.  The
+city itself is **never truncated**.  This creates one empty alignment field
+between `city` and `platform`, so the city column always spans two tab widths
+and the columns that follow line up.
 
 > **Consequence:** because the padding is made of tabs, splitting a line on
 > `'\t'` yields **empty fields**.  The line therefore no longer has a fixed
@@ -268,7 +266,7 @@ columns further right.
 | --- | --- | --- |
 | 1 | `timestamp_us` | request time as an **int64 count of microseconds since the Unix epoch (UTC)** — the exact `current_data` value, no precision loss |
 | 2 | country | GeoIP ISO code, else `-` |
-| 3 | city | GeoIP English city name, else `-`, tab-padded (never truncated) |
+| 3 | city | GeoIP English city name, else `-`; always followed by two tabs (never truncated) |
 | 4 | platform | `A` for the Android client, else `-` |
 | 5 | version | `bo-android-<n>` client version, else `None` |
 | 6 | `minute_offset` | |
@@ -661,9 +659,9 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   an int64 epoch-microsecond value (not `%.4f` seconds), the masked client-IP
   column is dropped, a client **platform** marker (`A` for Android) is added,
   and the local `x`/`y`/`data_area` columns are removed (a local request is
-identified by `region == -1`).  The `city` field is padded with tabs (min two,
-next 8-column stop) so the following columns line up (never truncated); as a
-result a naive tab split yields empty segments that consumers must ignore.
+identified by `region == -1`).  The `city` field is always followed by exactly
+two tabs (constant padding) so the following columns line up (never truncated);
+as a result a naive tab split yields empty segments that consumers must ignore.
 Backpressure policy: a full queue drops entries with a single `WARN` (requests
 never block).  The servicelog directory must be writable beyond merely existing
 (a common `/var/log/blitzortung` on a locked down server), and a runtime write
