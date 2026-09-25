@@ -1,6 +1,6 @@
 [package]
 name = "blitzortung-srv"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Rust port of the blitzortung JSON-RPC webservice/service layer (LSP-style framing, async I/O)"
 license = "Apache-2.0"
