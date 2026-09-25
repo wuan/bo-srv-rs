@@ -21,10 +21,12 @@ mod support;
 
 use std::collections::{BTreeSet, HashSet};
 
+use bo_service::config::Config;
 use bo_service::data::{GridData, Strike, Timestamp};
 use bo_service::db::{HashableStrikeKey, StrikeDb};
 use bo_service::executor::{QueryExecutor, Value};
 use bo_service::geom::Grid;
+use bo_service::postgres::PostgresExecutor;
 use bo_service::query::{self, TimeInterval};
 use bo_service::service::build_histogram;
 
@@ -559,5 +561,36 @@ fn applied_schema_has_production_indexes() {
         .collect();
 
         assert_eq!(names, expected, "schema drifted from production indexes");
+    });
+}
+
+/// `prepare_cached` reuses the prepared statement: with a single-connection pool
+/// the second run of the same SQL text is a cache hit, so that connection's
+/// statement cache holds exactly one entry.
+#[test]
+fn prepared_statements_are_reused_per_connection() {
+    let db = support::test_db();
+    let config = Config {
+        db_connection_count: 1,
+        ..db.config().clone()
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build runtime");
+    let executor = PostgresExecutor::lazy(&config).expect("build executor");
+
+    runtime.block_on(async {
+        executor.query("SELECT 1", &[]).await.expect("first query");
+        executor.query("SELECT 1", &[]).await.expect("second query");
+
+        // With a single connection both queries ran on the same client, so the
+        // cache must hold exactly the one prepared statement.
+        let client = executor.pool().get().await.expect("checkout");
+        assert_eq!(
+            client.statement_cache.size(),
+            1,
+            "the second run must reuse the prepared statement"
+        );
     });
 }

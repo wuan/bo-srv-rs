@@ -338,9 +338,10 @@ histogram bins (empty when `minute_length <= 10`).
 - `mock` — in-memory, async executor for tests (no PostgreSQL needed)
 - `postgres` — production executor over a `deadpool-postgres` connection pool
   (sized from `db_connection_count`; connections are created on demand and dead
-  sockets are recycled).  Queries are awaited directly, so the executor never
-  blocks a runtime worker thread; each request checks out a connection and
-  reports the wait as `db.pool_wait`
+  sockets are recycled).  Statements are prepared through each connection's
+  cache (`prepare_cached`), so repeated queries skip re-planning.  Queries are
+  awaited directly, so the executor never blocks a runtime worker thread; each
+  request checks out a connection and reports the wait as `db.pool_wait`
 - `cache` — `ObjectCache` (TTL + optional LRU size + in-flight single-flight
   coalescing) and the `ServiceCache` layout
 - `query` — SQL generation matching `blitzortung/db/query.py` /

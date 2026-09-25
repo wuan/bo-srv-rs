@@ -12,6 +12,10 @@
 //! directly by the caller, so the executor never blocks a runtime worker
 //! thread.
 //!
+//! Statements are prepared through each connection's deadpool statement cache
+//! (`prepare_cached`), so a given SQL text is parsed and planned once per
+//! connection instead of on every request.
+//!
 //! # Lazy / reconnecting mode
 //!
 //! [`PostgresExecutor::connect`] connects eagerly (checks out a connection) and
@@ -374,6 +378,36 @@ impl PostgresExecutor {
         })
     }
 
+    /// Prepare `sql` on `client`, reusing that connection's statement cache.
+    ///
+    /// tokio-postgres' own `query(&str, ...)`/`execute(&str, ...)` parse and
+    /// plan the statement on every call.  `ClientWrapper::prepare_cached`
+    /// instead keeps the [`tokio_postgres::Statement`] in a per-connection
+    /// cache keyed by the SQL text, so only the first use of a given statement
+    /// on a connection costs a round trip (the SQL text is fixed per query
+    /// shape; values are always bound as parameters).  The cache lives in the
+    /// connection, so a `Statement` is never used on the client that did not
+    /// prepare it.
+    ///
+    /// A prepare failure on a closed connection is treated like a query outage
+    /// and logged once; an ordinary SQL error is returned without touching the
+    /// failure log.
+    async fn prepare_cached(
+        &self,
+        client: &deadpool_postgres::Object,
+        sql: &str,
+    ) -> Result<tokio_postgres::Statement, Box<dyn Error + Sync + Send>> {
+        match client.prepare_cached(sql).await {
+            Ok(statement) => Ok(statement),
+            Err(error) => {
+                if client.is_closed() {
+                    self.failures.note_failure(&error);
+                }
+                Err(Box::new(error))
+            }
+        }
+    }
+
     /// Check out a pooled connection, reporting the wait as `db.pool_wait`.
     ///
     /// A checkout failure (no connection could be created) is an outage: log it
@@ -420,7 +454,8 @@ impl QueryExecutor for PostgresExecutor {
         let refs = Self::to_refs(&pg_params);
 
         let client = self.acquire().await?;
-        let rows = match client.query(sql, &refs).await {
+        let statement = self.prepare_cached(&client, sql).await?;
+        let rows = match client.query(&statement, &refs).await {
             Ok(rows) => {
                 self.failures.note_success();
                 rows
@@ -451,7 +486,8 @@ impl QueryExecutor for PostgresExecutor {
         let refs = Self::to_refs(&pg_params);
 
         let client = self.acquire().await?;
-        match client.execute(sql, &refs).await {
+        let statement = self.prepare_cached(&client, sql).await?;
+        match client.execute(&statement, &refs).await {
             Ok(affected) => {
                 self.failures.note_success();
                 Ok(affected)

@@ -151,8 +151,9 @@ Observability, currently all off: `shared_preload_libraries =
 - **Done:** the service now uses a `deadpool-postgres` connection pool
   (`src/postgres.rs`) sized from `db_connection_count`, so up to that many
   statements run in parallel instead of sharing one multiplexed socket.
-- **No prepared-statement reuse.** `client.query(...)` re-plans every request;
-  use `prepare_cached` / a statement cache.
+- **Done:** statements are prepared with `prepare_cached`, so each SQL text is
+  parsed and planned once per pooled connection (`deadpool-postgres` keeps the
+  statement cache on the connection).
 - **Done:** the no-op `ST_Transform(geog::geometry, 4326)` was replaced with a
   direct `geog::geometry` access in `strikes_query`, `grid_query` and
   `global_grid_query`. `select` / `select_key` keep the transform because
