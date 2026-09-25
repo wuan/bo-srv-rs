@@ -6,7 +6,7 @@
 //! cargo run --bin bo-webservice
 //! ```
 //!
-//! Configuration (see [`bo_service::config`]): the `--port`/`--protocol` CLI
+//! Configuration (see [`blitzortung_srv::config`]): the `--port`/`--protocol` CLI
 //! flags, `BO_SERVICE_PORT`/`BO_SERVICE_PROTOCOL`, `BO_DB_*` env vars and/or a
 //! `BO_CONFIG` INI file.  Both settings resolve with the precedence **CLI >
 //! env > config file > default** (`Config::from_env` applies the env over the
@@ -21,10 +21,10 @@ use std::sync::Arc;
 
 use clap::Parser;
 
-use bo_service::config::{Config, Protocol};
-use bo_service::executor::QueryExecutor;
-use bo_service::metrics::{Metrics, StatsDMetrics};
-use bo_service::{http, postgres::PostgresExecutor, service::Service, transport};
+use blitzortung_srv::config::{Config, Protocol};
+use blitzortung_srv::executor::QueryExecutor;
+use blitzortung_srv::metrics::{Metrics, StatsDMetrics};
+use blitzortung_srv::{http, postgres::PostgresExecutor, service::Service, transport};
 
 /// Build the service metrics sink.
 ///
@@ -47,7 +47,7 @@ fn build_metrics(config: &Config) -> std::sync::Arc<dyn Metrics> {
             log::warn!(
                 "StatsD metrics disabled: could not set up a sender for {host}:{port}: {error}"
             );
-            std::sync::Arc::new(bo_service::metrics::NoopMetrics)
+            std::sync::Arc::new(blitzortung_srv::metrics::NoopMetrics)
         }
     }
 }
@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let executor: Arc<dyn QueryExecutor> = Arc::new(executor);
         let service: Arc<Service<Arc<dyn Metrics>>> = Arc::new(Service::with_parts(
             executor,
-            bo_service::cache::ServiceCache::new(),
+            blitzortung_srv::cache::ServiceCache::new(),
             metrics,
             std::collections::HashSet::new(),
         ));

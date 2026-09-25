@@ -9,12 +9,12 @@
 //! database and the ten-minute logs from there up to now are downloaded (with
 //! HTTP basic auth) and inserted in batches of 1000.
 
-use bo_service::cli::{
+use blitzortung_srv::cli::{
     build_import_metrics, connect_postgres, describe_error, exit_with, import_tool, init_logging,
     LockWithTimeout,
 };
-use bo_service::config::Config;
-use bo_service::dataimport::HttpFileTransport;
+use blitzortung_srv::config::Config;
+use blitzortung_srv::dataimport::HttpFileTransport;
 
 fn main() {
     let args = <import_tool::ImportArgs as clap::Parser>::parse();

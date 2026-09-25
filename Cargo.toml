@@ -1,5 +1,5 @@
 [package]
-name = "bo-srv-rs"
+name = "blitzortung-srv"
 version = "0.1.1"
 edition = "2021"
 description = "Rust port of the blitzortung JSON-RPC webservice/service layer (LSP-style framing, async I/O)"

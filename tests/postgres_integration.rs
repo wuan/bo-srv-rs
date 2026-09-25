@@ -21,14 +21,14 @@ mod support;
 
 use std::collections::{BTreeSet, HashSet};
 
-use bo_service::config::Config;
-use bo_service::data::{GridData, Strike, Timestamp};
-use bo_service::db::{HashableStrikeKey, StrikeDb};
-use bo_service::executor::{QueryExecutor, Value};
-use bo_service::geom::Grid;
-use bo_service::postgres::PostgresExecutor;
-use bo_service::query::{self, TimeInterval};
-use bo_service::service::build_histogram;
+use blitzortung_srv::config::Config;
+use blitzortung_srv::data::{GridData, Strike, Timestamp};
+use blitzortung_srv::db::{HashableStrikeKey, StrikeDb};
+use blitzortung_srv::executor::{QueryExecutor, Value};
+use blitzortung_srv::geom::Grid;
+use blitzortung_srv::postgres::PostgresExecutor;
+use blitzortung_srv::query::{self, TimeInterval};
+use blitzortung_srv::service::build_histogram;
 
 /// Serializes every test and gives each a clean table.
 ///
@@ -37,7 +37,7 @@ use bo_service::service::build_histogram;
 struct TestContext {
     _guard: std::sync::MutexGuard<'static, ()>,
     runtime: tokio::runtime::Runtime,
-    executor: bo_service::postgres::PostgresExecutor,
+    executor: blitzortung_srv::postgres::PostgresExecutor,
 }
 
 impl TestContext {

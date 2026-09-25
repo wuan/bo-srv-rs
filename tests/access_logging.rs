@@ -7,9 +7,9 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use bo_service::jsonrpc::{Outcome, RequestMeta};
-use bo_service::service::Request;
-use bo_service::transport;
+use blitzortung_srv::jsonrpc::{Outcome, RequestMeta};
+use blitzortung_srv::service::Request;
+use blitzortung_srv::transport;
 
 /// A capturing logger: keeps `(level, message)` for every record.
 struct CaptureLogger {

@@ -21,9 +21,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bo_service::executor::{Param, QueryExecutor, Row};
-use bo_service::http;
-use bo_service::service::Service;
+use blitzortung_srv::executor::{Param, QueryExecutor, Row};
+use blitzortung_srv::http;
+use blitzortung_srv::service::Service;
 
 /// Executor that simulates database latency asynchronously.  `delay` stands in
 /// for a real query round-trip.

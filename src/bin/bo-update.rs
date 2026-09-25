@@ -9,11 +9,11 @@
 
 use chrono::{Duration, Utc};
 
-use bo_service::cli::{
+use blitzortung_srv::cli::{
     build_import_metrics, connect_postgres, describe_error, exit_with, init_logging, update_tool,
     LockWithTimeout,
 };
-use bo_service::config::Config;
+use blitzortung_srv::config::Config;
 
 fn main() {
     let args = <update_tool::UpdateArgs as clap::Parser>::parse();

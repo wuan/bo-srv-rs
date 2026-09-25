@@ -10,8 +10,8 @@
 //! Times default to the last hour (end: now minus one minute) in the selected
 //! time zone.
 
-use bo_service::cli::{connect_postgres, db_tool, describe_error, exit_with, parse_timezone};
-use bo_service::config::Config;
+use blitzortung_srv::cli::{connect_postgres, db_tool, describe_error, exit_with, parse_timezone};
+use blitzortung_srv::config::Config;
 
 fn main() {
     let args = <db_tool::DbArgs as clap::Parser>::parse();

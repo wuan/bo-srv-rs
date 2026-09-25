@@ -7,10 +7,10 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bo_service::executor::QueryExecutor;
-use bo_service::http;
-use bo_service::mock::MockExecutor;
-use bo_service::service::Service;
+use blitzortung_srv::executor::QueryExecutor;
+use blitzortung_srv::http;
+use blitzortung_srv::mock::MockExecutor;
+use blitzortung_srv::service::Service;
 
 fn run_server(eq: impl QueryExecutor + 'static) -> u16 {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -246,8 +246,8 @@ fn unsupported_method_is_405() {
 #[test]
 #[ignore = "requires a live PostgreSQL with the strikes schema (set DATABASE_URL)"]
 fn live_http_grid_query() {
-    use bo_service::config::Config;
-    use bo_service::postgres::PostgresExecutor;
+    use blitzortung_srv::config::Config;
+    use blitzortung_srv::postgres::PostgresExecutor;
 
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let mut config = Config::default();
@@ -370,7 +370,7 @@ fn post_raw(port: u16, headers: &str, body: &str) -> RawResponse {
 /// A mock executor whose grid query returns a large raster so the rendered
 /// response crosses the 1000 byte gzip threshold.
 fn large_response_executor() -> MockExecutor {
-    use bo_service::executor::{Row, Value};
+    use blitzortung_srv::executor::{Row, Value};
 
     let mut mock = MockExecutor::new();
     let rows: Vec<Row> = (0..400)
@@ -401,7 +401,7 @@ fn gzip_is_applied_for_large_responses_when_requested() {
     let plain = post_raw(port, identity_headers, LARGE_GRID_BODY);
     assert_eq!(plain.status_line, "HTTP/1.1 200 OK");
     assert_eq!(plain.header("content-encoding"), None);
-    assert!(plain.body.len() > bo_service::http::COMPRESSION_THRESHOLD);
+    assert!(plain.body.len() > blitzortung_srv::http::COMPRESSION_THRESHOLD);
 
     let gzip_headers =
         "User-Agent: bo-android-190\r\nContent-Type: text/json\r\nAccept-Encoding: gzip\r\n";
@@ -423,7 +423,7 @@ fn old_android_clients_never_receive_gzip() {
         "User-Agent: bo-android-177\r\nContent-Type: text/json\r\nAccept-Encoding: gzip\r\n";
     let response = post_raw(port, headers, LARGE_GRID_BODY);
     assert_eq!(response.header("content-encoding"), None);
-    assert!(response.body.len() > bo_service::http::COMPRESSION_THRESHOLD);
+    assert!(response.body.len() > blitzortung_srv::http::COMPRESSION_THRESHOLD);
 }
 
 #[test]
@@ -437,7 +437,7 @@ fn small_responses_are_not_gzipped_even_when_requested() {
         r#"{"jsonrpc":"2.0","id":1,"method":"check","params":[]}"#,
     );
     assert_eq!(response.header("content-encoding"), None);
-    assert!(response.body.len() < bo_service::http::COMPRESSION_THRESHOLD);
+    assert!(response.body.len() < blitzortung_srv::http::COMPRESSION_THRESHOLD);
 }
 
 /// Regression: a region grid request with `minute_length > 10` also runs the
@@ -447,8 +447,8 @@ fn small_responses_are_not_gzipped_even_when_requested() {
 #[test]
 #[ignore = "requires a live PostgreSQL with the strikes schema (set DATABASE_URL)"]
 fn live_region_grid_with_histogram_returns_result() {
-    use bo_service::config::Config;
-    use bo_service::postgres::PostgresExecutor;
+    use blitzortung_srv::config::Config;
+    use blitzortung_srv::postgres::PostgresExecutor;
 
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let mut config = Config::default();

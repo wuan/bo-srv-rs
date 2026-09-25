@@ -11,13 +11,13 @@
 
 use std::sync::Arc;
 
-use bo_service::cli::{
+use blitzortung_srv::cli::{
     build_import_metrics, describe_error, exit_with, import_websocket_tool, init_logging,
     LockWithTimeout,
 };
-use bo_service::config::Config;
-use bo_service::executor::QueryExecutor;
-use bo_service::postgres::PostgresExecutor;
+use blitzortung_srv::config::Config;
+use blitzortung_srv::executor::QueryExecutor;
+use blitzortung_srv::postgres::PostgresExecutor;
 
 fn main() {
     let args = <import_websocket_tool::WebsocketArgs as clap::Parser>::parse();

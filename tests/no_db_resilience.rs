@@ -14,12 +14,12 @@
 use std::net::TcpListener;
 use std::sync::Arc;
 
-use bo_service::config::Config;
-use bo_service::executor::QueryExecutor;
-use bo_service::jsonrpc;
-use bo_service::metrics::NoopMetrics;
-use bo_service::postgres::PostgresExecutor;
-use bo_service::service::{Request, Service};
+use blitzortung_srv::config::Config;
+use blitzortung_srv::executor::QueryExecutor;
+use blitzortung_srv::jsonrpc;
+use blitzortung_srv::metrics::NoopMetrics;
+use blitzortung_srv::postgres::PostgresExecutor;
+use blitzortung_srv::service::{Request, Service};
 
 /// A config pointing at a dead local port (bound then released).
 fn config_for_dead_port() -> Config {
@@ -39,10 +39,10 @@ fn config_for_dead_port() -> Config {
 /// A lazy executor + service wired exactly like `main.rs` does.
 fn service_with_dead_database() -> Service<NoopMetrics> {
     let executor = PostgresExecutor::lazy(&config_for_dead_port()).unwrap();
-    let executor: Arc<dyn bo_service::executor::QueryExecutor> = Arc::new(executor);
+    let executor: Arc<dyn blitzortung_srv::executor::QueryExecutor> = Arc::new(executor);
     Service::with_parts(
         executor,
-        bo_service::cache::ServiceCache::new(),
+        blitzortung_srv::cache::ServiceCache::new(),
         NoopMetrics,
         Default::default(),
     )
@@ -129,10 +129,10 @@ fn legacy_dialect_without_database_returns_a_fault() {
 async fn repeated_failures_are_logged_once() {
     let executor = Arc::new(PostgresExecutor::lazy(&config_for_dead_port()).unwrap());
     let tracker = executor.failures().clone();
-    let executor: Arc<dyn bo_service::executor::QueryExecutor> = executor;
+    let executor: Arc<dyn blitzortung_srv::executor::QueryExecutor> = executor;
     let service = Service::with_parts(
         executor,
-        bo_service::cache::ServiceCache::new(),
+        blitzortung_srv::cache::ServiceCache::new(),
         NoopMetrics,
         Default::default(),
     );
@@ -201,11 +201,11 @@ fn live_database_serves_and_dead_port_faults() {
 
     // 2) Dead port: the same request shape must fault (and not panic/hang).
     let dead_service = {
-        let executor: Arc<dyn bo_service::executor::QueryExecutor> =
+        let executor: Arc<dyn blitzortung_srv::executor::QueryExecutor> =
             Arc::new(PostgresExecutor::lazy(&config_for_dead_port()).unwrap());
         Service::with_parts(
             executor,
-            bo_service::cache::ServiceCache::new(),
+            blitzortung_srv::cache::ServiceCache::new(),
             NoopMetrics,
             Default::default(),
         )

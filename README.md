@@ -154,9 +154,9 @@ crate, mirroring the Python `base.py` `log.msg` lines (method + a compact,
 size-bounded params summary + client + user agent + handler duration):
 
 ```text
-INFO  bo_service::transport] get_strikes_grid({"minute_length":60,...}) id=1 client=127.0.0.1 ua=bo-android-190 17.5ms
-WARN  bo_service::transport] get_strikes_grid(...) BLOCKED (invalid user agent "Mozilla/5.0") id=2 client=127.0.0.1 ua=Mozilla/5.0 0.1ms
-WARN  bo_service::transport] nope([]) fault -32601 "function nope not found" id=3 client=127.0.0.1 ua=bo-android-190 0.0ms
+INFO  blitzortung_srv::transport] get_strikes_grid({"minute_length":60,...}) id=1 client=127.0.0.1 ua=bo-android-190 17.5ms
+WARN  blitzortung_srv::transport] get_strikes_grid(...) BLOCKED (invalid user agent "Mozilla/5.0") id=2 client=127.0.0.1 ua=Mozilla/5.0 0.1ms
+WARN  blitzortung_srv::transport] nope([]) fault -32601 "function nope not found" id=3 client=127.0.0.1 ua=bo-android-190 0.0ms
 ```
 
 * Success and faults are `INFO`; a fault carries the JSON-RPC code/message.

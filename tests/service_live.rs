@@ -17,11 +17,11 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bo_service::config::Config;
-use bo_service::executor::QueryExecutor;
-use bo_service::postgres::PostgresExecutor;
-use bo_service::service::Service;
-use bo_service::transport;
+use blitzortung_srv::config::Config;
+use blitzortung_srv::executor::QueryExecutor;
+use blitzortung_srv::postgres::PostgresExecutor;
+use blitzortung_srv::service::Service;
+use blitzortung_srv::transport;
 
 fn config_from_env() -> Config {
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");

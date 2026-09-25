@@ -7,10 +7,10 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bo_service::executor::{QueryExecutor, Row, Value};
-use bo_service::mock::MockExecutor;
-use bo_service::service::Service;
-use bo_service::transport;
+use blitzortung_srv::executor::{QueryExecutor, Row, Value};
+use blitzortung_srv::mock::MockExecutor;
+use blitzortung_srv::service::Service;
+use blitzortung_srv::transport;
 
 fn run_server(eq: impl QueryExecutor + 'static) -> u16 {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -157,7 +157,7 @@ fn method_not_found_over_tcp() {
     let port = run_server(mock);
     let response = rpc(port, "", r#"{"jsonrpc":"2.0","id":1,"method":"bogus"}"#);
     let v: serde_json::Value = serde_json::from_str(&response).unwrap();
-    assert_eq!(v["error"]["code"], bo_service::jsonrpc::METHOD_NOT_FOUND);
+    assert_eq!(v["error"]["code"], blitzortung_srv::jsonrpc::METHOD_NOT_FOUND);
     assert_eq!(v["id"], 1);
 }
 
@@ -172,7 +172,7 @@ fn batch_is_rejected_as_invalid_request() {
         r#"[{"jsonrpc":"2.0","id":1,"method":"bogus"},{"jsonrpc":"2.0","id":2,"method":"check","params":[]}]"#,
     );
     let v: serde_json::Value = serde_json::from_str(&response).unwrap();
-    assert_eq!(v["faultCode"], bo_service::jsonrpc::INVALID_REQUEST);
+    assert_eq!(v["faultCode"], blitzortung_srv::jsonrpc::INVALID_REQUEST);
     assert_eq!(v["fault"], "Fault");
 }
 

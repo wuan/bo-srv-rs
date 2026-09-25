@@ -20,9 +20,9 @@ use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, ImageExt};
 use testcontainers_modules::postgres::Postgres;
 
-use bo_service::config::Config;
-use bo_service::executor::QueryExecutor;
-use bo_service::postgres::PostgresExecutor;
+use blitzortung_srv::config::Config;
+use blitzortung_srv::executor::QueryExecutor;
+use blitzortung_srv::postgres::PostgresExecutor;
 
 /// Canonical schema/index set, applied verbatim on container startup (the
 /// Docker entrypoint runs everything in `/docker-entrypoint-initdb.d`).
