@@ -130,7 +130,7 @@ fn resolve_servicelog(cli: Option<&std::path::Path>, config: &Config) -> Service
     let explicit = cli.is_some() || config.service_log_dir.is_some();
     let candidate = match cli {
         Some(path) => Some(servicelog_directory(path)),
-        None => config.candidate_service_log_directory(),
+        None => config.configured_service_log_directory(),
     };
     match candidate {
         None => ServicelogResolution::Disabled,
@@ -203,6 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // (existing and writable) servicelog directory is configured.  Absent, or
     // present but unusable, means no queue and no consumer thread — usage
     // logging is disabled with a single warning rather than erroring per row.
+    let usage_enabled = matches!(servicelog, ServicelogResolution::Enabled(_));
     let usage_consumer: Option<UsageLogConsumer>;
     let usage_sender = match servicelog {
         ServicelogResolution::Enabled(directory) => {
@@ -274,7 +275,11 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tokio::select! {
             result = serve => result?,
             _ = shutdown_signal() => {
-                log::info!("shutdown signal received; draining usage log");
+                if usage_enabled {
+                    log::info!("shutdown signal received; draining usage log");
+                } else {
+                    log::info!("shutdown signal received");
+                }
             }
         }
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
@@ -428,20 +433,12 @@ mod tests {
     /// disabled when neither is set; an unusable path is reported.
     #[test]
     fn resolve_servicelog_precedence_and_usability() {
-        // Default with no configured path: disabled (candidate is the default
-        // path, which in the test environment either exists+writable => Enabled
-        // or is unusable => Unusable; never Disabled via config).
-        let config = Config::default();
-        match resolve_servicelog(None, &config) {
-            ServicelogResolution::Enabled(path) => {
-                assert_eq!(path, std::path::PathBuf::from("/var/log/blitzortung"));
-            }
-            ServicelogResolution::Unusable { path, explicit, .. } => {
-                assert_eq!(path, std::path::PathBuf::from("/var/log/blitzortung"));
-                assert!(!explicit, "default fallback is not explicit");
-            }
-            ServicelogResolution::Disabled => {}
-        }
+        // With nothing configured there is no implicit default: disabled, even if
+        // /var/log/blitzortung happens to exist.
+        assert_eq!(
+            resolve_servicelog(None, &Config::default()),
+            ServicelogResolution::Disabled
+        );
 
         // A writable configured directory is enabled when no CLI value is given.
         let dir = temp_dir("cfg");

@@ -213,29 +213,30 @@ the Python two-step design (per-minute JSON reports plus the separate
 
 ### Enabling and location
 
-A log directory must exist.  Resolution order:
-
-Servicelog writing is **disabled by default**.  Enable it by providing a
-directory, resolved with the usual precedence **CLI > env > config > default**:
+Servicelog writing is **off unless a directory is explicitly configured**.
+There is **no implicit default**: nothing is written (no consumer thread, no
+file opened, no warnings) when no directory is set, even if
+`/var/log/blitzortung` exists.  Enable it with the usual precedence
+**CLI > env > config**:
 
 1. `--servicelog <DIR>` (CLI);
 2. `BO_SERVICE_SERVICELOG` env var (alias `BO_SERVICE_LOG_DIR`);
 3. `[webservice] servicelog = /path` in `blitzortung.conf` (alias
    `log_directory`);
-4. default: **disabled** (no queue and no consumer thread are created).
+4. otherwise: **disabled quiet** (no queue and no consumer thread are created).
 
 `<path>` is a **directory** that will contain the daily
 `servicelog_YYYY-MM-DD` files (matching the Python layout).  If the path looks
 like a file — it has an extension, e.g. `/var/log/blitzortung/servicelog.log` —
 its parent directory is used (documented behaviour).
 
-The directory must exist **and be writable** by the service user; existence
-alone is not enough (`/var/log/blitzortung` often exists but is not writable).
-An unusable directory — missing, not writable, or not a directory — disables the
-consumer with a **single** `WARN` at startup naming the path and the reason.  An
-explicitly configured but unusable path is **warn-and-disable**, not a startup
-failure, so a bad value never prevents the service from running.  An empty env
-value disables it explicitly.  When enabled the service logs
+An **explicitly configured** directory must exist **and be writable** by the
+service user; existence alone is not enough (`/var/log/blitzortung` often exists
+but is not writable).  An unusable explicit directory — missing, not writable,
+or not a directory — disables the consumer with a **single** `WARN` at startup
+naming the path and the reason.  Explicit-but-unusable is **warn-and-disable**,
+not a startup failure, so a bad value never prevents the service from running.
+An empty env value disables it quietly.  When enabled the service logs
 `writing per-request usage log to <dir>` at startup.
 
 ### File format
@@ -653,9 +654,9 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   (missing/unreadable db or not-found address -> `-`), where Python aborts on a
   missing db.
 - **Usage-log directory and GeoIP path.** The Python service hard-codes
-  `/var/log/blitzortung` (used only when it exists).  The Rust port additionally
-  accepts `--servicelog` / `BO_SERVICE_SERVICELOG` /
-  `[webservice] servicelog` (aliases `BO_SERVICE_LOG_DIR` / `log_directory`)
-  and `--geoip-db` / `BO_GEOIP_DB` / `[webservice] geoip_db`, with the flag
-  precedence CLI > env > config and a default of disabled (the Python default
-  `/var/log/blitzortung` is still used when it exists and nothing is set).
+  `/var/log/blitzortung` (used only when it exists).  The Rust port instead
+  requires an explicit directory via `--servicelog` / `BO_SERVICE_SERVICELOG` /
+  `[webservice] servicelog` (aliases `BO_SERVICE_LOG_DIR` / `log_directory`) and
+  is **disabled when nothing is configured** — there is no implicit
+  `/var/log/blitzortung` fallback.  The GeoIP path is `--geoip-db` /
+  `BO_GEOIP_DB` / `[webservice] geoip_db`, with precedence CLI > env > config.

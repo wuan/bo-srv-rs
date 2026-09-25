@@ -336,11 +336,14 @@ impl Config {
 
         // Usage-log directory: `BO_SERVICE_SERVICELOG` (documented) with
         // `BO_SERVICE_LOG_DIR` kept as an alias; an empty value disables it.
-        if let Some(v) = lookup("BO_SERVICE_SERVICELOG").or_else(|| lookup("BO_SERVICE_LOG_DIR")) {
+        use crate::service_log::{
+            GEOIP_DB_ENV, GEOIP_DB_ENV_ALIAS, LOG_DIR_ENV, LOG_DIR_ENV_ALIAS,
+        };
+        if let Some(v) = lookup(LOG_DIR_ENV).or_else(|| lookup(LOG_DIR_ENV_ALIAS)) {
             config.service_log_dir = if v.is_empty() { None } else { Some(v) };
         }
         // GeoIP db: `BO_GEOIP_DB` (documented) with `BO_SERVICE_GEOIP_DB` as alias.
-        if let Some(v) = lookup("BO_GEOIP_DB").or_else(|| lookup("BO_SERVICE_GEOIP_DB")) {
+        if let Some(v) = lookup(GEOIP_DB_ENV).or_else(|| lookup(GEOIP_DB_ENV_ALIAS)) {
             config.service_geoip_db = if v.is_empty() { None } else { Some(v) };
         }
 
@@ -363,42 +366,34 @@ impl Config {
         (&self.statsd_host, self.statsd_port)
     }
 
-    /// The effective usage-log directory: an explicitly configured
-    /// `service_log_dir`, otherwise
-    /// [`DEFAULT_LOG_DIRECTORY`](crate::service_log::DEFAULT_LOG_DIRECTORY).
+    /// The effective usage-log directory.
     ///
-    /// The directory must exist **and** be writable by the process (see
-    /// [`directory_is_writable`](crate::service_log::directory_is_writable));
+    /// Usage logging is **off unless explicitly configured** via `--servicelog`
+    /// (CLI), `BO_SERVICE_SERVICELOG`/`BO_SERVICE_LOG_DIR` (env) or
+    /// `[webservice] servicelog`/`log_directory` (INI).  There is **no implicit
+    /// fallback** to `/var/log/blitzortung`: with nothing configured this
+    /// returns `None` and no consumer/writer is created.
+    ///
+    /// A configured directory must exist **and** be writable by the process
+    /// (see [`directory_is_writable`](crate::service_log::directory_is_writable));
     /// otherwise `None` is returned and usage logging is disabled.  Existence
-    /// alone is not enough — `/var/log/blitzortung` may exist but not be
-    /// writable by the service user, which must not enable a consumer that then
-    /// fails on every row.
+    /// alone is not enough — a directory may exist but not be writable by the
+    /// service user, which must not enable a consumer that then fails on every
+    /// row.
     pub fn service_log_directory(&self) -> Option<std::path::PathBuf> {
         use crate::service_log::directory_is_writable;
 
-        self.candidate_service_log_directory()
+        self.configured_service_log_directory()
             .filter(|path| directory_is_writable(path))
     }
 
-    /// The configured/default usage-log directory **candidate**, checking
-    /// existence only (not writability).
+    /// The **explicitly configured** usage-log directory, without checking
+    /// existence or writability.  `None` when nothing was configured.
     ///
-    /// Used to distinguish "disabled because nothing is configured" from
-    /// "a path was resolved but is unusable"; the latter gets a single startup
-    /// warning.  Returns `None` when nothing is configured at all.
-    pub fn candidate_service_log_directory(&self) -> Option<std::path::PathBuf> {
-        use crate::service_log::{DEFAULT_LOG_DIRECTORY, LOG_DIR_ENV, LOG_DIR_ENV_ALIAS};
-
-        if let Some(dir) = &self.service_log_dir {
-            return Some(std::path::PathBuf::from(dir));
-        }
-        if std::env::var_os(LOG_DIR_ENV).is_some() || std::env::var_os(LOG_DIR_ENV_ALIAS).is_some()
-        {
-            // An explicit (possibly empty) env value was already folded into
-            // `service_log_dir`; do not second-guess it with the default.
-            return None;
-        }
-        Some(std::path::PathBuf::from(DEFAULT_LOG_DIRECTORY))
+    /// Used to distinguish "disabled because nothing is configured" (silent)
+    /// from "a path was configured but is unusable" (one startup warning).
+    pub fn configured_service_log_directory(&self) -> Option<std::path::PathBuf> {
+        self.service_log_dir.as_ref().map(std::path::PathBuf::from)
     }
 
     /// The GeoIP database path for the usage-log consumer: the configured
@@ -892,6 +887,38 @@ mod tests {
         std::fs::remove_dir_all(&alias_target).unwrap();
     }
 
+    /// With nothing configured (no CLI/env/INI) the usage log is **off**: no
+    /// implicit fallback to `/var/log/blitzortung`, even if that directory
+    /// exists.
+    #[test]
+    fn service_log_directory_is_none_without_explicit_config() {
+        let dir = ini_dir("service-log-unconfigured");
+        // An INI without a servicelog key, and no env vars.
+        let ini = dir.join("config.ini");
+        std::fs::write(&ini, "[webservice]\nport = 7070\n").unwrap();
+        let config = Config::from_env_with(|k| {
+            (k == "BO_CONFIG").then(|| ini.to_string_lossy().into_owned())
+        });
+        assert_eq!(config.configured_service_log_directory(), None);
+        assert_eq!(config.service_log_directory(), None);
+
+        // Even the programmatic default (no service_log_dir) is off, regardless
+        // of whether /var/log/blitzortung happens to exist on this host.
+        assert_eq!(Config::default().configured_service_log_directory(), None);
+        assert_eq!(Config::default().service_log_directory(), None);
+
+        // Sanity: on hosts where the Python default exists AND is writable, the
+        // Rust port still does not use it implicitly.
+        if std::path::Path::new("/var/log/blitzortung").is_dir() {
+            let _ = crate::service_log::directory_is_writable(std::path::Path::new(
+                "/var/log/blitzortung",
+            ));
+            assert_eq!(Config::default().service_log_directory(), None);
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A path that exists but cannot be used as a servicelog directory (a
     /// regular file, or a missing directory) is treated as **disabled**, not
     /// enabled: existence alone is not enough.
@@ -909,7 +936,7 @@ mod tests {
         assert_eq!(config.service_log_directory(), None);
         // The candidate is still reported (for the startup warning).
         assert_eq!(
-            config.candidate_service_log_directory().as_deref(),
+            config.configured_service_log_directory().as_deref(),
             Some(file.as_path())
         );
 

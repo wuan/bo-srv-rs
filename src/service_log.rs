@@ -53,9 +53,6 @@ pub const LOG_DIR_ENV: &str = "BO_SERVICE_SERVICELOG";
 /// Alias of [`LOG_DIR_ENV`], kept for backwards compatibility.
 pub const LOG_DIR_ENV_ALIAS: &str = "BO_SERVICE_LOG_DIR";
 
-/// The Python service's default log directory (`cli/webservice.py`).
-pub const DEFAULT_LOG_DIRECTORY: &str = "/var/log/blitzortung";
-
 /// Default GeoIP database path (the Python tool's default).
 pub const DEFAULT_GEOIP_DB: &str = "/var/lib/GeoIP/GeoLite2-City.mmdb";
 
