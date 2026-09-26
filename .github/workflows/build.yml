@@ -15,16 +15,16 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Shared with the `Setup Rust` step so every job installs the same toolchain.
+  RUST_TOOLCHAIN: stable
 
 jobs:
-  # Runs on the host runner (not a container) so the Docker daemon is reachable
-  # and the PostGIS testcontainer's mapped port is on localhost. The database
-  # integration suite is enabled during the coverage run via `--features
-  # db-integration`, so its tests are included in the Sonar report.
-  Build:
+  # Compiles the crate once and warms the `target` cache that the other jobs
+  # restore. The jobs below are independent, so they run in parallel instead of
+  # behind a single serial pipeline; this job exists purely so the first
+  # checkout pays the cold-cache cost for everyone.
+  build:
     runs-on: ubuntu-latest
-    env:
-      toolchain: stable
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
@@ -33,8 +33,15 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy, rustfmt
+
+      - name: Install system build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake pkg-config
 
       - name: Cache cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -46,34 +53,82 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-registry-
 
-      - name: Setup build environment
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ env.toolchain }}
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          cargo --version
-          rustc --version
-
-      - name: Cache cargo build
+      - name: Cache cargo build (debug)
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-build-debug-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-build-
-
-      - name: Install Cargo Tarpaulin
-        run: cargo install cargo-tarpaulin
+            ${{ runner.os }}-cargo-build-debug-
 
       - name: Build
         run: cargo build
 
-      - name: Docker info
-        run: docker version
+  # Coverage + clippy feed the Sonar scan, so they share a job: both reuse the
+  # debug `target` cache and Sonar wants their reports together (`cobertura.xml`
+  # and `clippy.json`, see sonar-project.properties).
+  analysis:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
 
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+
+      - name: Install system build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake pkg-config
+
+      - name: Cache cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo build (debug)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-debug-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-debug-
+
+      # The llvm-tools component backs cargo-llvm-cov's instrumentation.
+      - name: Install llvm-tools
+        run: rustup component add llvm-tools-preview
+
+      # Prebuilt binary instead of `cargo install cargo-llvm-cov`, which would
+      # recompile the tool (and its dependency tree) on every run.
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-llvm-cov
+
+      # cargo-llvm-cov instruments the normal `target` profile and reuses the
+      # debug cache restored above, unlike `cargo tarpaulin` which drove a
+      # separate compilation.  The PostGIS integration suite is included via
+      # `--features db-integration` so it lands in the Sonar report.
+      # `--output-path cobertura.xml` writes the report where
+      # sonar-project.properties (`sonar.rust.cobertura.reportPaths`) expects it.
       - name: Run Tests with Coverage
-        run: cargo tarpaulin --engine llvm --features db-integration --out Xml
+        run: |
+          cargo llvm-cov --features db-integration \
+            --cobertura --output-path cobertura.xml
 
       - name: Run Clippy
         run: cargo clippy --message-format=json &> clippy.json
@@ -83,6 +138,50 @@ jobs:
         if: github.secret_source == 'Actions'
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # Release binaries are only needed for tagged releases and manual runs, so
+  # pull requests skip this entire job (the release profile is a second full
+  # compilation of the dependency tree).
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install system build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake pkg-config
+
+      - name: Cache cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      # Separate key from the debug cache so the two profiles stop evicting each
+      # other from the shared `target` directory.
+      - name: Cache cargo build (release)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-release-
 
       - name: Build Release
         run: |
