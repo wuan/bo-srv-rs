@@ -246,7 +246,7 @@ line per request).  Tabs are shown as `\t` here; the file contains real tab
 characters:
 
 ```text
-1700000000500000\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t3\t0
+22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t3\t0
 ```
 
 **City padding (tabs).** The `city` field is padded with **tab characters**, not
@@ -265,7 +265,7 @@ following columns further right.
 
 | # | Logical field | Notes |
 | --- | --- | --- |
-| 1 | `timestamp_us` | request time as an **int64 count of microseconds since the Unix epoch (UTC)** — the exact `current_data` value, no precision loss |
+| 1 | `timestamp` | request time as the UTC wall-clock time of day, `HH:MM:SS.nnn` (millisecond precision); the date is carried by the daily file name |
 | 2 | country | GeoIP ISO code, else `-` |
 | 3 | city | GeoIP English city name, else `-`; always followed by two tabs (never truncated) |
 | 4 | platform | `A` for the Android client, else `-` |
@@ -657,7 +657,8 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   follow-up tool), the Rust port transforms and appends rows on a background
   thread fed by a bounded queue.  There are no intermediate JSON files and no
   standalone tool to schedule.  The row is a 10-column format: the timestamp is
-  an int64 epoch-microsecond value (not `%.4f` seconds), the masked client-IP
+  the UTC wall-clock time of day as `HH:MM:SS.nnn` (milliseconds; the daily file
+  name carries the date), the masked client-IP
   column is dropped, a client **platform** marker (`A` for Android) is added,
   and the local `x`/`y`/`data_area` columns are removed (a local request is
 identified by `region == -1`).  The `city` field is padded with tabs (four

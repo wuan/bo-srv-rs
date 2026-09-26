@@ -9,7 +9,7 @@
 //! This replaces the Python two-step design (`base.py` writing per-minute JSON
 //! reports + the `bo-webservice-insertlog` follow-up tool): there are **no JSON
 //! intermediate files** and the transform happens in-process.  The row has 10
-//! logical fields (see [`build_row`]): an int64 epoch-microsecond timestamp,
+//! logical fields (see [`build_row`]): the UTC request time as `HH:MM:SS.nnn`,
 //! country/city, a client **platform** marker, the version, then the request
 //! parameters.  The old masked-IP and local `x`/`y`/`data_area` columns are
 //! gone.  The `city` field is tab-padded (see [`pad_city`]), so splitting a line
@@ -107,6 +107,19 @@ pub struct LocalGridLog {
 /// timestamp.microsecond`: epoch microseconds of a UTC timestamp.
 pub fn epoch_microseconds(timestamp: DateTime<Utc>) -> i64 {
     timestamp.timestamp() * 1_000_000 + timestamp.timestamp_subsec_micros() as i64
+}
+
+/// Format an epoch-microsecond UTC timestamp as the servicelog first column:
+/// `HH:MM:SS.nnn` (UTC wall-clock time with **millisecond** precision).
+///
+/// Milliseconds are the [`now_us`](ServiceLogEntry::now_us) value truncated to
+/// the millisecond (`now_us / 1000 % 1000`), so `...500_000` renders `.500` and
+/// no precision beyond milliseconds is shown.
+pub fn format_timestamp(now_us: i64) -> String {
+    let secs = now_us.div_euclid(1_000_000);
+    let millis = now_us.div_euclid(1_000).rem_euclid(1_000);
+    let dt = DateTime::<Utc>::from_timestamp(secs, 0).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+    format!("{}.{:03}", dt.format("%H:%M:%S"), millis)
 }
 
 /// Build a global-grid entry (`jsonrpc_get_global_strikes_grid`).
@@ -239,7 +252,7 @@ fn calc_tab_pad_count(length: usize) -> usize {
 /// Render one entry as the 10-logical-field tab-separated servicelog row.
 ///
 /// Field order:
-/// 1. `timestamp_us` — **int64 epoch microseconds, UTC**;
+/// 1. `timestamp` — **UTC wall-clock time `HH:MM:SS.nnn`** (milliseconds);
 /// 2. `country` — GeoIP ISO code, else `-`;
 /// 3. `city` — GeoIP English name, else `-`, followed by computed tab padding
 ///    (see [`pad_city`]; never truncated);
@@ -257,11 +270,10 @@ fn calc_tab_pad_count(length: usize) -> usize {
 /// The raw client IP and the local `x`/`y`/`data_area` values are intentionally
 /// **not** written; a local request is distinguishable only by `region == -1`.
 ///
-/// The timestamp is the raw [`ServiceLogEntry::now_us`] value — exactly what
-/// the Python `current_data` entries recorded
-/// (`calendar.timegm(...) * 1_000_000 + microsecond`): an **int64 count of
-/// microseconds since the Unix epoch, in UTC**.  It is written as an integer
-/// (no `%.4f` seconds form) so no precision is lost.
+/// The timestamp is the UTC wall-clock time of [`ServiceLogEntry::now_us`],
+/// rendered as `HH:MM:SS.nnn` with **millisecond** precision (see
+/// [`format_timestamp`]).  The date is carried by the daily file name, so only
+/// the time of day is written.
 ///
 /// `platform` and `version` are derived from [`ServiceLogEntry::user_agent`]
 /// via [`client_platform`] / [`user_agent_version`]: an Android client yields
@@ -275,7 +287,7 @@ pub fn build_row(
 ) -> String {
     let platform = client_platform(entry.user_agent.as_deref(), version);
     let city_text = city.unwrap_or("-");
-    let timestamp = entry.now_us.to_string();
+    let timestamp = format_timestamp(entry.now_us);
     let country = country_code.unwrap_or("-");
 
     let mut row = String::new();
@@ -733,6 +745,24 @@ mod tests {
         );
     }
 
+    /// The log timestamp renders the UTC wall clock as `HH:MM:SS.nnn` with
+    /// milliseconds (microseconds truncated, zero-padded).
+    #[test]
+    fn format_timestamp_is_utc_wall_clock_with_milliseconds() {
+        assert_eq!(format_timestamp(1_700_000_000_500_000), "22:13:20.500");
+        assert_eq!(format_timestamp(1_700_000_000_000_000), "22:13:20.000");
+        // 123 microseconds truncate to `.000` (millisecond precision only).
+        assert_eq!(format_timestamp(1_700_000_000_000_123), "22:13:20.000");
+        // 999_999 microseconds truncate to `.999`.
+        assert_eq!(format_timestamp(1_700_000_000_999_999), "22:13:20.999");
+        // A millisecond boundary mid-second is zero-padded.
+        assert_eq!(format_timestamp(1_700_000_000_007_000), "22:13:20.007");
+        // Midnight on the next day.
+        assert_eq!(format_timestamp(1_700_006_400_000_000), "00:00:00.000");
+        // Pre-epoch values stay valid (floor division).
+        assert_eq!(format_timestamp(-1), "23:59:59.999");
+    }
+
     #[test]
     fn user_agent_version_parsing() {
         assert_eq!(user_agent_version(Some("bo-android-190")), Some(190));
@@ -751,14 +781,14 @@ mod tests {
         // "X" (1 char) stays within the first tab block -> CITY_TABS tabs.
         assert_eq!(
             short,
-            "1700000000500000\tDE\tX\t\t\t\tA\t190\t0\t60\t10000\t0\t0"
+            "22:13:20.500\tDE\tX\t\t\t\tA\t190\t0\t60\t10000\t0\t0"
         );
 
         let medium = build_row(&entry(0, None), Some(190), Some("DE"), Some("Berlin"));
         // "Berlin" (6 chars) stays within the first tab block -> CITY_TABS tabs.
         assert_eq!(
             medium,
-            "1700000000500000\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t0\t0"
+            "22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t0\t0"
         );
 
         let long = build_row(
@@ -770,7 +800,7 @@ mod tests {
         // 17 chars span 2 full tab blocks -> 4 - 2 = 2 tabs.
         assert_eq!(
             long,
-            "1700000000500000\tDE\tFrankfurt am Main\t\tA\t190\t0\t60\t10000\t0\t0"
+            "22:13:20.500\tDE\tFrankfurt am Main\t\tA\t190\t0\t60\t10000\t0\t0"
         );
 
         // Padding tabs show up as empty segments on a naive split; ignoring
@@ -790,7 +820,7 @@ mod tests {
         // 27 chars span 3 full tab blocks -> CITY_TABS - 3 = 1 tab.
         assert_eq!(
             row,
-            "1700000000500000\tRU\tSankt-Peterburg-Nikolaevsk\tA\t190\t0\t60\t10000\t0\t0"
+            "22:13:20.500\tRU\tSankt-Peterburg-Nikolaevsk\tA\t190\t0\t60\t10000\t0\t0"
         );
         // The name is intact (no truncation).
         assert!(row.contains(long));
@@ -851,7 +881,7 @@ mod tests {
         // distinguishes a local request.
         assert_eq!(
             row,
-            "1700000000500000\t-\t-\t\t\t\tA\tNone\t0\t60\t10000\t-1\t0"
+            "22:13:20.500\t-\t-\t\t\t\tA\tNone\t0\t60\t10000\t-1\t0"
         );
         let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
         assert_eq!(logical.len(), 10);
@@ -954,7 +984,7 @@ mod tests {
         let content = std::fs::read_to_string(dir.join("servicelog_2023-11-14")).unwrap();
         assert_eq!(
             content,
-            "1700000000500000\t-\t-\t\t\t\tA\t190\t0\t60\t10000\t0\t0\n"
+            "22:13:20.500\t-\t-\t\t\t\tA\t190\t0\t60\t10000\t0\t0\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1048,7 +1078,7 @@ mod tests {
         let day2 = std::fs::read_to_string(dir.join("servicelog_2023-11-15")).unwrap();
         assert_eq!(
             day2,
-            "1700006400000000\t-\t-\t\t\t\tA\t190\t0\t60\t10000\t0\t0\n"
+            "00:00:00.000\t-\t-\t\t\t\tA\t190\t0\t60\t10000\t0\t0\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
