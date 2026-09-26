@@ -1545,10 +1545,19 @@ mod tests {
         // segments; ignore them to recover the 10 logical fields.
         let logical: Vec<&str> = lines[0].split('\t').filter(|s| !s.is_empty()).collect();
         assert_eq!(logical.len(), 10);
-        // Field 1 is an int64 epoch-microsecond count (not seconds/float).
-        let ts_us: i64 = logical[0].parse().expect("timestamp must be an integer");
-        assert!(ts_us > 1_000_000_000_000_000, "got {ts_us}");
-        assert!(!logical[0].contains('.'), "timestamp must not be a float");
+        // Field 1 is the UTC wall-clock time of day, `HH:MM:SS.nnn`.
+        let timestamp = logical[0];
+        assert_eq!(timestamp.len(), 12, "got {timestamp}");
+        assert_eq!(timestamp.as_bytes()[2], b':');
+        assert_eq!(timestamp.as_bytes()[5], b':');
+        assert_eq!(timestamp.as_bytes()[8], b'.');
+        let (hms, millis) = timestamp.split_once('.').expect("millisecond part");
+        assert!(
+            hms.parse::<chrono::NaiveTime>().is_ok(),
+            "invalid time: {hms}"
+        );
+        assert_eq!(millis.len(), 3, "got {millis}");
+        assert!(millis.chars().all(|c| c.is_ascii_digit()), "got {millis}");
         assert_eq!(logical[1], "-"); // country (no geoip db)
         assert_eq!(logical[2], "-"); // city
         assert_eq!(logical[3], "A"); // platform (bo-android user agent)
