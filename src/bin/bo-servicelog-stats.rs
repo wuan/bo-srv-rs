@@ -21,11 +21,12 @@
 //!
 //! Exit code 1 on an unreadable directory or file, 0 otherwise.
 
-use blitzortung_srv::cli::{describe_error, exit_with, servicelog_stats_tool};
+use blitzortung_srv::cli::{describe_error, exit_with};
+use blitzortung_srv::stats;
 
 fn main() {
-    let args = <servicelog_stats_tool::ServicelogStatsArgs as clap::Parser>::parse();
-    let options = match servicelog_stats_tool::ServicelogStatsOptions::from_args(&args) {
+    let args = <stats::ServicelogStatsArgs as clap::Parser>::parse();
+    let options = match stats::ServicelogStatsOptions::from_args(&args) {
         Some(options) => options,
         None => exit_with(
             &format!(
@@ -36,7 +37,7 @@ fn main() {
         ),
     };
 
-    let output = match servicelog_stats_tool::run(&options) {
+    let output = match stats::run(&options) {
         Ok(output) => output,
         Err(error) => exit_with(
             &describe_error(
