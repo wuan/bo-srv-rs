@@ -76,7 +76,6 @@ deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 # lookup (replaces the Python `geoip2` reader).  Lookups are best-effort: a
 # missing or unreadable database, or an address that is not present, yields `-`.
 maxminddb = "0.32"
-wkb = "0.9.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -86,6 +85,9 @@ tokio = { version = "1", features = ["full"] }
 # own `runtime.block_on`).
 testcontainers = { version = "0.27", features = ["blocking"] }
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
+# `atexit` handler that removes the shared testcontainer when the test process
+# exits (statics are never dropped, so its destructor would not run).
+libc = "0.2"
 # Builds a tiny synthetic MaxMind DB in the tests so the usage-log GeoIP
 # success path can be exercised without shipping a real GeoLite2 database.
 maxminddb-writer = "0.1"

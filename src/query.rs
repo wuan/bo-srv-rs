@@ -10,10 +10,9 @@
 //! [`Query::to_postgres`] / [`Query::parameters`] to obtain the `$1, $2, ...`
 //! form with parameters in the same order for tokio-postgres.
 
-use chrono::{DateTime, Utc};
-use wkb::reader::Wkb;
 use crate::executor::Param;
 use crate::geom::{Envelope, Grid};
+use chrono::{DateTime, Utc};
 
 /// Region condition used by the strike select/grid queries
 /// (`query_builder.REGION_CONDITION`).
@@ -612,10 +611,11 @@ pub fn grid_query(
     region: Option<i64>,
     count_threshold: i64,
 ) -> Query {
-    log::debug!("grid_query: time_interval={:?}, region={:?}, count_threshold={}, envelope={:?}", time_interval, region, count_threshold, grid.envelope());
-    let env = grid.envelope().as_wkb_linear_ring();
-    let env_wkb = Wkb::try_new(&env).unwrap();
-    log::debug!("grid_query: envelope={:?}", env_wkb);
+    // The envelope pre-filter is cast to `geography`, so it must be a Polygon:
+    // a LinearRing cast to geography is only the closed boundary line and its
+    // bounding box does not cover the enclosed area.  Around the equator /
+    // prime meridian that made `&&` reject strikes in the middle of the grid.
+    let env = grid.envelope().as_wkb_polygon();
     let mut q = Query::new("strikes");
     q = q
         .set_columns(&[
@@ -717,7 +717,8 @@ pub fn histogram_query(
     }
 
     if let Some(grid) = envelope {
-        let env = grid.envelope().as_wkb_linear_ring();
+        // Polygon, not LinearRing: see `grid_query`.
+        let env = grid.envelope().as_wkb_polygon();
         q = q
             .condition("ST_SetSRID(CAST(%(envelope)s AS geometry), %(envelope_srid)s) && geog")
             .param("envelope", Param::Bytea(env))
@@ -863,6 +864,25 @@ mod tests {
         let q = grid_query(&grid, &interval, None, 0);
         assert!(!q.to_sql().contains("region"));
         assert_eq!(q.parameters().len(), 8);
+    }
+
+    /// The envelope pre-filter is cast to `geography`, so it must be a Polygon
+    /// (a LinearRing only bounds the boundary line, dropping interior points).
+    #[test]
+    fn grid_query_envelope_is_a_polygon() {
+        let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 0, 5, 0));
+        let grid = Grid::new(-5.0, 5.0, -5.0, 5.0, 1.0, 1.0);
+        let envelope = grid_query(&grid, &interval, None, 0)
+            .parameters()
+            .into_iter()
+            .find_map(|param| match param {
+                Param::Bytea(bytes) => Some(bytes),
+                _ => None,
+            })
+            .expect("grid query has an envelope parameter");
+        // ISO WKB: little-endian byte order, type code 3 (Polygon).
+        assert_eq!(envelope[0], 0x01);
+        assert_eq!(u32::from_le_bytes(envelope[1..5].try_into().unwrap()), 3);
     }
 
     #[test]
