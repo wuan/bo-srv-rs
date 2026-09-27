@@ -214,6 +214,73 @@ fn raster_layer(raster: &AsciiWorldMap, width: f64, height: f64, label: &str) ->
     out
 }
 
+/// Render a compact shade legend in the map's lower-left (over the Antarctic
+/// band): a row of the eight [`SQUARE_RAMP`] swatches labelled `1 .. max`, where
+/// `max` is the map's densest-cell query count.
+///
+/// Because a cell's shade is relative to the map's own maximum, the legend
+/// states the absolute count range so the scale is unambiguous.  A `max` of `0`
+/// (no cells) renders nothing.
+fn legend_layer(max: u64, _width: f64, height: f64) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    const SWATCH_W: f64 = 18.0;
+    const SWATCH_H: f64 = 12.0;
+    const GAP: f64 = 2.0;
+    const PAD: f64 = 6.0;
+    let swatches_w = SQUARE_RAMP.len() as f64 * SWATCH_W + (SQUARE_RAMP.len() - 1) as f64 * GAP;
+    let box_w = swatches_w + 2.0 * PAD;
+    let box_h = 40.0;
+    // Bottom-left corner, inset from the map edges.
+    let box_x = 10.0;
+    let box_y = height - box_h - 10.0;
+    let label_y = box_y + 14.0; // "queries per cell" caption
+    let swatch_y = box_y + 20.0;
+    let value_y = swatch_y + SWATCH_H + 10.0;
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "<g class=\"map-legend\" font-family=\"system-ui, sans-serif\">"
+    );
+    let _ = writeln!(
+        out,
+        "  <rect x=\"{box_x:.1}\" y=\"{box_y:.1}\" width=\"{box_w:.1}\" height=\"{box_h:.1}\" \
+         rx=\"4\" fill=\"#ffffff\" fill-opacity=\"0.85\" stroke=\"{COAST_STROKE}\" \
+         stroke-width=\"0.5\"/>"
+    );
+    let _ = writeln!(
+        out,
+        "  <text x=\"{:.1}\" y=\"{label_y:.1}\" font-size=\"10\" fill=\"#24313b\">queries per cell</text>",
+        box_x + PAD
+    );
+    for (i, (r, g, b)) in SQUARE_RAMP.iter().enumerate() {
+        let x = box_x + PAD + i as f64 * (SWATCH_W + GAP);
+        // The swatches are drawn at full opacity (the on-map cells are blended
+        // with the basemap), so the legend shows the pure ramp colours.
+        let _ = write!(
+            out,
+            "  <rect x=\"{x:.1}\" y=\"{swatch_y:.1}\" width=\"{SWATCH_W}\" height=\"{SWATCH_H}\" \
+             fill=\"#{r:02x}{g:02x}{b:02x}\"/>"
+        );
+        let _ = writeln!(out);
+    }
+    let _ = writeln!(
+        out,
+        "  <text x=\"{:.1}\" y=\"{value_y:.1}\" font-size=\"10\" fill=\"#5f707d\">1</text>",
+        box_x + PAD
+    );
+    let _ = writeln!(
+        out,
+        "  <text x=\"{:.1}\" y=\"{value_y:.1}\" font-size=\"10\" fill=\"#5f707d\" \
+         text-anchor=\"end\">{max}</text>",
+        box_x + PAD + swatches_w
+    );
+    out.push_str("</g>\n");
+    out
+}
+
 /// Render a single geographic SVG world map for one query category.
 ///
 /// The map is light-themed: a very light gray ocean, light gray continents and
@@ -221,7 +288,8 @@ fn raster_layer(raster: &AsciiWorldMap, width: f64, height: f64, label: &str) ->
 /// semi-transparent shaded cells of the shared 5-degree raster (see
 /// [`raster_layer`]).  Unlike [`render_local_svg`] (which normalises the raw UTM
 /// tile indices into an abstract scatter), the raster cells are georeferenced by
-/// their 5-degree footprint.
+/// their 5-degree footprint.  A small [`legend_layer`] in the lower-left maps the
+/// eight shades to the count range `1..=max` so the relative scale is explicit.
 ///
 /// `queries` is the category to plot and `label` names it in the SVG title and
 /// `aria-label`.
@@ -265,6 +333,9 @@ pub fn render_world_map_svg(
         COAST_STROKE,
     ));
     svg.push_str(&raster_layer(&raster, w, h, label));
+    // A small legend in the lower-left explains the relative shade scale and
+    // states the map's maximum cell count.
+    svg.push_str(&legend_layer(raster.maximum(), w, h));
     svg.push_str("</svg>\n");
     svg
 }
@@ -309,7 +380,10 @@ mod tests {
     /// Count the raster `<rect>`s in a rendered map (excluding the background
     /// rectangle that fills the whole viewport).
     fn raster_rects(svg: &str) -> usize {
+        // Only the shaded cells: stop before the `map-legend` group (whose
+        // swatches are also `<rect>`s).
         let cells = svg.split("<g class=\"squares\"").nth(1).unwrap_or("");
+        let cells = cells.split("map-legend").next().unwrap_or(cells);
         cells.matches("<rect ").count()
     }
 
@@ -471,7 +545,45 @@ mod tests {
         for svg in [&offline, &interactive] {
             assert!(svg.contains("class=\"basemap\""));
             assert_eq!(svg.matches("<rect ").count(), 1, "only the background rect");
+            // No cells -> no legend.
+            assert!(!svg.contains("map-legend"), "{svg}");
         }
+    }
+
+    /// The in-map legend lists all eight shades and the map's maximum count.
+    #[test]
+    fn map_legend_shows_all_shades_and_the_maximum() {
+        // An empty map has no legend.
+        assert!(legend_layer(0, 960.0, 480.0).is_empty());
+        assert!(!legend_layer(0, 960.0, 480.0).contains("map-legend"));
+
+        let legend = legend_layer(80, 960.0, 480.0);
+        assert!(legend.contains("class=\"map-legend\""), "{legend}");
+        assert!(legend.contains("queries per cell"), "{legend}");
+        // Every ramp colour appears as a swatch.
+        for (r, g, b) in SQUARE_RAMP {
+            let hex = format!("#{r:02x}{g:02x}{b:02x}");
+            assert!(legend.contains(&hex), "missing swatch {hex}: {legend}");
+        }
+        // The maximum and the minimum endpoints are labelled.
+        assert!(legend.contains(">1</text>"), "{legend}");
+        assert!(legend.contains(">80</text>"), "{legend}");
+    }
+
+    /// The rendered world map embeds the legend with the densest cell's count.
+    #[test]
+    fn world_map_svg_includes_the_legend() {
+        let make = |x, y| LocalQuery {
+            x,
+            y,
+            data_area: 5,
+            grid_baselength: 5000,
+            minute_length: 10,
+        };
+        // Two queries on the same cell -> maximum 2.
+        let svg = render_world_map_svg(&[make(1, 1), make(1, 1)], "test", 960, 480);
+        assert!(svg.contains("class=\"map-legend\""), "{svg}");
+        assert!(svg.contains(">2</text>"), "{svg}");
     }
 
     #[test]
