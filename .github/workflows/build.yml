@@ -208,7 +208,7 @@ jobs:
         run: |
           cd target/release
           zip "bo-srv-rs-${GITHUB_REF_NAME}.zip" \
-bo-webservice bo-db bo-import bo-update bo-import-websocket bo-servicelog-stats
+            bo-webservice bo-db bo-import bo-update bo-import-websocket bo-servicelog-stats
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
