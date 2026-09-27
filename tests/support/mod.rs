@@ -35,11 +35,13 @@ const DB_PASSWORD: &str = "blitzortung";
 
 /// A started PostGIS container plus the [`Config`] that points at it.
 ///
-/// The container is stopped and removed when the process exits. It is started
-/// lazily and exactly once via [`test_db`].
+/// The container is stopped and removed when the process exits (see
+/// [`remove_container`]). It is started lazily and exactly once via
+/// [`test_db`].
 pub struct TestDb {
-    /// Kept alive so the container is not removed while tests run.
-    _container: Container<Postgres>,
+    /// Kept alive so the container is not removed while tests run; the
+    /// `atexit` handler takes it out to remove it on exit.
+    container: Mutex<Option<Container<Postgres>>>,
     config: Config,
 }
 
@@ -74,8 +76,14 @@ impl TestDb {
             ..Config::default()
         };
 
+        // `TEST_DB` is a `OnceLock` and statics are never dropped, so the
+        // `Container` destructor would not run at the end of the test process.
+        // Register an exit handler to remove the container explicitly.
+        let registered = unsafe { libc::atexit(remove_container) };
+        assert_eq!(registered, 0, "failed to register container cleanup");
+
         TestDb {
-            _container: container,
+            container: Mutex::new(Some(container)),
             config,
         }
     }
@@ -119,6 +127,25 @@ impl TestDb {
 }
 
 static TEST_DB: OnceLock<TestDb> = OnceLock::new();
+
+/// `atexit` handler: remove the shared container when the test process exits.
+///
+/// Statics are never dropped, so [`TestDb`]'s `Container` destructor does not
+/// run on its own; without this the running PostGIS container would be left
+/// behind after the test binary finishes.
+extern "C" fn remove_container() {
+    let Some(test_db) = TEST_DB.get() else {
+        return;
+    };
+    let container = test_db
+        .container
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(container) = container {
+        let _ = container.rm();
+    }
+}
 
 /// The process-wide PostGIS container, started on first use.
 pub fn test_db() -> &'static TestDb {

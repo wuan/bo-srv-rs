@@ -225,6 +225,7 @@ dependencies = [
  "flate2",
  "futures",
  "ini",
+ "libc",
  "log",
  "maxminddb",
  "maxminddb-writer",

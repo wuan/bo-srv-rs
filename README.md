@@ -693,8 +693,12 @@ cargo run --bin bo-servicelog-stats -- --date 2023-11-14 --format html \
 - **Python `round()` is round-half-even on the exact binary value**, not the
   simple multiply-by-10 trick; `round::py_round` uses exact decimal
   formatting to match CPython (`round(0.025, 2)` is `0.03`).
-- **WKB is 2D** little-endian LineString rings (as produced by
-  `shapely.wkb.dumps(LinearRing(...))`); no Z or SRID wrapper.
+- **WKB is 2D** little-endian (as produced by `shapely.wkb.dumps(...)`); no Z
+  or SRID wrapper.  Geometry envelopes are encoded as Polygons, not
+  `LinearRing`s: the grid/histogram `&& geog` pre-filter casts the envelope to
+  `geography`, and a ring cast to geography bounds only its boundary line, so
+  strikes in the middle of an envelope spanning the equator / prime meridian
+  were dropped.
 - **Fixed region table.** The 7-region grid layout is compiled into
   `geom::REGIONS` exactly as defined in `blitzortung/gis/constants.py`.
 - **No `utm` crate.** The original port plan used the Rust `utm` crate; its

@@ -299,6 +299,32 @@ fn grid_query_places_strike_in_expected_cell() {
     });
 }
 
+/// Regression: an envelope that contains the equator / prime meridian still
+/// matches strikes in its interior.  The pre-filter is a geography `&&`, and a
+/// LinearRing cast to geography only bounds its boundary line, so a strike in
+/// the middle of the grid (nearer the equator than any corner) was dropped.
+#[test]
+fn grid_query_matches_strike_across_the_equator_and_prime_meridian() {
+    let ctx = TestContext::new();
+    let grid = Grid::new(-5.0, 5.0, -5.0, 5.0, 1.0, 1.0);
+    ctx.runtime.block_on(async {
+        let db = StrikeDb::new(&ctx.executor, 4326);
+        db.insert(&strike_now(0.5, 0.5, None), 1)
+            .await
+            .expect("insert must succeed");
+
+        let data = db
+            .select_grid(&grid, 0, &recent_interval(), None)
+            .await
+            .expect("grid query must succeed");
+
+        // rx = trunc(0.5 + 5) = 5, ry = trunc(0.5 + 5) = 5, and the grid result
+        // flips y so y_index = y_bin_count - ry = 10 - 5 = 5.
+        assert_eq!(data.get(5, 5).map(|cell| cell.count), Some(1));
+        assert_eq!(grid_total(&data, &grid), 1);
+    });
+}
+
 /// Python `test_grid_query_with_count_threshold`: `count(*) > threshold` drops
 /// sparse cells.
 #[test]
@@ -380,6 +406,32 @@ fn global_grid_query_places_strike() {
         assert_eq!(rows[0].get_i64(0), Some(11));
         assert_eq!(rows[0].get_i64(1), Some(49));
         assert_eq!(rows[0].get_i64(2), Some(1));
+    });
+}
+
+/// Regression: the histogram envelope pre-filter uses the same areal
+/// geography bounding box, so a strike across the equator / prime meridian is
+/// still counted.
+#[test]
+fn histogram_query_matches_strike_across_the_equator() {
+    let ctx = TestContext::new();
+    let grid = Grid::new(-5.0, 5.0, -5.0, 5.0, 1.0, 1.0);
+    ctx.runtime.block_on(async {
+        let db = StrikeDb::new(&ctx.executor, 4326);
+        db.insert(&strike_now(0.5, 0.5, None), 1)
+            .await
+            .expect("insert must succeed");
+
+        let interval = recent_interval();
+        let query = query::histogram_query(&interval, 5, None, Some(&grid));
+        let rows = ctx
+            .executor
+            .query(&query.to_postgres(), &query.parameters())
+            .await
+            .expect("histogram query must succeed");
+
+        let total: i64 = rows.iter().map(|row| row.get_i64(1).unwrap_or(0)).sum();
+        assert_eq!(total, 1);
     });
 }
 

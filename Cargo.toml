@@ -85,6 +85,9 @@ tokio = { version = "1", features = ["full"] }
 # own `runtime.block_on`).
 testcontainers = { version = "0.27", features = ["blocking"] }
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
+# `atexit` handler that removes the shared testcontainer when the test process
+# exits (statics are never dropped, so its destructor would not run).
+libc = "0.2"
 # Builds a tiny synthetic MaxMind DB in the tests so the usage-log GeoIP
 # success path can be exercised without shipping a real GeoLite2 database.
 maxminddb-writer = "0.1"
