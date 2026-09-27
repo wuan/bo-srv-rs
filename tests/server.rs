@@ -157,7 +157,10 @@ fn method_not_found_over_tcp() {
     let port = run_server(mock);
     let response = rpc(port, "", r#"{"jsonrpc":"2.0","id":1,"method":"bogus"}"#);
     let v: serde_json::Value = serde_json::from_str(&response).unwrap();
-    assert_eq!(v["error"]["code"], blitzortung_srv::jsonrpc::METHOD_NOT_FOUND);
+    assert_eq!(
+        v["error"]["code"],
+        blitzortung_srv::jsonrpc::METHOD_NOT_FOUND
+    );
     assert_eq!(v["id"], 1);
 }
 

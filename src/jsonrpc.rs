@@ -874,7 +874,10 @@ mod tests {
     #[test]
     fn outcome_labels() {
         assert_eq!(Outcome::Success.label(), "ok");
-        assert_eq!(Outcome::Blocked("blocked ip".to_string()).label(), "BLOCKED");
+        assert_eq!(
+            Outcome::Blocked("blocked ip".to_string()).label(),
+            "BLOCKED"
+        );
         assert_eq!(
             Outcome::Fault {
                 code: FAILURE,
@@ -938,9 +941,7 @@ mod tests {
     fn non_finite_version_field_is_a_legacy_fault() {
         for version in ["inf", "nan", "-inf"] {
             let service = service();
-            let body = format!(
-                r#"{{"jsonrpc":"{version}","id":5,"method":"check","params":[]}}"#
-            );
+            let body = format!(r#"{{"jsonrpc":"{version}","id":5,"method":"check","params":[]}}"#);
             let v = parse(&process(&service, &mut Request::default(), &body).expect_response());
             // float("inf") parses but `int()` raises -> pre-1.0 INVALID_JSONRPC.
             assert_eq!(v["faultCode"], INVALID_REQUEST, "version {version}");

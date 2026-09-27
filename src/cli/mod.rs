@@ -105,10 +105,9 @@ pub fn init_logging_with_default(default_filter: &str) {
         return;
     }
 
-    let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(default_filter),
-    )
-    .try_init();
+    let _ =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
+            .try_init();
 }
 
 /// Try to install the systemd journal logger, returning `true` on success.

@@ -207,7 +207,11 @@ async fn run_once(
         interval.tick().await;
         loop {
             interval.tick().await;
-            if write.send(Message::Text("{}".to_string().into())).await.is_err() {
+            if write
+                .send(Message::Text("{}".to_string().into()))
+                .await
+                .is_err()
+            {
                 log::info!("refresher exiting");
                 return;
             }

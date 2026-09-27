@@ -1542,9 +1542,9 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 1);
         // City padding is made of tabs, so a naive split yields empty
-        // segments; ignore them to recover the 10 logical fields.
+        // segments; ignore them to recover the 13 logical fields.
         let logical: Vec<&str> = lines[0].split('\t').filter(|s| !s.is_empty()).collect();
-        assert_eq!(logical.len(), 10);
+        assert_eq!(logical.len(), 13);
         // Field 1 is the UTC wall-clock time of day, `HH:MM:SS.nnn`.
         let timestamp = logical[0];
         assert_eq!(timestamp.len(), 12, "got {timestamp}");
@@ -1571,8 +1571,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&log_dir);
     }
 
-    /// A local-grid request writes the 10-field row with region `-1` (the local
-    /// x/y/data_area are no longer part of the line).
+    /// A local-grid request writes the 13-field row with region `-1` and the
+    /// local x/y/data_area values.
     #[tokio::test]
     async fn jsonrpc_get_local_strikes_grid_records_usage_entry() {
         let mut mock = MockExecutor::new();
@@ -1605,12 +1605,13 @@ mod tests {
         let content = read_servicelog(&log_dir, &today());
         let line = content.lines().next().unwrap();
         let logical: Vec<&str> = line.split('\t').filter(|s| !s.is_empty()).collect();
-        assert_eq!(logical.len(), 10);
+        assert_eq!(logical.len(), 13);
         assert_eq!(logical[8], "-1"); // region -1 for local
-                                      // Local coordinates are no longer written.
-        assert!(!line.contains("101"));
-        assert!(!line.contains("202"));
-        assert!(!logical.contains(&"5"));
+        assert_eq!(logical[10], "101"); // local x
+        assert_eq!(logical[11], "202"); // local y
+        assert_eq!(logical[12], "5"); // local data_area
+                                      // The raw client IP is never written.
+        assert!(!line.contains("5.6.7.8"));
 
         let _ = std::fs::remove_dir_all(&log_dir);
     }
@@ -1650,7 +1651,7 @@ mod tests {
             .split('\t')
             .filter(|s| !s.is_empty())
             .collect();
-        assert_eq!(logical.len(), 10);
+        assert_eq!(logical.len(), 13);
         assert_eq!(logical[8], "0"); // region 0 for global
 
         let _ = std::fs::remove_dir_all(&log_dir);
