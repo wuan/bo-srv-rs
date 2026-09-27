@@ -41,7 +41,7 @@ pub mod query;
 pub mod round;
 pub mod service;
 pub mod service_log;
-pub mod service_log_stats;
+pub mod stats;
 pub mod transport;
 pub mod util;
 pub mod websocket;

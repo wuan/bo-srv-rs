@@ -10,7 +10,6 @@
 pub mod db_tool;
 pub mod import_tool;
 pub mod import_websocket_tool;
-pub mod servicelog_stats_tool;
 pub mod update_tool;
 
 use std::path::PathBuf;

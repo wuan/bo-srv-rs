@@ -5,7 +5,7 @@
 //! rendering.  The same [`AsciiWorldMap`] grid also backs the geographic SVG
 //! maps (see [`crate::map::svg`]).
 
-use crate::service_log_stats::{LocalQuery, ServiceLogStats, OFFLINE_MINUTE_LENGTH};
+use crate::stats::{LocalQuery, ServiceLogStats, OFFLINE_MINUTE_LENGTH};
 
 /// The number of base-raster columns spanning the world (5-degree cells):
 /// `360 / 5 = 72`.

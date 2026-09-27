@@ -10,12 +10,12 @@
 //!   [`crate::map::ascii`]).
 //!
 //! The map functions consume [`ServiceLogStats`] / [`LocalQuery`] from
-//! [`crate::service_log_stats`].
+//! [`crate::stats`].
 
 use std::fmt::Write as _;
 
 use crate::map::ascii::{AsciiWorldMap, WORLD_COLS, WORLD_ROWS};
-use crate::service_log_stats::{LocalQuery, ServiceLogStats};
+use crate::stats::{LocalQuery, ServiceLogStats};
 
 /// Escape the five XML/HTML metacharacters so arbitrary labels (country, city)
 /// can be embedded safely in SVG/HTML.
@@ -278,7 +278,7 @@ pub fn render_world_svg(stats: &ServiceLogStats, width: u32, height: u32) -> (St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service_log_stats::{aggregate, parse_content};
+    use crate::stats::{aggregate, parse_content};
 
     const ISSUE_SAMPLE: &str = "\
 08:44:50.596\tUS\tSun Prairie\t\t\tA\t352\t0\t10\t25000\t0\t0\t-\t-\t-\t0.036\n\

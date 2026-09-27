@@ -10,8 +10,8 @@
 //!   ([`svg::render_local_svg`]) and the geographic world maps used by the HTML
 //!   report ([`svg::render_world_svg`]).
 //!
-//! The map functions read [`crate::service_log_stats::ServiceLogStats`] /
-//! [`crate::service_log_stats::LocalQuery`]; the statistics module in turn calls
+//! The map functions read [`crate::stats::ServiceLogStats`] /
+//! [`crate::stats::LocalQuery`]; the statistics module in turn calls
 //! back into this module to render the maps it embeds in the text and HTML
 //! reports.
 

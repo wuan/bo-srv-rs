@@ -1,10 +1,53 @@
-//! `bo-servicelog-stats` implementation: daily statistics from the service's
-//! `servicelog_YYYY-MM-DD` usage-log files.
+//! Daily statistics from the service's `servicelog_YYYY-MM-DD` usage-log files
+//! (the `bo-servicelog-stats` tool, issues #24 and #28).
 //!
-//! Unlike `bo-db`/`bo-import`/`bo-update`, this tool has no Python counterpart
-//! (the issue asks for new statistics); it reuses the servicelog format the
-//! service writes (see [`crate::service_log`]) and the aggregation helpers in
-//! [`crate::service_log_stats`].
+//! The service writes one tab-separated row per successful grid request (see
+//! [`crate::service_log`]).  This module parses those files back into rows and
+//! aggregates them into daily statistics:
+//!
+//! * **total requests** — the number of parsed rows (optionally split by the
+//!   local / global / region request flavours);
+//! * **top countries** — requests grouped by the GeoIP country column;
+//! * **top cities** — requests grouped by the GeoIP city column;
+//! * **top client versions** — requests grouped by the parsed
+//!   `bo-android-<n>` version;
+//! * **local query overlay** — the `(x, y, raster baselength)` grid locations
+//!   of the local requests, for plotting on a world map (see [`crate::map`]:
+//!   `render_ascii_maps` for the ASCII raster, `render_world_svg` for the
+//!   geographic SVG maps).
+//!
+//! Besides the text, JSON and SVG renderers this module provides
+//! [`render::render_html`], a standalone static HTML report (issue #28) that
+//! embeds the statistics tables and two light-themed SVG world maps
+//! (background/offline and interactive) in a single self-contained document.
+//!
+//! ## Layout
+//!
+//! * [`parse`] — the `servicelog_YYYY-MM-DD` line/file parser;
+//! * [`aggregate`] — the statistics types and the aggregation;
+//! * [`render`] — the text / JSON / static-HTML renderers;
+//! * [`day`] — day-file and "today (UTC)" helpers;
+//! * the rest of this module is the `bo-servicelog-stats` command-line tool
+//!   ([`ServicelogStatsArgs`], [`ServicelogStatsOptions`], [`run`]).
+
+pub mod aggregate;
+pub mod day;
+pub mod parse;
+pub mod render;
+
+pub use aggregate::{
+    aggregate, statistics_for_file, DataAreaBucket, LocalQuery, ServiceLogStats, TopEntry,
+    OFFLINE_MINUTE_LENGTH,
+};
+pub use day::{day_from_filename, day_report, today_utc, DayReport};
+pub use parse::{
+    parse_content, parse_file, parse_row, ParseOutcome, ServiceLogRow, DEFAULT_TOP_N,
+    SERVICELOG_FIELDS,
+};
+pub use render::{render_html, render_json, render_text};
+
+#[cfg(test)]
+mod tests;
 
 use std::path::{Path, PathBuf};
 
@@ -12,10 +55,6 @@ use clap::Parser;
 
 use crate::config::Config;
 use crate::map::{render_ascii_map, render_local_svg};
-use crate::service_log_stats::{
-    day_from_filename, day_report, parse_file, render_html, render_json, render_text, today_utc,
-    DayReport, DEFAULT_TOP_N,
-};
 
 /// The default servicelog directory when nothing is configured: the location
 /// the Python service used (`/var/log/blitzortung`).
@@ -232,7 +271,7 @@ pub fn run(options: &ServicelogStatsOptions) -> std::io::Result<String> {
             let mut svgs: Vec<String> = Vec::new();
             for file in &files {
                 let outcome = parse_file(file)?;
-                let stats = crate::service_log_stats::aggregate(&outcome.rows, options.top);
+                let stats = aggregate(&outcome.rows, options.top);
                 svgs.push(render_local_svg(&stats, options.width, options.height));
             }
             Ok(svgs.join("\n"))
@@ -265,7 +304,7 @@ pub fn statistics_for_single_file(path: &Path, top: usize) -> std::io::Result<Da
 }
 
 #[cfg(test)]
-mod tests {
+mod tool_tests {
     use super::*;
 
     fn args(dir: PathBuf) -> ServicelogStatsArgs {
