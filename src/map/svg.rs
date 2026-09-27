@@ -431,7 +431,7 @@ mod tests {
             assert!(svg.contains("class=\"basemap\""), "{svg}");
             assert_eq!(
                 svg.matches("<path").count(),
-                crate::map::world::land_rings().len()
+                crate::map::world::land_polygons().len()
             );
             // Light basemap: very light gray water, light gray land.
             assert!(svg.contains(WATER_FILL), "{svg}");

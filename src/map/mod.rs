@@ -24,4 +24,4 @@ pub use ascii::{
     WORLD_ROWS,
 };
 pub use svg::{render_local_svg, render_world_map_svg, render_world_svg};
-pub use world::{continent_layer, land_rings, project, MAP_HEIGHT, MAP_WIDTH};
+pub use world::{continent_layer, land_polygons, land_rings, project, MAP_HEIGHT, MAP_WIDTH};

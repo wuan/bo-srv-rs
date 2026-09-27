@@ -5,17 +5,18 @@
 
 ## Source
 
-Derived from the **Natural Earth** 1:110m "Land" physical vector dataset
-(`ne_110m_land`), from the official GeoJSON release in the
-[`nvkelso/natural-earth-vector`](https://github.com/nvkelso/natural-earth-vector)
+Derived from the **Natural Earth** 1:110m "Land" and "Lakes" physical vector
+datasets (`ne_110m_land`, `ne_110m_lakes`), from the official GeoJSON release in
+the [`nvkelso/natural-earth-vector`](https://github.com/nvkelso/natural-earth-vector)
 repository:
 
 ```
 https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_land.geojson
+https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_lakes.geojson
 ```
 
 Natural Earth data is in the **public domain** — no attribution is required.
-The source is noted here purely for provenance.
+The sources are noted here purely for provenance.
 
 ## Processing
 
@@ -31,11 +32,20 @@ closure lies on the map border and is invisible.  An earlier revision had split
 Antarctica into two rings at an interior meridian (~59W), which drew straight
 vertical closure segments from the south pole up to the Antarctic peninsula and
 rendered as a visible seam in the servicelog world map.  The generator rebuilds
-only Antarctica from the source and copies every other landmass ring unchanged,
-so the fix stays scoped to the ring that had the bug.
+only Antarctica from the land source and copies every other landmass exterior
+ring unchanged, so the fix stays scoped to the ring that had the bug.
 
-Result: 127 rings, ~4165 points, ~71 KB — detailed enough to embed while still
-self-contained, and recognizable at 360x180 SVG and the 72x36 ASCII raster.
+Lakes are carried as **interior rings** (holes) of the landmass polygon that
+contains them: the 24 `ne_110m_lakes` features (including the US Great Lakes,
+Baikal, Victoria, Tanganyika, …) plus the Caspian Sea, which Natural Earth
+already carves as an interior ring of the Eurasian landmass.  The renderer
+punches the holes out with the SVG `evenodd` fill rule so they show the water
+background instead of rendering as solid land.  An earlier revision dropped all
+interior rings, so no lake was visible.
+
+Result: 127 features, 25 lake holes, ~4559 points, ~78 KB — detailed enough to
+embed while still self-contained, and recognizable at 360x180 SVG and the 72x36
+ASCII raster.
 
 The landmass is **only** an orientation aid; it is not a survey-accurate
 basemap.

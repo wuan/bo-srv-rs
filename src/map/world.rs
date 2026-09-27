@@ -15,24 +15,30 @@
 //!
 //! ## Provenance and licence
 //!
-//! The outlines are derived from the **Natural Earth** 1:110m "Land" physical
-//! vector dataset, `ne_110m_land`
-//! (<https://www.naturalearthdata.com/downloads/110m-physical-vectors/110m-land/>).
+//! The outlines are derived from the **Natural Earth** 1:110m "Land" and "Lakes"
+//! physical vector datasets, `ne_110m_land` and `ne_110m_lakes`
+//! (<https://www.naturalearthdata.com/downloads/110m-physical-vectors/>).
 //! Natural Earth data is in the **public domain** (no attribution required), and
-//! the source is only noted here for provenance.  The `assets/world-110m-land.geojson`
-//! asset was produced from the official GeoJSON release
-//! (`nvkelso/natural-earth-vector`, `geojson/ne_110m_land.geojson`) by applying
-//! Douglas-Peucker simplification at ~0.1 degrees and quantizing the coordinates
-//! to 2 decimal places; latitudes span the full `[-90, 90]` range (Antarctica
-//! reaches the south pole).  Antarctica is the one landmass that crosses the
-//! antimeridian; it is kept as a single ring that closes along the
-//! antimeridian / south-pole map edge (`[180, -90] -> [-180, -90]`), so no path
-//! draws a seam through the map interior.  See
+//! the sources are only noted here for provenance.  The
+//! `assets/world-110m-land.geojson` asset was produced from the official GeoJSON
+//! releases (`nvkelso/natural-earth-vector`) by applying Douglas-Peucker
+//! simplification at ~0.1 degrees and quantizing the coordinates to 2 decimal
+//! places; latitudes span the full `[-90, 90]` range (Antarctica reaches the
+//! south pole).
+//!
+//! Antarctica is the one landmass that crosses the antimeridian; it is kept as a
+//! single ring that closes along the antimeridian / south-pole map edge
+//! (`[180, -90] -> [-180, -90]`), so no path draws a seam through the map
+//! interior.
+//!
+//! Lakes (the US Great Lakes, the Caspian, Baikal, …) are carried as **interior
+//! rings** of the landmass polygon that contains them; the renderer punches them
+//! out with the SVG even-odd fill rule so they show the water background.  See
 //! `assets/generate_world_basemap.py` for the reproducible pipeline.
 //!
 //! ## Accuracy
 //!
-//! The outlines are fine (about 4200 points in total) and are **only** meant as
+//! The outlines are fine (about 4500 points in total) and are **only** meant as
 //! an orientation aid, not a survey-accurate basemap.  The local-query overlay
 //! uses the same projection, so a marker sits in the right part of the right
 //! continent.
@@ -48,33 +54,64 @@ pub const MAP_HEIGHT: u32 = 480;
 /// The simplified Natural Earth 110m land basemap (see the module docs).
 const LAND_GEOJSON: &str = include_str!("../../assets/world-110m-land.geojson");
 
-/// The parsed basemap: closed landmass rings of `(longitude, latitude)` degrees.
+/// One landmass polygon: a closed exterior ring followed by any interior rings
+/// (lakes) that are punched out of it.
 ///
-/// Parsed once from the embedded [`LAND_GEOJSON`] on first use.  Every ring is
-/// closed (its last point repeats its first) and all coordinates are within
-/// `[-180, 180]` / `[-90, 90]`.
+/// All rings are closed `(longitude, latitude)` degree rings and every
+/// coordinate is within `[-180, 180]` / `[-90, 90]`.
+pub type LandPolygon = Vec<Vec<(f64, f64)>>;
+
+/// The parsed basemap: closed landmass polygons of `(longitude, latitude)`
+/// degrees (exterior ring first, lake holes after).
+///
+/// Parsed once from the embedded [`LAND_GEOJSON`] on first use.
+static LAND_POLYGONS: OnceLock<Vec<LandPolygon>> = OnceLock::new();
+
+/// Every landmass ring, flattened: exteriors **and** lake holes, in polygon
+/// order (exterior first, then that polygon's holes).
 static LAND_RINGS: OnceLock<Vec<Vec<(f64, f64)>>> = OnceLock::new();
 
-/// The landmass rings of the embedded basemap (see [`LAND_RINGS`]).
+/// The landmass polygons of the embedded basemap (see [`LAND_POLYGONS`]).
 ///
 /// Parse errors are impossible for the embedded, build-time asset; should the
 /// asset ever be malformed the map simply renders without a basemap rather than
 /// panicking.
-pub fn land_rings() -> &'static [Vec<(f64, f64)>] {
-    LAND_RINGS
-        .get_or_init(|| parse_land_rings(LAND_GEOJSON))
+pub fn land_polygons() -> &'static [LandPolygon] {
+    LAND_POLYGONS
+        .get_or_init(|| parse_land_polygons(LAND_GEOJSON))
         .as_slice()
 }
 
-/// Parse the embedded GeoJSON `FeatureCollection` into closed landmass rings.
-fn parse_land_rings(json: &str) -> Vec<Vec<(f64, f64)>> {
+/// Every landmass ring of the embedded basemap (see [`LAND_RINGS`]).
+///
+/// Exteriors **and** lake holes, flattened into one list in polygon order.  Parse
+/// errors are impossible for the embedded, build-time asset; should the asset
+/// ever be malformed the map simply renders without a basemap rather than
+/// panicking.
+pub fn land_rings() -> &'static [Vec<(f64, f64)>] {
+    LAND_RINGS
+        .get_or_init(|| {
+            land_polygons()
+                .iter()
+                .flat_map(|polygon| polygon.iter().cloned())
+                .collect()
+        })
+        .as_slice()
+}
+
+/// Parse the embedded GeoJSON `FeatureCollection` into landmass polygons.
+///
+/// A GeoJSON ring order is exterior first, then interior (lake) rings; the
+/// order is preserved here so the renderer can punch the interiors out with the
+/// even-odd fill rule.
+fn parse_land_polygons(json: &str) -> Vec<LandPolygon> {
     let value: serde_json::Value = match serde_json::from_str(json) {
         Ok(value) => value,
         Err(_) => return Vec::new(),
     };
-    let mut rings = Vec::new();
+    let mut polygons = Vec::new();
     let Some(features) = value.get("features").and_then(|f| f.as_array()) else {
-        return rings;
+        return polygons;
     };
     for feature in features {
         let geometry = feature.get("geometry");
@@ -88,26 +125,35 @@ fn parse_land_rings(json: &str) -> Vec<Vec<(f64, f64)>> {
             continue;
         };
         match kind {
-            "Polygon" => {
-                // A Polygon's coordinates are its rings; only the exterior ring
-                // (index 0) is filled for this coarse basemap.
-                if let Some(exterior) = coordinates.get(0) {
-                    push_ring(&mut rings, exterior);
-                }
-            }
+            "Polygon" => push_polygon(&mut polygons, coordinates),
             "MultiPolygon" => {
-                if let Some(polygons) = coordinates.as_array() {
-                    for polygon in polygons {
-                        if let Some(exterior) = polygon.get(0) {
-                            push_ring(&mut rings, exterior);
-                        }
+                if let Some(polygons_json) = coordinates.as_array() {
+                    for polygon in polygons_json {
+                        push_polygon(&mut polygons, polygon);
                     }
                 }
             }
             _ => {}
         }
     }
-    rings
+    polygons
+}
+
+/// Append one GeoJSON polygon (exterior + optional interior rings) as a
+/// [`LandPolygon`], skipping malformed rings.
+fn push_polygon(polygons: &mut Vec<LandPolygon>, coordinates: &serde_json::Value) {
+    let Some(rings_json) = coordinates.as_array() else {
+        return;
+    };
+    let mut rings = Vec::new();
+    for ring_json in rings_json {
+        push_ring(&mut rings, ring_json);
+    }
+    // A polygon with no usable ring at all is dropped.
+    if rings.is_empty() {
+        return;
+    }
+    polygons.push(rings);
 }
 
 /// Append one GeoJSON ring of `[lon, lat]` pairs as a closed `(f64, f64)` ring.
@@ -162,20 +208,32 @@ fn ring_path(ring: &[(f64, f64)], width: f64, height: f64) -> String {
     d
 }
 
+/// Format an SVG path `d` attribute for a polygon: its exterior ring followed by
+/// any interior (lake) rings as additional subpaths.
+fn polygon_path(polygon: &[Vec<(f64, f64)>], width: f64, height: f64) -> String {
+    let mut d = String::new();
+    for ring in polygon {
+        d.push_str(&ring_path(ring, width, height));
+    }
+    d
+}
+
 /// Render the landmass outlines as an SVG `<g>` group.
 ///
-/// `fill`/`stroke` are plain CSS colours; the group carries the `basemap`
-/// class so the report stylesheet can theme it.
+/// Each polygon is one `<path>`: the exterior ring followed by any interior
+/// rings, which the `evenodd` fill rule punches out so lakes show the water
+/// background through the land.  `fill`/`stroke` are plain CSS colours; the
+/// group carries the `basemap` class so the report stylesheet can theme it.
 pub fn continent_layer(width: u32, height: u32, fill: &str, stroke: &str) -> String {
     let (w, h) = (width as f64, height as f64);
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "<g class=\"basemap\" fill=\"{fill}\" stroke=\"{stroke}\" \
+        "<g class=\"basemap\" fill=\"{fill}\" fill-rule=\"evenodd\" stroke=\"{stroke}\" \
          stroke-width=\"0.5\" stroke-linejoin=\"round\">"
     );
-    for ring in land_rings() {
-        let _ = writeln!(out, "  <path d=\"{}\"/>", ring_path(ring, w, h));
+    for polygon in land_polygons() {
+        let _ = writeln!(out, "  <path d=\"{}\"/>", polygon_path(polygon, w, h));
     }
     out.push_str("</g>\n");
     out
@@ -217,7 +275,10 @@ mod tests {
         let layer = continent_layer(360, 180, "#ccc", "#888");
         assert!(layer.starts_with("<g class=\"basemap\""));
         assert!(layer.trim_end().ends_with("</g>"));
-        assert_eq!(layer.matches("<path").count(), land_rings().len());
+        // One `<path>` per landmass polygon; lake holes are extra subpaths of
+        // the enclosing polygon rather than separate paths.
+        assert_eq!(layer.matches("<path").count(), land_polygons().len());
+        assert!(layer.contains("fill-rule=\"evenodd\""), "{layer}");
     }
 
     #[test]
@@ -323,19 +384,20 @@ mod tests {
 
     /// A malformed asset renders no basemap instead of panicking.
     #[test]
-    fn parse_land_rings_handles_invalid_json() {
-        assert!(parse_land_rings("not json").is_empty());
-        assert!(parse_land_rings("{}").is_empty(), "no features key");
+    fn parse_land_polygons_handles_invalid_json() {
+        assert!(parse_land_polygons("not json").is_empty());
+        assert!(parse_land_polygons("{}").is_empty(), "no features key");
         assert!(
-            parse_land_rings(r#"{"features": 42}"#).is_empty(),
+            parse_land_polygons(r#"{"features": 42}"#).is_empty(),
             "features is not an array"
         );
     }
 
-    /// Polygon and MultiPolygon exteriors become rings; interior rings, unknown
-    /// geometry types and features without geometry are skipped.
+    /// Polygon and MultiPolygon exteriors become polygons, together with their
+    /// interior (lake) rings; unknown geometry types and features without
+    /// geometry are skipped.
     #[test]
-    fn parse_land_rings_reads_polygons_and_multipolygons() {
+    fn parse_land_polygons_reads_exteriors_and_interiors() {
         let json = r#"{
           "features": [
             {"geometry": {"type": "Polygon", "coordinates": [
@@ -350,11 +412,43 @@ mod tests {
             {"properties": {}}
           ]
         }"#;
-        let rings = parse_land_rings(json);
-        // One Polygon exterior + two MultiPolygon exteriors = three rings.
-        assert_eq!(rings.len(), 3, "{rings:?}");
-        for ring in &rings {
-            assert_eq!(ring.first(), ring.last(), "ring closed");
+        let polygons = parse_land_polygons(json);
+        // One Polygon (exterior + one lake) + two MultiPolygon polygons = three.
+        assert_eq!(polygons.len(), 3, "{polygons:?}");
+        assert_eq!(polygons[0].len(), 2, "the lake hole is kept");
+        for polygon in &polygons {
+            for ring in polygon {
+                assert_eq!(ring.first(), ring.last(), "ring closed");
+            }
+        }
+    }
+
+    /// The embedded asset keeps the interior (lake) rings: the Caspian and the
+    /// Great Lakes are punched out of their landmasses.
+    #[test]
+    fn embedded_asset_has_lake_holes() {
+        let holes: Vec<_> = land_polygons()
+            .iter()
+            .flat_map(|polygon| polygon.iter().skip(1))
+            .collect();
+        assert!(holes.len() >= 20, "only {} lake holes", holes.len());
+
+        let has_lake = |lon: f64, lat: f64| {
+            holes.iter().any(|ring| {
+                ring.iter()
+                    .any(|(rl, rt)| (rl - lon).abs() < 3.0 && (rt - lat).abs() < 3.0)
+            })
+        };
+        // The five Great Lakes and the (already-present) Caspian.
+        for (name, lon, lat) in [
+            ("Superior", -87.5, 47.7),
+            ("Michigan", -87.0, 44.0),
+            ("Huron", -82.4, 44.8),
+            ("Erie", -81.2, 42.2),
+            ("Ontario", -77.7, 43.6),
+            ("Caspian", 51.0, 42.0),
+        ] {
+            assert!(has_lake(lon, lat), "missing lake hole: {name}");
         }
     }
 
