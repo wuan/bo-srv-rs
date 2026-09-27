@@ -76,6 +76,7 @@ deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 # lookup (replaces the Python `geoip2` reader).  Lookups are best-effort: a
 # missing or unreadable database, or an address that is not present, yields `-`.
 maxminddb = "0.32"
+wkb = "0.9.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

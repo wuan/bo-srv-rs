@@ -11,7 +11,7 @@
 //! form with parameters in the same order for tokio-postgres.
 
 use chrono::{DateTime, Utc};
-
+use wkb::reader::Wkb;
 use crate::executor::Param;
 use crate::geom::{Envelope, Grid};
 
@@ -612,7 +612,10 @@ pub fn grid_query(
     region: Option<i64>,
     count_threshold: i64,
 ) -> Query {
+    log::debug!("grid_query: time_interval={:?}, region={:?}, count_threshold={}, envelope={:?}", time_interval, region, count_threshold, grid.envelope());
     let env = grid.envelope().as_wkb_linear_ring();
+    let env_wkb = Wkb::try_new(&env).unwrap();
+    log::debug!("grid_query: envelope={:?}", env_wkb);
     let mut q = Query::new("strikes");
     q = q
         .set_columns(&[
