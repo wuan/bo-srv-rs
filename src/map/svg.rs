@@ -116,35 +116,55 @@ const GRATICULE_STROKE: &str = "#dde1e5";
 /// A square's shade is keyed to its **absolute** query count (see
 /// [`square_colour`]) so the two separate maps are directly comparable and a
 /// tile with a single query is never rendered as a hot spot.
-pub(crate) const SQUARE_RAMP: [(u8, u8, u8); 6] = [
-    (255, 224, 138), // pale amber
-    (255, 197, 82),
-    (251, 160, 47),
-    (240, 116, 34),
-    (214, 75, 36),
-    (176, 42, 44), // deep red
+///
+/// The eight steps run a sequential yellow -> orange -> red -> dark-red "heat"
+/// progression (ColorBrewer `YlOrRd`-inspired but ending in a deep red rather
+/// than a magenta-pink, and with the pale end kept just saturated enough to stay
+/// distinct over the light basemap).
+pub(crate) const SQUARE_RAMP: [(u8, u8, u8); 8] = [
+    (255, 242, 168), // pale yellow   (1 query)
+    (255, 221, 82),  // yellow
+    (255, 190, 26),  // amber
+    (250, 144, 16),  // orange
+    (239, 98, 18),   // dark orange
+    (221, 58, 22),   // red-orange
+    (191, 26, 22),   // red
+    (143, 13, 18),   // deep red      (>= SQUARE_RAMP_MAX)
 ];
 
 /// The per-tile query count that saturates the ramp: `1` maps to the palest
-/// shade and `>= SQUARE_RAMP_MAX` to the deepest.
+/// shade and `>= SQUARE_RAMP_MAX` to the deepest.  The eight shades split
+/// `1..=SQUARE_RAMP_MAX` roughly geometrically (each step ~1.5x the previous
+/// count) so low counts stay visually distinct over the light basemap.
 const SQUARE_RAMP_MAX: u64 = 32;
+
+/// The SVG `fill-opacity` of the shaded cells.
+///
+/// High enough that the eight ramp shades stay distinguishable over the light
+/// basemap (the deep reds would otherwise wash out toward grey), yet below 1.0
+/// so the land outline still shows through.
+pub(crate) const SQUARE_FILL_OPACITY: &str = "0.7";
 
 /// Pick a ramp colour for an absolute `count`.
 ///
-/// The count is mapped onto the ramp with a logarithmic scale (so low counts
-/// stay visually distinct) and capped at [`SQUARE_RAMP_MAX`].  This is
-/// deliberately absolute rather than normalised against the map's maximum: the
-/// same tile count reads the same on both the background and interactive maps,
-/// and a lone query on an otherwise empty map is not painted the densest shade.
+/// The count is split into [`SQUARE_RAMP`]'s eight shades with a roughly
+/// geometric scale (`1`, `2`, `3`, `4-5`, `6-8`, `9-13`, `14-21`, `>=22`) and
+/// capped at [`SQUARE_RAMP_MAX`].  This is deliberately absolute rather than
+/// normalised against the map's maximum: the same tile count reads the same on
+/// both the background and interactive maps, and a lone query on an otherwise
+/// empty map is not painted the densest shade.  A `count` of `0` is never drawn,
+/// but maps to the palest shade defensively.
 fn square_colour(count: u64) -> String {
     let count = count.min(SQUARE_RAMP_MAX);
     let bucket = match count {
-        0 => 0,
-        1 => 1,
-        2..=3 => 2,
-        4..=7 => 3,
-        8..=15 => 4,
-        _ => 5,
+        0 | 1 => 0,
+        2 => 1,
+        3 => 2,
+        4..=5 => 3,
+        6..=8 => 4,
+        9..=13 => 5,
+        14..=21 => 6,
+        _ => 7,
     };
     let (r, g, b) = SQUARE_RAMP[bucket];
     format!("#{r:02x}{g:02x}{b:02x}")
@@ -170,7 +190,7 @@ fn raster_layer(raster: &AsciiWorldMap, width: f64, height: f64, label: &str) ->
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "<g class=\"squares\" data-set=\"{}\" fill-opacity=\"0.55\">\n  <title>{}</title>\n",
+        "<g class=\"squares\" data-set=\"{}\" fill-opacity=\"{SQUARE_FILL_OPACITY}\">\n  <title>{}</title>\n",
         escape_html(label),
         escape_html(&format!("{label}: {} queries", raster.queries())),
     );
@@ -324,7 +344,10 @@ mod tests {
             assert!(svg.contains(WATER_FILL), "{svg}");
             assert!(svg.contains(LAND_FILL), "{svg}");
             // Cells are semi-transparent so the basemap stays visible.
-            assert!(svg.contains("fill-opacity=\"0.55\""), "{svg}");
+            assert!(
+                svg.contains(&format!("fill-opacity=\"{SQUARE_FILL_OPACITY}\"")),
+                "{svg}"
+            );
         }
 
         // Four offline local queries, each on a distinct 5-degree cell (one raster
@@ -342,18 +365,41 @@ mod tests {
         assert_eq!(raster_rects(&offline), 4, "{offline}");
     }
 
-    /// The square shade scales with the absolute raster-cell count.
+    /// The square shade scales with the absolute raster-cell count, and all eight
+    /// ramp shades are reachable.
     #[test]
-    fn square_colour_is_a_shade_ramp() {
-        // A lone query is the palest (second) shade, not the densest.
-        assert_eq!(square_colour(1), "#ffc552");
-        // The ramp darkens monotonically and saturates at the deepest shade.
-        assert_ne!(square_colour(1), square_colour(2));
-        assert_ne!(square_colour(2), square_colour(4));
-        assert_eq!(square_colour(SQUARE_RAMP_MAX), "#b02a2c");
-        assert_eq!(square_colour(SQUARE_RAMP_MAX + 100), "#b02a2c");
-        // Zero (only reachable for a defensive empty tile) is the palest shade.
-        assert_eq!(square_colour(0), "#ffe08a");
+    fn square_colour_is_an_eight_shade_ramp() {
+        // The ramp has eight, perceptually separated shades.
+        assert_eq!(SQUARE_RAMP.len(), 8);
+
+        // A lone query is the palest shade; the deepest shade is reached at (and
+        // beyond) SQUARE_RAMP_MAX.
+        assert_eq!(square_colour(1), "#fff2a8");
+        assert_eq!(square_colour(SQUARE_RAMP_MAX), "#8f0d12");
+        assert_eq!(square_colour(SQUARE_RAMP_MAX + 100), "#8f0d12");
+
+        // Zero (only reachable for a defensive empty tile) is the palest shade too.
+        assert_eq!(square_colour(0), "#fff2a8");
+
+        // Every shade in the ramp is produced by some count in 1..=SQUARE_RAMP_MAX,
+        // and the sequence is strictly darkening (no two adjacent counts collapse).
+        let mut shades: Vec<String> = Vec::new();
+        for count in 1..=SQUARE_RAMP_MAX {
+            let colour = square_colour(count);
+            if shades.last() != Some(&colour) {
+                shades.push(colour);
+            }
+        }
+        assert_eq!(
+            shades.len(),
+            8,
+            "all eight shades must be reachable: {shades:?}"
+        );
+        let expected: Vec<String> = SQUARE_RAMP
+            .iter()
+            .map(|(r, g, b)| format!("#{r:02x}{g:02x}{b:02x}"))
+            .collect();
+        assert_eq!(shades, expected);
     }
 
     /// A `data_area=10` query fills a 2x2 block of the 5-degree raster, so its

@@ -322,7 +322,10 @@ fn html_report_is_standalone_and_structured() {
     assert!(html.contains("data-set=\"background (offline)\""));
     assert!(html.contains("data-set=\"interactive\""));
     assert!(
-        html.contains("fill-opacity=\"0.55\""),
+        html.contains(&format!(
+            "fill-opacity=\"{}\"",
+            crate::map::svg::SQUARE_FILL_OPACITY
+        )),
         "transparent squares"
     );
     // The top lists are rendered as tables.
