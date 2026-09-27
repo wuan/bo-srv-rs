@@ -61,6 +61,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-debug-
 
+      # The restored `target` cache can hold a workspace crate built against an
+      # older `assets/world-110m-land.geojson` (the embedded basemap is an
+      # `include_str!` input, but cache restores do not reliably refresh the
+      # mtimes Cargo uses to detect that).  Drop only this package's artifacts
+      # so it is always rebuilt; dependency artifacts stay cached.
+      - name: Drop cached workspace crate
+        run: cargo clean -p blitzortung-srv
+
       - name: Build
         run: cargo build
 
@@ -107,6 +115,11 @@ jobs:
           key: ${{ runner.os }}-cargo-build-debug-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-debug-
+
+      # See the `build` job: rebuild this workspace crate so the cache can
+      # never keep an older embedded `assets/world-110m-land.geojson`.
+      - name: Drop cached workspace crate
+        run: cargo clean -p blitzortung-srv
 
       # The llvm-tools component backs cargo-llvm-cov's instrumentation.
       - name: Install llvm-tools
@@ -182,6 +195,11 @@ jobs:
           key: ${{ runner.os }}-cargo-build-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-release-
+
+      # See the `build` job: rebuild this workspace crate so the cache can never
+      # keep an older embedded `assets/world-110m-land.geojson`.
+      - name: Drop cached workspace crate
+        run: cargo clean -p blitzortung-srv
 
       - name: Build Release
         run: |
