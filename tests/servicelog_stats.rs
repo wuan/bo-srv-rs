@@ -93,6 +93,33 @@ fn svg_report_contains_one_circle_per_local_query() {
 }
 
 #[test]
+fn ascii_map_report_has_frame_and_markers() {
+    let dir = temp_dir("map");
+    std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
+
+    let output = Command::new(binary())
+        .args(["--dir", dir.to_str().unwrap(), "--format", "map"])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("servicelog local-query map for 2023-11-14"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("72x36 cells of 5 degrees"), "{stdout}");
+    assert!(stdout.contains("5 queries, 5 hits"), "{stdout}");
+    // Five distinct local queries -> five non-space map symbols.
+    let marks: usize = stdout
+        .lines()
+        .filter(|l| l.starts_with('|'))
+        .map(|l| l.chars().filter(|c| *c != ' ' && *c != '|').count())
+        .sum();
+    assert_eq!(marks, 5, "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn date_filter_selects_one_day() {
     let dir = temp_dir("date");
     std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();

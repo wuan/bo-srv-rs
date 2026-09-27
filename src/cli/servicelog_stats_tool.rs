@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 
 use crate::service_log_stats::{
-    day_from_filename, day_report, parse_file, render_json, render_local_svg, render_text,
-    DayReport, DEFAULT_TOP_N,
+    day_from_filename, day_report, parse_file, render_ascii_map, render_json, render_local_svg,
+    render_text, DayReport, DEFAULT_TOP_N,
 };
 
 /// The output format of the statistics report.
@@ -24,15 +24,18 @@ pub enum OutputFormat {
     Json,
     /// Standalone SVG scatter of the local query locations.
     Svg,
+    /// ASCII world map (5-degree raster) of the local query locations.
+    Map,
 }
 
 impl OutputFormat {
-    /// Parse a `--format` value (`text`/`json`/`svg`; case-insensitive).
+    /// Parse a `--format` value (`text`/`json`/`svg`/`map`; case-insensitive).
     pub fn parse(value: &str) -> Option<OutputFormat> {
         match value.to_ascii_lowercase().as_str() {
             "text" => Some(OutputFormat::Text),
             "json" => Some(OutputFormat::Json),
             "svg" => Some(OutputFormat::Svg),
+            "map" | "ascii" => Some(OutputFormat::Map),
             _ => None,
         }
     }
@@ -60,7 +63,7 @@ pub struct ServicelogStatsArgs {
     #[arg(long, default_value_t = DEFAULT_TOP_N)]
     pub top: usize,
 
-    /// output format: text, json or svg
+    /// output format: text, json, svg or map
     #[arg(long, default_value = "text")]
     pub format: String,
 
@@ -140,7 +143,7 @@ pub fn run(options: &ServicelogStatsOptions) -> std::io::Result<String> {
     );
 
     match options.format {
-        OutputFormat::Text | OutputFormat::Json => {
+        OutputFormat::Text | OutputFormat::Json | OutputFormat::Map => {
             let mut reports: Vec<DayReport> = Vec::new();
             for file in &files {
                 let outcome = parse_file(file)?;
@@ -152,6 +155,7 @@ pub fn run(options: &ServicelogStatsOptions) -> std::io::Result<String> {
                 .map(|report| match options.format {
                     OutputFormat::Text => render_text(&report.day, &report.stats),
                     OutputFormat::Json => render_json(&report.day, &report.stats),
+                    OutputFormat::Map => render_ascii_map(&report.day, &report.stats),
                     OutputFormat::Svg => unreachable!(),
                 })
                 .collect();
@@ -211,6 +215,8 @@ mod tests {
         assert_eq!(OutputFormat::parse("text"), Some(OutputFormat::Text));
         assert_eq!(OutputFormat::parse("JSON"), Some(OutputFormat::Json));
         assert_eq!(OutputFormat::parse("Svg"), Some(OutputFormat::Svg));
+        assert_eq!(OutputFormat::parse("map"), Some(OutputFormat::Map));
+        assert_eq!(OutputFormat::parse("ASCII"), Some(OutputFormat::Map));
         assert_eq!(OutputFormat::parse("xml"), None);
     }
 
@@ -288,6 +294,25 @@ mod tests {
         let output = run(&options).unwrap();
         assert!(output.contains("local queries: 2"));
         assert!(output.contains("width=\"200\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_map_for_a_directory() {
+        let dir = temp_dir("run-map");
+        std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
+        let a = ServicelogStatsArgs {
+            format: "map".to_string(),
+            ..args(dir.clone())
+        };
+        let options = ServicelogStatsOptions::from_args(&a).unwrap();
+        let output = run(&options).unwrap();
+        assert!(
+            output.contains("servicelog local-query map for 2023-11-14"),
+            "{output}"
+        );
+        assert!(output.contains("72x36 cells of 5 degrees"), "{output}");
+        assert!(output.contains("2 queries, 2 hits"), "{output}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! bo-servicelog-stats --dir <DIR|FILE> [--date YYYY-MM-DD] [--top N]
-//!                     [--format text|json|svg] [--width N] [--height N]
+//!                     [--format text|json|svg|map] [--width N] [--height N]
 //! ```
 //!
 //! Reads every `servicelog_YYYY-MM-DD` file in `--dir` (or one file directly)
@@ -20,7 +20,7 @@ fn main() {
         Some(options) => options,
         None => exit_with(
             &format!(
-                "invalid --format {:?}: expected text, json or svg",
+                "invalid --format {:?}: expected text, json, svg or map",
                 args.format
             ),
             1,

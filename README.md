@@ -343,19 +343,26 @@ daily `servicelog_YYYY-MM-DD` files back and reports, per day:
   and region (`region > 0`) flavours, plus the unknown geo/version counts;
 * **top countries**, **top cities** and **top client versions** (each `--top N`
   entries, default 10; ties are broken alphabetically for a stable order);
-* **local query locations** — the `(x, y, grid_baselength)` of every local
-  request, for plotting an overlay.
+* **local query locations** — the `(x, y, data_area, grid_baselength)` of every
+  local request, for plotting an overlay.  The `--format map` output renders
+  these onto a **72 x 36 ASCII world raster** of 5-degree cells: a query with
+  `data_area=5` marks one cell, `10` a `2x2` block, `15` a `3x3` and `20` a
+  `4x4` block (every covered cell is incremented, so overlapping queries
+  accumulate), anchored at the local-grid origin
+  `((x-1) * data_area, (y-1) * data_area)`.
 
 ```sh
 bo-servicelog-stats --dir /var/log/blitzortung [--date YYYY-MM-DD] [--top N] \
-                    [--format text|json|svg] [--width N] [--height N]
+                    [--format text|json|svg|map] [--width N] [--height N]
 ```
 
 `--dir` may be the log directory (every `servicelog_*` file, or just `--date`)
 or a single `servicelog_YYYY-MM-DD` file.  `--format text` prints a readable
-summary, `--format json` the same data as JSON, and `--format svg` a
-standalone scatter of the local query coordinates (a value-range normalised
-plot, not a geographic projection — it needs no map dependency).
+summary, `--format json` the same data as JSON, `--format svg` a standalone
+scatter of the local query coordinates (a value-range normalised plot, not a
+geographic projection — it needs no map dependency) and `--format map`
+(`ascii` is accepted as an alias) a north-up ASCII world map with a density
+ramp and a count legend.
 
 Parsing splits each line on tabs and **ignores the empty segments** produced by
 the tab-padded `city` column, recovering the 14 logical fields; a line that
@@ -601,9 +608,11 @@ cargo run --bin bo-update -- --hours 2
 cargo run --bin bo-import-websocket -- -v
 cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
 
-# daily servicelog statistics (text, json or an SVG local-query overlay)
+# daily servicelog statistics (text, json, an SVG local-query overlay or an
+# ASCII world map)
 cargo run --bin bo-servicelog-stats -- --dir /var/log/blitzortung --top 10
 cargo run --bin bo-servicelog-stats -- --dir /var/log/blitzortung --format json
+cargo run --bin bo-servicelog-stats -- --dir /var/log/blitzortung --format map
 cargo run --bin bo-servicelog-stats -- --dir /var/log/blitzortung \
   --date 2023-11-14 --format svg > local-queries.svg
 ```

@@ -187,13 +187,19 @@ pub struct TopEntry {
 
 /// A local query location for the world-map overlay.
 ///
-/// `x`/`y` are the UTM grid coordinates written as the local-grid centre and
-/// `grid_baselength` is the raster baselength in metres, so an overlay can
-/// scale each marker.
+/// `x`/`y` are the local-grid tile indices written in the servicelog; the grid
+/// origin is `((x-1) * data_area, (y-1) * data_area)` degrees and `data_area` is
+/// the tile size in degrees (see [`crate::geom::LocalGrid`]).  `grid_baselength`
+/// is the raster baselength in metres, so an overlay can scale each marker.
+///
+/// `data_area` was added for the ASCII world map (issue #24): it determines the
+/// footprint of a query in the base 5-degree raster (`data_area / 5` cells per
+/// side).  It is `5` (the minimum) when the row did not carry a usable value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalQuery {
     pub x: i64,
     pub y: i64,
+    pub data_area: i64,
     pub grid_baselength: i64,
 }
 
@@ -279,6 +285,7 @@ pub fn aggregate(rows: &[ServiceLogRow], top_n: usize) -> ServiceLogStats {
                 stats.local_queries.push(LocalQuery {
                     x,
                     y,
+                    data_area: row.data_area.unwrap_or(5).max(5),
                     grid_baselength: row.grid_baselength,
                 });
             }
@@ -353,10 +360,17 @@ pub fn render_json(day: &str, stats: &ServiceLogStats) -> String {
         "local_queries": stats.local_queries.iter().map(|q| serde_json::json!({
             "x": q.x,
             "y": q.y,
+            "data_area": q.data_area,
             "grid_baselength": q.grid_baselength,
         })).collect::<Vec<_>>(),
     });
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Render the local queries as an ASCII world map (5-degree raster, issue #24).
+pub fn render_ascii_map(day: &str, stats: &ServiceLogStats) -> String {
+    let map = AsciiWorldMap::from_local_queries(&stats.local_queries);
+    format!("servicelog local-query map for {day}\n{}", map.render())
 }
 
 fn top_entries_json(entries: &[TopEntry]) -> Vec<serde_json::Value> {
@@ -428,6 +442,187 @@ fn scale(value: f64, min: f64, max: f64, out_min: f64, out_max: f64) -> f64 {
         return (out_min + out_max) / 2.0;
     }
     out_min + (value - min) / (max - min) * (out_max - out_min)
+}
+
+/// The number of base-raster columns spanning the world (5-degree cells):
+/// `360 / 5 = 72`.
+pub const WORLD_COLS: usize = 72;
+
+/// The number of base-raster rows spanning the world (5-degree cells):
+/// `180 / 5 = 36`.
+pub const WORLD_ROWS: usize = 36;
+
+/// The base raster cell size in degrees (issue #24: "use 5 as the basic
+/// raster").
+pub const RASTER_DEGREES: i64 = 5;
+
+/// Density ramp for the ASCII map (light to dense), matching the symbol set of
+/// `data::GridData::to_map` (`" .-o*O8"`) plus a final `#`.  Index 0 (`' '`) is
+/// reserved for a zero count, so non-zero counts use indices 1..=7.
+pub const MAP_RAMP: [char; 8] = [' ', '.', '-', 'o', '*', 'O', '8', '#'];
+
+/// A 5-degree worldwide raster of local-query counts, rendered as ASCII
+/// (issue #24).
+///
+/// ## Footprint
+///
+/// A local query at tile `(x, y)` with data area `data_area` covers
+/// `data_area` degrees starting at the grid origin
+/// `((x-1) * data_area, (y-1) * data_area)` (see [`crate::geom::LocalGrid`]).
+/// In the base 5-degree raster that is an `n x n` block with `n = data_area / 5`
+/// (so `data_area=5` marks one cell, `10` a `2x2`, `15` a `3x3` and `20` a
+/// `4x4` block).  Every cell of the block is incremented, so overlapping
+/// queries accumulate ("higher data areas can be added on top").
+///
+/// ## Layout
+///
+/// Internally rows are stored south-up (row 0 covers latitude `-90..-85`) so
+/// the arithmetic reads naturally; [`render`](Self::render) prints them
+/// north-up (row 0 = the top line) like `data::GridData::to_map`.  Columns wrap
+/// across the antimeridian; rows outside the poles are clamped away (never
+/// counted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsciiWorldMap {
+    /// `WORLD_ROWS` rows (south-up) of `WORLD_COLS` counts.
+    cells: Vec<Vec<u64>>,
+    /// The total number of queries that contributed.
+    queries: u64,
+}
+
+impl Default for AsciiWorldMap {
+    fn default() -> Self {
+        AsciiWorldMap {
+            cells: vec![vec![0; WORLD_COLS]; WORLD_ROWS],
+            queries: 0,
+        }
+    }
+}
+
+impl AsciiWorldMap {
+    /// An empty map.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The number of contributing queries.
+    pub fn queries(&self) -> u64 {
+        self.queries
+    }
+
+    /// The count at `(col, row)` (row 0 = southernmost); `0` when out of range.
+    pub fn count(&self, col: usize, row: usize) -> u64 {
+        self.cells
+            .get(row)
+            .and_then(|r| r.get(col))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The total count across all cells.
+    pub fn total(&self) -> u64 {
+        self.cells.iter().flatten().sum()
+    }
+
+    /// The largest single-cell count.
+    pub fn maximum(&self) -> u64 {
+        self.cells.iter().flatten().copied().max().unwrap_or(0)
+    }
+
+    /// Add one local query's footprint to the raster.
+    ///
+    /// `x`/`y` are the local-grid tile indices (1-based; `y` may be `<= 0` in
+    /// the southern hemisphere).  `data_area` is the tile size in degrees,
+    /// clamped to at least [`RASTER_DEGREES`]; the footprint side is
+    /// `ceil(data_area / 5)` cells.
+    pub fn add_local_query(&mut self, x: i64, y: i64, data_area: i64) {
+        self.queries += 1;
+        let data_area = data_area.max(RASTER_DEGREES);
+        // Footprint side in base cells (ceil division; `data_area` is positive).
+        let side = ((data_area + RASTER_DEGREES - 1) / RASTER_DEGREES).clamp(1, WORLD_COLS as i64)
+            as usize;
+
+        // The grid origin (lower-left corner) in degrees.
+        let lon0 = (x - 1) * data_area;
+        let lat0 = (y - 1) * data_area;
+
+        // Column of the origin, wrapping across the antimeridian.
+        let col0 = (lon0 + 180).div_euclid(RASTER_DEGREES);
+        // Row of the origin (south-up), clamped away from out-of-range poles.
+        let row0 = (lat0 + 90).div_euclid(RASTER_DEGREES);
+
+        for d_row in 0..side as i64 {
+            let row = row0 + d_row;
+            if !(0..WORLD_ROWS as i64).contains(&row) {
+                continue;
+            }
+            for d_col in 0..side as i64 {
+                let col = (col0 + d_col).rem_euclid(WORLD_COLS as i64) as usize;
+                self.cells[row as usize][col] += 1;
+            }
+        }
+    }
+
+    /// Add every local query of `stats` to the map.
+    pub fn from_local_queries(queries: &[LocalQuery]) -> Self {
+        let mut map = Self::new();
+        for query in queries {
+            map.add_local_query(query.x, query.y, query.data_area);
+        }
+        map
+    }
+
+    /// Render the map as ASCII, framed with a `+`/`-`/`|` border and the
+    /// density ramp [`MAP_RAMP`], north-up.
+    ///
+    /// The ramp is scaled to the largest cell count: `0` renders as a space and
+    /// the densest cell as `#`.  A header with the query/hit counts and a
+    /// legend are printed around the frame.
+    pub fn render(&self) -> String {
+        let maximum = self.maximum();
+        let mut out = String::new();
+
+        out.push_str(&format!(
+            "local query world map ({}x{} cells of {} degrees, {} queries, {} hits)\n",
+            WORLD_COLS,
+            WORLD_ROWS,
+            RASTER_DEGREES,
+            self.queries,
+            self.total()
+        ));
+
+        let border = format!("+{}+", "-".repeat(WORLD_COLS));
+        out.push_str(&border);
+        out.push('\n');
+
+        // Print north-up: the last internal row (highest latitude) first.
+        for row_index in (0..WORLD_ROWS).rev() {
+            out.push('|');
+            for col in 0..WORLD_COLS {
+                out.push(self.symbol(self.cells[row_index][col], maximum));
+            }
+            out.push_str("|\n");
+        }
+
+        out.push_str(&border);
+        out.push('\n');
+        out.push_str(&format!(
+            "legend: '{}' = 0, '{}' = max ({}); columns 5 degrees from 180W, rows 5 degrees from 90S\n",
+            MAP_RAMP[0], MAP_RAMP[MAP_RAMP.len() - 1], maximum
+        ));
+        out
+    }
+
+    /// The ramp symbol for `count` given the map `maximum`: `0` is a space and
+    /// the maximum is the last ramp symbol.
+    fn symbol(&self, count: u64, maximum: u64) -> char {
+        if count == 0 || maximum == 0 {
+            return MAP_RAMP[0];
+        }
+        // Scale into 1..=len-1 so a non-zero count never renders as blank.
+        let steps = MAP_RAMP.len() - 1;
+        let index = ((count as f64 / maximum as f64) * steps as f64).ceil() as usize;
+        MAP_RAMP[1 + index.min(steps - 1)]
+    }
 }
 
 /// The day name (`YYYY-MM-DD`) of a `servicelog_YYYY-MM-DD` file, or `None`.
@@ -599,6 +794,7 @@ mod tests {
             LocalQuery {
                 x: 4,
                 y: 13,
+                data_area: 5,
                 grid_baselength: 5000
             }
         );
@@ -693,5 +889,162 @@ mod tests {
         assert_eq!(scale(5.0, 5.0, 5.0, 0.0, 100.0), 50.0);
         assert_eq!(scale(0.0, 0.0, 10.0, 0.0, 100.0), 0.0);
         assert_eq!(scale(10.0, 0.0, 10.0, 0.0, 100.0), 100.0);
+    }
+
+    // --- ASCII world map (issue #24) ---------------------------------------
+
+    /// A `data_area=5` query marks exactly one base cell at its origin.
+    #[test]
+    fn ascii_map_data_area_5_marks_one_cell() {
+        let mut map = AsciiWorldMap::new();
+        map.add_local_query(2, 10, 5);
+        assert_eq!(map.queries(), 1);
+        assert_eq!(map.total(), 1);
+        assert_eq!(map.maximum(), 1);
+        // Origin (5E, 45N) -> col floor((5+180)/5)=37, row floor((45+90)/5)=27.
+        assert_eq!(map.count(37, 27), 1);
+    }
+
+    /// `data_area=10` (2x2), `15` (3x3) and `20` (4x4) blocks, anchored at the
+    /// grid origin, incrementing every covered cell.
+    #[test]
+    fn ascii_map_data_area_scales_the_footprint() {
+        for (data_area, side) in [(10_i64, 2_usize), (15, 3), (20, 4)] {
+            let mut map = AsciiWorldMap::new();
+            map.add_local_query(2, 1, data_area);
+            assert_eq!(map.queries(), 1);
+            assert_eq!(
+                map.total(),
+                (side * side) as u64,
+                "data_area={data_area} should cover {side}x{side}"
+            );
+            // Origin (data_area, 0) -> the block starts at its lower-left cell.
+            let col0 = (data_area + 180) / 5;
+            let row0 = 90 / 5;
+            for d in 0..side {
+                assert_eq!(map.count(col0 as usize + d, row0 as usize), 1);
+            }
+            // The cell (side, 0) is outside the block.
+            assert_eq!(map.count(col0 as usize + side, row0 as usize), 0);
+        }
+    }
+
+    /// Two overlapping queries accumulate counts ("added on top").
+    #[test]
+    fn ascii_map_overlapping_queries_accumulate() {
+        let mut map = AsciiWorldMap::new();
+        // A 2x2 block anchored at (10E, 0N): cells cols 38..39, rows 18..19.
+        map.add_local_query(2, 1, 10);
+        // A 1x1 query at (15E, 5N): col 39, row 19 -- inside the 2x2 block.
+        map.add_local_query(4, 2, 5);
+        assert_eq!(map.queries(), 2);
+        assert_eq!(map.total(), 5); // 4 + 1
+        assert_eq!(map.count(39, 19), 2);
+        assert_eq!(map.maximum(), 2);
+    }
+
+    /// Longitudes wrap across the antimeridian; rows outside the poles are
+    /// clamped away rather than counted.
+    #[test]
+    fn ascii_map_wraps_longitude_and_drops_out_of_range_latitude() {
+        let mut map = AsciiWorldMap::new();
+        // x=73, data_area=5 -> origin lon = 72*5 = 360 -> wraps to 0 (col 36).
+        map.add_local_query(73, 10, 5);
+        assert_eq!(map.count(36, 27), 1);
+
+        // Far-north tile: y=37, data_area=5 -> lat0 = 180 -> row 54, out of range.
+        let mut polar = AsciiWorldMap::new();
+        polar.add_local_query(2, 37, 5);
+        assert_eq!(polar.total(), 0, "out-of-range latitude is not counted");
+
+        // Southern hemisphere: y=-1, data_area=5 -> lat0=-10 -> row 16.
+        let mut south = AsciiWorldMap::new();
+        south.add_local_query(2, -1, 5);
+        assert_eq!(south.total(), 1);
+        assert_eq!(south.count((5 + 180) / 5, 16), 1);
+    }
+
+    /// A missing/`-` data_area falls back to the 5-degree minimum.
+    #[test]
+    fn ascii_map_missing_data_area_defaults_to_minimum() {
+        let mut map = AsciiWorldMap::new();
+        map.add_local_query(2, 10, 0);
+        assert_eq!(map.total(), 1);
+    }
+
+    /// The map is `WORLD_COLS` wide and `WORLD_ROWS` tall, framed, north-up.
+    #[test]
+    fn ascii_map_render_dimensions_and_orientation() {
+        let mut map = AsciiWorldMap::new();
+        map.add_local_query(2, 10, 5); // 45N -> south-up row 27
+
+        let rendered = map.render();
+        let lines: Vec<&str> = rendered.lines().collect();
+        let border = lines.iter().find(|l| l.starts_with('+')).unwrap();
+        assert_eq!(border.len(), WORLD_COLS + 2);
+
+        let body: Vec<&&str> = lines
+            .iter()
+            .filter(|l| l.starts_with('|') && l.ends_with('|'))
+            .collect();
+        assert_eq!(body.len(), WORLD_ROWS);
+        for row in &body {
+            assert_eq!(row.len(), WORLD_COLS + 2, "row: {row}");
+        }
+
+        // North-up: the marker (south-up row 27) is printed at line index
+        // `WORLD_ROWS - 1 - 27` within the body.
+        let expected_line = WORLD_ROWS - 1 - 27;
+        assert!(
+            body[expected_line].contains('#'),
+            "marker not at expected line: {expected_line}"
+        );
+        // No marker south of the equator.
+        for (index, row) in body.iter().enumerate() {
+            if index > expected_line {
+                assert!(
+                    !row.contains(|c: char| c != ' ' && c != '|'),
+                    "unexpected marker in line {index}: {row}"
+                );
+            }
+        }
+    }
+
+    /// The renderer includes a header, a frame and a legend.
+    #[test]
+    fn ascii_map_render_has_header_and_legend() {
+        let mut map = AsciiWorldMap::new();
+        map.add_local_query(2, 10, 5);
+        let rendered = map.render();
+        assert!(rendered.contains("local query world map (72x36 cells of 5 degrees"));
+        assert!(rendered.contains("1 queries, 1 hits"));
+        assert!(rendered.contains("legend:"));
+        assert!(rendered.contains("columns 5 degrees from 180W"));
+    }
+
+    /// `render_ascii_map` frames the day and builds the map from the stats.
+    #[test]
+    fn ascii_map_from_stats_renders_the_day() {
+        let outcome = parse_content(ISSUE_SAMPLE);
+        let stats = aggregate(&outcome.rows, 10);
+        let rendered = render_ascii_map("2023-11-14", &stats);
+        assert!(rendered.starts_with("servicelog local-query map for 2023-11-14"));
+        // Five distinct local queries (all `data_area=5`).
+        assert!(rendered.contains("5 queries, 5 hits"));
+    }
+
+    /// An empty map renders a blank frame without panicking.
+    #[test]
+    fn ascii_map_empty_is_blank() {
+        let map = AsciiWorldMap::new();
+        let rendered = map.render();
+        assert!(rendered.contains("0 queries, 0 hits"));
+        // No non-space symbol inside any body row.
+        let marks: usize = rendered
+            .lines()
+            .filter(|l| l.starts_with('|'))
+            .map(|l| l.chars().filter(|c| *c != ' ' && *c != '|').count())
+            .sum();
+        assert_eq!(marks, 0);
     }
 }
