@@ -28,6 +28,10 @@ path = "src/bin/bo-update.rs"
 name = "bo-import-websocket"
 path = "src/bin/bo-import-websocket.rs"
 
+[[bin]]
+name = "bo-servicelog-stats"
+path = "src/bin/bo-servicelog-stats.rs"
+
 [features]
 # Opt-in database integration tests (`tests/postgres_integration.rs`): they
 # start an ephemeral PostGIS container with testcontainers, so Docker is

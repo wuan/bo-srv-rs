@@ -334,6 +334,36 @@ prefix:
 org.blitzortung.service.access,version=190,region=3,minutes=60,offset=0,grid=10000,data_area=101x202-5,country=DE:1|c
 ```
 
+### Statistics from the log files
+
+`bo-servicelog-stats` (there is no Python counterpart; see issue #24) reads the
+daily `servicelog_YYYY-MM-DD` files back and reports, per day:
+
+* **total requests**, split into local (`region == -1`), global (`region == 0`)
+  and region (`region > 0`) flavours, plus the unknown geo/version counts;
+* **top countries**, **top cities** and **top client versions** (each `--top N`
+  entries, default 10; ties are broken alphabetically for a stable order);
+* **local query locations** — the `(x, y, grid_baselength)` of every local
+  request, for plotting an overlay.
+
+```sh
+bo-servicelog-stats --dir /var/log/blitzortung [--date YYYY-MM-DD] [--top N] \
+                    [--format text|json|svg] [--width N] [--height N]
+```
+
+`--dir` may be the log directory (every `servicelog_*` file, or just `--date`)
+or a single `servicelog_YYYY-MM-DD` file.  `--format text` prints a readable
+summary, `--format json` the same data as JSON, and `--format svg` a
+standalone scatter of the local query coordinates (a value-range normalised
+plot, not a geographic projection — it needs no map dependency).
+
+Parsing splits each line on tabs and **ignores the empty segments** produced by
+the tab-padded `city` column, recovering the 14 logical fields; a line that
+does not yield 14 parseable fields is counted as malformed and skipped (the
+parser never panics on a truncated or hand-edited file).  The `-` placeholder
+for unknown country/city is normalised to "unknown" and never appears as a
+"top" entry.
+
 ## Metrics
 
 Like the Python service (`blitzortung/service/metrics.py`), the service sends
@@ -515,6 +545,9 @@ histogram bins (empty when `minute_length <= 10`).
   response shapes, caching and metrics reporting
 - `service_log` — the in-process usage-log pipeline: the bounded queue, the
   background consumer thread, row formatting and best-effort GeoIP
+- `service_log_stats` — parsing and aggregation of the daily `servicelog_*`
+  files (totals, top countries/cities/versions, local-query overlay) used by
+  the `bo-servicelog-stats` tool
 - `jsonrpc` — JSON-RPC parsing/dispatch and the pre-1.0 / v1 / v2 envelope
   dialects
 - `metrics` — the `Metrics` trait, the service and importer metric helpers, the
@@ -551,6 +584,7 @@ names match bo-python's `pyproject.toml` `[project.scripts]` entries:
 | `bo-import` | `cli/imprt.py` | Import protected ten-minute strike logs |
 | `bo-update` | `cli/update.py` | Import recent strikes from `last_strikes.php` |
 | `bo-import-websocket` | `cli/imprt_websocket.py` | Live websocket strike import |
+| `bo-servicelog-stats` | — (new, see `#24`) | Daily statistics from the `servicelog_*` files |
 
 ```sh
 # last hour, UTC, text output
@@ -566,6 +600,12 @@ cargo run --bin bo-import -- --update        # now - 30min window
 cargo run --bin bo-update -- --hours 2
 cargo run --bin bo-import-websocket -- -v
 cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
+
+# daily servicelog statistics (text, json or an SVG local-query overlay)
+cargo run --bin bo-servicelog-stats -- --dir /var/log/blitzortung --top 10
+cargo run --bin bo-servicelog-stats -- --dir /var/log/blitzortung --format json
+cargo run --bin bo-servicelog-stats -- --dir /var/log/blitzortung \
+  --date 2023-11-14 --format svg > local-queries.svg
 ```
 
 ## Documented differences from the Python implementation

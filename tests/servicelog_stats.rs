@@ -1,0 +1,142 @@
+//! End-to-end test of the `bo-servicelog-stats` binary: it reads a
+//! `servicelog_YYYY-MM-DD` file and prints statistics in the requested format.
+//!
+//! Cargo exposes the built binary path as `CARGO_BIN_EXE_bo-servicelog-stats`.
+
+use std::path::PathBuf;
+use std::process::Command;
+
+/// One servicelog file with the six rows from issue #24.
+const SAMPLE: &str = "\
+08:44:50.596\tUS\tSun Prairie\t\t\tA\t352\t0\t10\t25000\t0\t0\t-\t-\t-\t0.036
+08:44:50.637\tSE\tGothenburg\t\t\tA\t352\t0\t10\t5000\t-1\t0\t4\t13\t5\t0.000
+08:44:50.655\tRO\tBucharest\t\t\tA\t352\t0\t10\t5000\t-1\t0\t5\t8\t5\t0.039
+08:44:51.106\tDE\tBerlin\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t2\t10\t5\t0.000
+08:44:51.238\tDE\tUlm\t\t\t\tA\t352\t0\t10\t5000\t-1\t0\t1\t9\t5\t0.000
+08:44:51.277\tIT\tVicenza\t\t\t\tA\t352\t0\t10\t5000\t-1\t0\t2\t9\t5\t0.000
+";
+
+fn temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("bo-stats-it-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn binary() -> &'static str {
+    env!("CARGO_BIN_EXE_bo-servicelog-stats")
+}
+
+#[test]
+fn text_report_lists_totals_and_tops() {
+    let dir = temp_dir("text");
+    std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
+
+    let output = Command::new(binary())
+        .args(["--dir", dir.to_str().unwrap(), "--top", "3"])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("servicelog statistics for 2023-11-14"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("total requests: 6"), "{stdout}");
+    assert!(
+        stdout.contains("local:  5  global: 1  region: 0"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("top countries:"), "{stdout}");
+    assert!(stdout.contains("2  DE"), "{stdout}");
+    assert!(stdout.contains("local query locations: 5"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn json_report_is_valid_json() {
+    let dir = temp_dir("json");
+    std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
+
+    let output = Command::new(binary())
+        .args(["--dir", dir.to_str().unwrap(), "--format", "json"])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    assert_eq!(value["day"], "2023-11-14");
+    assert_eq!(value["total_requests"], 6);
+    assert_eq!(value["countries"][0]["label"], "DE");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn svg_report_contains_one_circle_per_local_query() {
+    let dir = temp_dir("svg");
+    std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
+
+    let output = Command::new(binary())
+        .args(["--dir", dir.to_str().unwrap(), "--format", "svg"])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("<svg"), "{stdout}");
+    assert_eq!(stdout.matches("<circle").count(), 5);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn date_filter_selects_one_day() {
+    let dir = temp_dir("date");
+    std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
+    std::fs::write(dir.join("servicelog_2023-11-15"), SAMPLE).unwrap();
+
+    let output = Command::new(binary())
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--date",
+            "2023-11-15",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"day\": \"2023-11-15\""), "{stdout}");
+    assert!(!stdout.contains("2023-11-14"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn invalid_format_exits_nonzero() {
+    let dir = temp_dir("bad-format");
+    std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
+
+    let output = Command::new(binary())
+        .args(["--dir", dir.to_str().unwrap(), "--format", "xml"])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalid --format"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn missing_directory_exits_nonzero() {
+    let output = Command::new(binary())
+        .args(["--dir", "/nonexistent/bo-servicelog-stats"])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(!output.status.success());
+    let _ = std::fs::remove_dir_all("/nonexistent/bo-servicelog-stats");
+}
