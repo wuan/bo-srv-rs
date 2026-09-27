@@ -431,6 +431,29 @@ fn local_query_classifies_offline_and_interactive() {
     }
 }
 
+/// The tile centre uses the client's requested-tile origin (`x * data_area`),
+/// so a tile at `(1, 1)` with `data_area=5` is centred at (7.5, 7.5).
+#[test]
+fn local_query_center_uses_requested_tile_origin() {
+    let query = LocalQuery {
+        x: 1,
+        y: 1,
+        data_area: 5,
+        grid_baselength: 5000,
+        minute_length: 10,
+    };
+    assert_eq!(query.center_lon_lat(), (7.5, 7.5));
+
+    let query = LocalQuery {
+        x: 3,
+        y: 2,
+        data_area: 10,
+        ..query
+    };
+    // origin (30, 20) + half a 10-degree tile = (35, 25).
+    assert_eq!(query.center_lon_lat(), (35.0, 25.0));
+}
+
 /// `aggregate` counts offline (`minute_length == 10`) and interactive
 /// (`minute_length > 10`) local requests separately.
 #[test]
@@ -452,9 +475,9 @@ fn aggregate_counts_offline_and_interactive() {
 #[test]
 fn separate_maps_for_offline_and_interactive() {
     let content = [
-        // Offline at (5E, 45N) -> col 37, row 27.
+        // Requested tile (2, 10), data_area=5 -> origin (10E, 50N) -> col 38, row 28.
         local_row_minutes(2, 10, "5", 10),
-        // Interactive at (5E, 45N) too, so the same cell appears in both.
+        // Interactive at the same tile, so the same cell appears in both.
         local_row_minutes(2, 10, "5", 60),
     ]
     .join("\n");
@@ -469,9 +492,9 @@ fn separate_maps_for_offline_and_interactive() {
             q.is_interactive()
         });
     assert_eq!(offline.queries(), 1);
-    assert_eq!(offline.count(37, 27), 1);
+    assert_eq!(offline.count(38, 28), 1);
     assert_eq!(interactive.queries(), 1);
-    assert_eq!(interactive.count(37, 27), 1);
+    assert_eq!(interactive.count(38, 28), 1);
 
     let rendered = crate::map::render_ascii_maps(&stats);
     assert!(rendered.contains("offline local-query world map"));

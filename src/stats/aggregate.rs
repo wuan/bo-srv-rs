@@ -24,10 +24,14 @@ pub struct DataAreaBucket {
 
 /// A local query location for the world-map overlay.
 ///
-/// `x`/`y` are the local-grid tile indices written in the servicelog; the grid
-/// origin is `((x-1) * data_area, (y-1) * data_area)` degrees and `data_area` is
-/// the tile size in degrees (see [`crate::geom::LocalGrid`]).  `grid_baselength`
-/// is the raster baselength in metres, so an overlay can scale each marker.
+/// `x`/`y` are the **client's requested tile** indices written in the servicelog
+/// (`x = floor(lon / data_area)`, `y = floor(lat / data_area)`), so the tile
+/// spans `[x * data_area, (x+1) * data_area)` degrees; `data_area` is the tile
+/// size in degrees.  This is *not* the server's [`crate::geom::LocalGrid`]
+/// `reference_longitude`/`reference_latitude` (the lower-left of the
+/// `3 * data_area` neighbourhood grid used for the strike query).
+/// `grid_baselength` is the raster baselength in metres, so an overlay can scale
+/// each marker.
 ///
 /// `data_area` was added for the ASCII world map (issue #24): it determines the
 /// footprint of a query in the base 5-degree raster (`data_area / 5` cells per
@@ -63,15 +67,13 @@ impl LocalQuery {
 
     /// The tile centre as `(longitude, latitude)` degrees.
     ///
-    /// A local grid at `(x, y)` with tile size `data_area` starts at
-    /// `((x-1) * data_area, (y-1) * data_area)` and spans `data_area * 3`
-    /// degrees (see [`crate::geom::LocalGrid`]); the centre is therefore offset
-    /// by `1.5 * data_area` from the origin.  This is the geographic point the
-    /// SVG world map plots for the query.
+    /// `(x, y)` is the client's requested tile (`x = floor(lon / data_area)`),
+    /// so the tile spans `[x * data_area, (x+1) * data_area)` and its centre is
+    /// `(x * data_area + data_area / 2, y * data_area + data_area / 2)`.
     pub fn center_lon_lat(&self) -> (f64, f64) {
         let data_area = self.data_area.max(1) as f64;
-        let lon = (self.x - 1) as f64 * data_area + data_area * 1.5;
-        let lat = (self.y - 1) as f64 * data_area + data_area * 1.5;
+        let lon = self.x as f64 * data_area + data_area / 2.0;
+        let lat = self.y as f64 * data_area + data_area / 2.0;
         (lon, lat)
     }
 }
