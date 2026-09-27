@@ -45,5 +45,6 @@ pub mod transport;
 pub mod util;
 pub mod websocket;
 pub mod wkb;
+pub mod world_map;
 
 pub use executor::{Param, QueryExecutor, Row, Value};

@@ -362,7 +362,8 @@ daily `servicelog_YYYY-MM-DD` files back and reports, per day:
 
 ```sh
 bo-servicelog-stats [--dir <DIR|FILE>] [--date YYYY-MM-DD] [--all] [--top N] \
-                    [--format text|json|svg|map] [--width N] [--height N]
+                    [--format text|json|svg|map|html] [--output FILE] \
+                    [--width N] [--height N]
 ```
 
 `--dir` may be the log directory or a single `servicelog_YYYY-MM-DD` file.  It
@@ -379,6 +380,25 @@ and interactive ASCII world maps**, `--format json` the same data as JSON,
 value-range normalised plot, not a geographic projection — it needs no map
 dependency) and `--format map` (`ascii` is accepted as an alias) the north-up
 ASCII world maps alone.
+
+`--format html` (see issue #28) produces a **standalone static HTML report**: a
+self-contained document (inline stylesheet, no external resources) with the
+summary cards, the top lists and the `data_area` distribution as tables, plus
+**two SVG world maps** — one for the background/offline queries and one for the
+interactive queries.  Each map is an equirectangular projection of a light-gray,
+coarse continent-outline basemap (very light gray water, light gray land) — enough
+to give the local-query data a geographic frame without a GIS dependency — with
+the statistics aggregated onto a **single 72x36 raster of 5-degree cells** drawn
+on top.  Every local query increments the cells its `data_area` footprint covers
+(a `data_area=10` query fills a `2x2` block, `15` a `3x3`, ...), and each cell is
+rendered as a **semi-transparent rectangle shaded by its query count** (so the
+basemap stays visible and denser cells read darker).  Use `--output report.html`
+to write the document to a file (otherwise it goes to stdout, as with the other
+formats).
+
+```sh
+bo-servicelog-stats --format html --output report.html
+```
 
 Parsing splits each line on tabs and **ignores the empty segments** produced by
 the tab-padded `city` column, recovering the 14 logical fields; a line that
@@ -633,6 +653,9 @@ cargo run --bin bo-servicelog-stats -- --all
 cargo run --bin bo-servicelog-stats -- --format json
 cargo run --bin bo-servicelog-stats -- --format map
 cargo run --bin bo-servicelog-stats -- --date 2023-11-14 --format svg > local-queries.svg
+# a standalone static HTML report with an SVG world map
+cargo run --bin bo-servicelog-stats -- --date 2023-11-14 --format html \
+  --output report.html
 ```
 
 ## Documented differences from the Python implementation

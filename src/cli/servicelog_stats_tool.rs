@@ -12,8 +12,8 @@ use clap::Parser;
 
 use crate::config::Config;
 use crate::service_log_stats::{
-    day_from_filename, day_report, parse_file, render_ascii_map, render_json, render_local_svg,
-    render_text, today_utc, DayReport, DEFAULT_TOP_N,
+    day_from_filename, day_report, parse_file, render_ascii_map, render_html, render_json,
+    render_local_svg, render_text, today_utc, DayReport, DEFAULT_TOP_N,
 };
 
 /// The default servicelog directory when nothing is configured: the location
@@ -31,16 +31,20 @@ pub enum OutputFormat {
     Svg,
     /// ASCII world map (5-degree raster) of the local query locations.
     Map,
+    /// Standalone static HTML report with an SVG world map (continent basemap).
+    Html,
 }
 
 impl OutputFormat {
-    /// Parse a `--format` value (`text`/`json`/`svg`/`map`; case-insensitive).
+    /// Parse a `--format` value (`text`/`json`/`svg`/`map`/`html`;
+    /// case-insensitive).
     pub fn parse(value: &str) -> Option<OutputFormat> {
         match value.to_ascii_lowercase().as_str() {
             "text" => Some(OutputFormat::Text),
             "json" => Some(OutputFormat::Json),
             "svg" => Some(OutputFormat::Svg),
             "map" | "ascii" => Some(OutputFormat::Map),
+            "html" => Some(OutputFormat::Html),
             _ => None,
         }
     }
@@ -72,9 +76,14 @@ pub struct ServicelogStatsArgs {
     #[arg(long, default_value_t = DEFAULT_TOP_N)]
     pub top: usize,
 
-    /// output format: text, json, svg or map
+    /// output format: text, json, svg, map or html
     #[arg(long, default_value = "text")]
     pub format: String,
+
+    /// write the report to this file instead of stdout (useful for a static
+    /// HTML document: `--format html --output report.html`)
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 
     /// SVG width in pixels (only for `--format svg`)
     #[arg(long, default_value_t = 1024)]
@@ -184,9 +193,9 @@ pub fn filter_day(files: Vec<PathBuf>, date: Option<&str>) -> Vec<PathBuf> {
 
 /// Run the tool, returning the report(s) for stdout.
 ///
-/// One report per matched file.  Text/JSON/JSON-map reports are separated by a
-/// blank line; SVG output for multiple days is emitted back to back.  When no
-/// file matches (e.g. no servicelog written yet for the default day) a short
+/// One report per matched file.  Text/JSON/ASCII-map/HTML reports are separated
+/// by a blank line; SVG output for multiple days is emitted back to back.  When
+/// no file matches (e.g. no servicelog written yet for the default day) a short
 /// note naming the directory and day is returned instead of an empty string, so
 /// the caller always has something meaningful to print.
 pub fn run(options: &ServicelogStatsOptions) -> std::io::Result<String> {
@@ -199,7 +208,7 @@ pub fn run(options: &ServicelogStatsOptions) -> std::io::Result<String> {
     }
 
     match options.format {
-        OutputFormat::Text | OutputFormat::Json | OutputFormat::Map => {
+        OutputFormat::Text | OutputFormat::Json | OutputFormat::Map | OutputFormat::Html => {
             let mut reports: Vec<DayReport> = Vec::new();
             for file in &files {
                 let outcome = parse_file(file)?;
@@ -212,6 +221,7 @@ pub fn run(options: &ServicelogStatsOptions) -> std::io::Result<String> {
                     OutputFormat::Text => render_text(&report.day, &report.stats),
                     OutputFormat::Json => render_json(&report.day, &report.stats),
                     OutputFormat::Map => render_ascii_map(&report.day, &report.stats),
+                    OutputFormat::Html => render_html(&report.day, &report.stats),
                     OutputFormat::Svg => unreachable!(),
                 })
                 .collect();
@@ -264,6 +274,7 @@ mod tests {
             all: true,
             top: DEFAULT_TOP_N,
             format: "text".to_string(),
+            output: None,
             width: 1024,
             height: 512,
         }
@@ -288,6 +299,8 @@ mod tests {
         assert_eq!(OutputFormat::parse("Svg"), Some(OutputFormat::Svg));
         assert_eq!(OutputFormat::parse("map"), Some(OutputFormat::Map));
         assert_eq!(OutputFormat::parse("ASCII"), Some(OutputFormat::Map));
+        assert_eq!(OutputFormat::parse("html"), Some(OutputFormat::Html));
+        assert_eq!(OutputFormat::parse("HTML"), Some(OutputFormat::Html));
         assert_eq!(OutputFormat::parse("xml"), None);
     }
 
@@ -367,6 +380,34 @@ mod tests {
         let output = run(&options).unwrap();
         assert!(output.contains("local queries: 2"));
         assert!(output.contains("width=\"200\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_html_for_a_directory() {
+        let dir = temp_dir("run-html");
+        std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
+        let a = ServicelogStatsArgs {
+            format: "html".to_string(),
+            ..args(dir.clone())
+        };
+        let options =
+            ServicelogStatsOptions::from_args_with_config(&a, &Config::default()).unwrap();
+        let output = run(&options).unwrap();
+        assert!(output.starts_with("<!DOCTYPE html>"), "{output}");
+        assert!(
+            output.contains("servicelog statistics for 2023-11-14"),
+            "{output}"
+        );
+        assert!(output.contains("<svg"), "{output}");
+        assert!(output.contains("class=\"basemap\""), "{output}");
+        // Both offline/background and interactive overlays are present, on
+        // separate maps.
+        assert!(
+            output.contains("data-set=\"background (offline)\""),
+            "{output}"
+        );
+        assert!(output.contains("data-set=\"interactive\""), "{output}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
