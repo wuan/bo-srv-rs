@@ -23,9 +23,12 @@
 //! asset was produced from the official GeoJSON release
 //! (`nvkelso/natural-earth-vector`, `geojson/ne_110m_land.geojson`) by applying
 //! Douglas-Peucker simplification at ~0.1 degrees and quantizing the coordinates
-//! to 0.02 degrees; latitudes span the full `[-90, 90]` range (Antarctica reaches
-//! the south pole) and rings crossing the antimeridian were split so no path
-//! draws a horizontal streak across the map.
+//! to 2 decimal places; latitudes span the full `[-90, 90]` range (Antarctica
+//! reaches the south pole).  Antarctica is the one landmass that crosses the
+//! antimeridian; it is kept as a single ring that closes along the
+//! antimeridian / south-pole map edge (`[180, -90] -> [-180, -90]`), so no path
+//! draws a seam through the map interior.  See
+//! `assets/generate_world_basemap.py` for the reproducible pipeline.
 //!
 //! ## Accuracy
 //!
@@ -247,6 +250,63 @@ mod tests {
                     assert!(
                         a.1 <= -84.0 && b.1 <= -84.0,
                         "antimeridian streak from {a:?} to {b:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// No ring draws a spurious meridian inside the map.
+    ///
+    /// A near-vertical segment (large latitude change at almost constant
+    /// longitude) is only legitimate along the left/right map edge, i.e. within
+    /// ~1 degree of the antimeridian.  Anything else is a closure seam drawn
+    /// through the map interior — the bug where Antarctica was split at ~59W
+    /// instead of at the antimeridian, leaving straight segments from the south
+    /// pole up to the peninsula.
+    #[test]
+    fn no_ring_draws_an_interior_meridian() {
+        for ring in land_rings() {
+            for pair in ring.windows(2) {
+                let (a, b) = (pair[0], pair[1]);
+                let dlat = (a.1 - b.1).abs();
+                let dlon = (a.0 - b.0).abs();
+                if dlat > 20.0 && dlon < 5.0 {
+                    let lon = (a.0 + b.0) / 2.0;
+                    assert!(
+                        (lon.abs() - 180.0).abs() < 1.0,
+                        "interior meridian at lon {lon} from {a:?} to {b:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Antarctica is a single split-free ring that closes along the
+    /// antimeridian / south-pole edge and reaches the pole.
+    #[test]
+    fn antarctica_closes_on_the_map_edge() {
+        let antarctica: Vec<_> = land_rings()
+            .iter()
+            .filter(|ring| ring.iter().any(|(_, lat)| *lat <= -84.0))
+            .collect();
+        assert!(!antarctica.is_empty(), "no Antarctic ring");
+        assert!(
+            antarctica
+                .iter()
+                .any(|ring| ring.iter().any(|(_, lat)| *lat == -90.0)),
+            "Antarctica must reach the south pole"
+        );
+        // Any latitude drop of >20 degrees must happen at the map edge, never on
+        // an interior meridian.
+        for ring in &antarctica {
+            for pair in ring.windows(2) {
+                let (a, b) = (pair[0], pair[1]);
+                if (a.1 - b.1).abs() > 20.0 {
+                    let lon = (a.0 + b.0) / 2.0;
+                    assert!(
+                        (lon.abs() - 180.0).abs() < 1.0,
+                        "Antarctic closure meridian at lon {lon}: {a:?} -> {b:?}"
                     );
                 }
             }
