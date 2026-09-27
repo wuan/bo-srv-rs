@@ -29,13 +29,18 @@ pub const MAP_RAMP: [char; 8] = [' ', '.', '-', 'o', '*', 'O', '8', '#'];
 ///
 /// ## Footprint
 ///
-/// A local query at tile `(x, y)` with data area `data_area` covers
-/// `data_area` degrees starting at the grid origin
-/// `((x-1) * data_area, (y-1) * data_area)` (see [`crate::geom::LocalGrid`]).
-/// In the base 5-degree raster that is an `n x n` block with `n = data_area / 5`
-/// (so `data_area=5` marks one cell, `10` a `2x2`, `15` a `3x3` and `20` a
-/// `4x4` block).  Every cell of the block is incremented, so overlapping
-/// queries accumulate ("higher data areas can be added on top").
+/// A local query's `(x, y)` is the **client's requested tile** (see the client
+/// `calculateLocalCoordinate`: `x = floor(lon / data_area)`), so the tile spans
+/// `[x * data_area, (x+1) * data_area)` and its origin is
+/// `(x * data_area, y * data_area)` degrees.  (This is *not* the server's
+/// [`crate::geom::LocalGrid`] `reference_longitude`/`reference_latitude`, which
+/// is the lower-left of the `3 * data_area` neighbourhood grid used for the
+/// strike query and is one tile before the requested tile.)
+///
+/// In the base 5-degree raster the tile is an `n x n` block with `n =
+/// data_area / 5` (so `data_area=5` marks one cell, `10` a `2x2`, `15` a `3x3`
+/// and `20` a `4x4` block).  Every cell of the block is incremented, so
+/// overlapping queries accumulate ("higher data areas can be added on top").
 ///
 /// ## Layout
 ///
@@ -93,9 +98,10 @@ impl AsciiWorldMap {
 
     /// Add one local query's footprint to the raster.
     ///
-    /// `x`/`y` are the local-grid tile indices (1-based; `y` may be `<= 0` in
-    /// the southern hemisphere).  `data_area` is the tile size in degrees,
-    /// clamped to at least [`RASTER_DEGREES`]; the footprint side is
+    /// `x`/`y` are the **client's requested tile** indices (`x = floor(lon /
+    /// data_area)`, `y = floor(lat / data_area)`; `y` may be `<= 0` in the
+    /// southern hemisphere).  `data_area` is the tile size in degrees, clamped
+    /// to at least [`RASTER_DEGREES`]; the footprint side is
     /// `ceil(data_area / 5)` cells.
     pub fn add_local_query(&mut self, x: i64, y: i64, data_area: i64) {
         self.queries += 1;
@@ -104,9 +110,11 @@ impl AsciiWorldMap {
         let side = ((data_area + RASTER_DEGREES - 1) / RASTER_DEGREES).clamp(1, WORLD_COLS as i64)
             as usize;
 
-        // The grid origin (lower-left corner) in degrees.
-        let lon0 = (x - 1) * data_area;
-        let lat0 = (y - 1) * data_area;
+        // The requested tile's origin (lower-left corner) in degrees: the client
+        // formula is `x = floor(lon / data_area)`, so the tile spans
+        // `[x * data_area, (x+1) * data_area)`.
+        let lon0 = x * data_area;
+        let lat0 = y * data_area;
 
         // Column of the origin, wrapping across the antimeridian.
         let col0 = (lon0 + 180).div_euclid(RASTER_DEGREES);
@@ -249,23 +257,61 @@ mod tests {
     #[test]
     fn a_five_degree_query_marks_one_cell() {
         let mut map = AsciiWorldMap::new();
-        // Origin (5E, 45N) -> col floor((5+180)/5)=37, row floor((45+90)/5)=27.
+        // Requested tile (2, 10) -> origin (10E, 50N)
+        // -> col floor((10+180)/5)=38, row floor((50+90)/5)=28.
         map.add_local_query(2, 10, 5);
         assert_eq!(map.queries(), 1);
         assert_eq!(map.total(), 1);
         assert_eq!(map.maximum(), 1);
-        assert_eq!(map.count(37, 27), 1);
+        assert_eq!(map.count(38, 28), 1);
+    }
+
+    /// The requested tile's origin is `(x * data_area, y * data_area)`, not
+    /// `(x-1, y-1)`: a query at `(1, 1)` with `data_area=5` sits at (5E, 5N).
+    #[test]
+    fn requested_tile_origin_is_x_times_data_area() {
+        let mut map = AsciiWorldMap::new();
+        map.add_local_query(1, 1, 5);
+        // Origin (5, 5) -> col floor((5+180)/5)=37, row floor((5+90)/5)=19.
+        assert_eq!(map.count(37, 19), 1, "tile origin is x*data_area");
+        // The old `(x-1)` origin (0, 0) would have used col 36, row 18.
+        assert_eq!(map.count(36, 18), 0, "no longer shifted one cell left/down");
     }
 
     #[test]
     fn a_ten_degree_query_marks_four_cells() {
         let mut map = AsciiWorldMap::new();
+        // Requested tile (1, 1), data_area=10 -> origin (10, 10); a 2x2 block.
         map.add_local_query(1, 1, 10);
         assert_eq!(map.total(), 4);
-        assert_eq!(map.count(36, 18), 1);
-        assert_eq!(map.count(37, 18), 1);
-        assert_eq!(map.count(36, 19), 1);
-        assert_eq!(map.count(37, 19), 1);
+        assert_eq!(map.count(38, 20), 1);
+        assert_eq!(map.count(39, 20), 1);
+        assert_eq!(map.count(38, 21), 1);
+        assert_eq!(map.count(39, 21), 1);
+    }
+
+    /// `x=3, y=2, data_area=10` -> origin (30, 20) with a 2x2 footprint.
+    #[test]
+    fn ten_degree_tile_origin_and_footprint() {
+        let mut map = AsciiWorldMap::new();
+        map.add_local_query(3, 2, 10);
+        assert_eq!(map.total(), 4, "2x2 footprint");
+        // Origin (30, 20) -> col (30+180)/5 = 42, row (20+90)/5 = 22.
+        assert_eq!(map.count(42, 22), 1);
+        assert_eq!(map.count(43, 22), 1);
+        assert_eq!(map.count(42, 23), 1);
+        assert_eq!(map.count(43, 23), 1);
+    }
+
+    /// Negative `x`/`y` (southern/western hemisphere) place correctly.
+    #[test]
+    fn negative_tiles_place_correctly() {
+        let mut map = AsciiWorldMap::new();
+        // Tile (-1, -1), data_area=5 -> origin (-5, -5).
+        map.add_local_query(-1, -1, 5);
+        // col floor((-5+180)/5)=35, row floor((-5+90)/5)=17.
+        assert_eq!(map.count(35, 17), 1);
+        assert_eq!(map.total(), 1);
     }
 
     #[test]
@@ -290,9 +336,9 @@ mod tests {
     #[test]
     fn columns_wrap_across_the_antimeridian() {
         let mut map = AsciiWorldMap::new();
-        // lon0 = (37-1)*5 = 180 -> col (180+180)/5 = 72 -> wraps to 0.
+        // lon0 = 37*5 = 185 -> col (185+180)/5 = 73 -> wraps to 1.
         map.add_local_query(37, 1, 5);
-        assert_eq!(map.count(0, 18), 1);
+        assert_eq!(map.count(1, 19), 1);
     }
 
     #[test]
@@ -317,6 +363,7 @@ mod tests {
     #[test]
     fn render_is_framed_north_up_and_sized() {
         let mut map = AsciiWorldMap::new();
+        // Requested tile (2, 10), data_area=5 -> origin (10E, 50N) -> row 28.
         map.add_local_query(2, 10, 5);
         let rendered = map.render_titled("test map");
         assert!(
@@ -332,8 +379,8 @@ mod tests {
             assert_eq!(row.len(), WORLD_COLS + 2);
             assert!(row.starts_with('|') && row.ends_with('|'));
         }
-        // row 27 (south-up) draws at north-up index WORLD_ROWS - 1 - 27.
-        let expected_line = WORLD_ROWS - 1 - 27;
+        // row 28 (south-up) draws at north-up index WORLD_ROWS - 1 - 28.
+        let expected_line = WORLD_ROWS - 1 - 28;
         assert!(body[expected_line].contains('#'), "{rendered}");
     }
 
