@@ -627,10 +627,7 @@ mod tests {
     #[tokio::test]
     async fn clear_drops_entries_and_resets_counters() {
         let cache = ObjectCache::new(60, None, None);
-        assert_eq!(
-            cache.get("k", || async { Ok(json!(1)) }).await,
-            json!(1)
-        );
+        assert_eq!(cache.get("k", || async { Ok(json!(1)) }).await, json!(1));
         assert_eq!(cache.get_size(), 1);
 
         cache.clear();
@@ -639,10 +636,7 @@ mod tests {
         assert_eq!(cache.get_ratio(), 0.0);
         // after a clear the value is recomputed, confirming counters/entries
         // were actually reset
-        assert_eq!(
-            cache.get("k", || async { Ok(json!(2)) }).await,
-            json!(2)
-        );
+        assert_eq!(cache.get("k", || async { Ok(json!(2)) }).await, json!(2));
     }
 
     #[test]

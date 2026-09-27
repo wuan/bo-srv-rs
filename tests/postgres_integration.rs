@@ -72,7 +72,10 @@ fn strike_now(x: f64, y: f64, region: Option<i64>) -> Strike {
 /// `now - 1h .. now + 1h`, so freshly inserted strikes are always in range.
 fn recent_interval() -> TimeInterval {
     let now = chrono::Utc::now();
-    TimeInterval::new(now - chrono::Duration::hours(1), now + chrono::Duration::hours(1))
+    TimeInterval::new(
+        now - chrono::Duration::hours(1),
+        now + chrono::Duration::hours(1),
+    )
 }
 
 /// Sum of all cell counts in a [`GridData`] result.
@@ -333,12 +336,8 @@ fn grid_query_region_filter() {
     let grid = Grid::new(10.0, 20.0, 40.0, 50.0, 1.0, 1.0);
     ctx.runtime.block_on(async {
         let db = StrikeDb::new(&ctx.executor, 4326);
-        db.insert(&strike_now(11.5, 49.5, None), 1)
-            .await
-            .unwrap();
-        db.insert(&strike_now(11.6, 49.5, None), 6)
-            .await
-            .unwrap();
+        db.insert(&strike_now(11.5, 49.5, None), 1).await.unwrap();
+        db.insert(&strike_now(11.6, 49.5, None), 6).await.unwrap();
 
         let region_1 = db
             .select_grid(&grid, 0, &recent_interval(), Some(1))
@@ -367,9 +366,7 @@ fn global_grid_query_places_strike() {
     let grid = Grid::new(-180.0, 180.0, -90.0, 90.0, 1.0, 1.0);
     ctx.runtime.block_on(async {
         let db = StrikeDb::new(&ctx.executor, 4326);
-        db.insert(&strike_now(11.5, 49.5, None), 1)
-            .await
-            .unwrap();
+        db.insert(&strike_now(11.5, 49.5, None), 1).await.unwrap();
 
         let query = query::global_grid_query(&grid, &recent_interval(), 0);
         let rows = ctx
@@ -419,9 +416,12 @@ fn histogram_query_bins_strikes() {
             .await
             .expect("histogram query must succeed");
 
-        let bins = build_histogram(&rows, interval.minutes(), 5)
-            .expect("build_histogram must succeed");
-        let counts: Vec<i64> = bins.iter().map(|value| value.as_i64().unwrap_or(-1)).collect();
+        let bins =
+            build_histogram(&rows, interval.minutes(), 5).expect("build_histogram must succeed");
+        let counts: Vec<i64> = bins
+            .iter()
+            .map(|value| value.as_i64().unwrap_or(-1))
+            .collect();
         // Six 5-minute bins; the strike 5 minutes before the end lands in the
         // fifth bin (index 4).
         assert_eq!(counts, vec![0, 0, 0, 0, 1, 0]);
@@ -631,7 +631,10 @@ fn partition_maintenance_creates_and_drops_old_partitions() {
         );
 
         executor
-            .query("SELECT strikes_drop_old_partitions('2 days'::interval)", &[])
+            .query(
+                "SELECT strikes_drop_old_partitions('2 days'::interval)",
+                &[],
+            )
             .await
             .expect("drop old partitions");
         let rows = executor

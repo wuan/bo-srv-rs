@@ -111,11 +111,7 @@ impl TestDb {
     /// container is process-wide, so tests that assert exact row counts call
     /// this while holding the [`serial`] guard.  `RESTART IDENTITY` keeps
     /// `id`/`timestamp` values deterministic across tests.
-    pub fn truncate(
-        &self,
-        runtime: &tokio::runtime::Runtime,
-        executor: &dyn QueryExecutor,
-    ) {
+    pub fn truncate(&self, runtime: &tokio::runtime::Runtime, executor: &dyn QueryExecutor) {
         runtime
             .block_on(executor.execute("TRUNCATE strikes RESTART IDENTITY", &[]))
             .expect("truncate strikes");
@@ -139,5 +135,7 @@ static DATA_LOCK: Mutex<()> = Mutex::new(());
 
 /// Take the data lock; see [`DATA_LOCK`].
 pub fn serial() -> MutexGuard<'static, ()> {
-    DATA_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    DATA_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

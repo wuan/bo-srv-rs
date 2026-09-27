@@ -8,11 +8,11 @@
 //!
 //! This replaces the Python two-step design (`base.py` writing per-minute JSON
 //! reports + the `bo-webservice-insertlog` follow-up tool): there are **no JSON
-//! intermediate files** and the transform happens in-process.  The row has 10
+//! intermediate files** and the transform happens in-process.  The row has 13
 //! logical fields (see [`build_row`]): the UTC request time as `HH:MM:SS.nnn`,
 //! country/city, a client **platform** marker, the version, then the request
-//! parameters.  The old masked-IP and local `x`/`y`/`data_area` columns are
-//! gone.  The `city` field is tab-padded (see [`pad_city`]), so splitting a line
+//! parameters and the local `x`/`y`/`data_area` (or `-` placeholders).  The old
+//! masked-IP column is gone.  The `city` field is tab-padded (see [`pad_city`]), so splitting a line
 //! on `'\t'` produces empty segments for the padding — consumers must ignore
 //! empty segments rather than rely on fixed indices.
 //!
@@ -77,9 +77,10 @@ pub const QUEUE_CAPACITY: usize = 65_536;
 /// flavour and `-1` for the local flavour.  `grid_baselength` is the
 /// **pre-clamp** value (`original_grid_base_length` in `base.py`).
 ///
-/// `client` and `local` are retained for the GeoIP lookup and the optional
-/// StatsD tags; neither the raw client IP nor the local `x`/`y`/`data_area`
-/// values are written to the log line (see [`build_row`]).
+/// `client` is retained for the GeoIP lookup; the raw client IP is never
+/// written to the log line (see [`build_row`]).  `local` carries the local
+/// `x`/`y`/`data_area` values written for the local flavour (and rendered as
+/// `-` for the global/region flavours).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceLogEntry {
     /// Epoch microseconds of the request.
@@ -234,8 +235,8 @@ pub const CITY_TABS: usize = 4;
 ///
 /// Because the padding is made of tabs, splitting a line on `'\t'` yields
 /// **empty fields** for the padding tabs; the line therefore no longer has a
-/// fixed 10-element index layout.  Consumers must split on tabs and ignore empty
-/// segments (the 10 logical fields are still all present and in order), or use
+/// fixed 13-element index layout.  Consumers must split on tabs and ignore empty
+/// segments (the 13 logical fields are still all present and in order), or use
 /// the column layout for display only.
 pub fn pad_city(city: &str) -> String {
     let length = city.chars().count();
@@ -249,7 +250,7 @@ fn calc_tab_pad_count(length: usize) -> usize {
     CITY_TABS - tab_count
 }
 
-/// Render one entry as the 10-logical-field tab-separated servicelog row.
+/// Render one entry as the 13-logical-field tab-separated servicelog row.
 ///
 /// Field order:
 /// 1. `timestamp` — **UTC wall-clock time `HH:MM:SS.nnn`** (milliseconds);
@@ -262,13 +263,17 @@ fn calc_tab_pad_count(length: usize) -> usize {
 /// 7. `minute_length`;
 /// 8. `grid_baselength` — the **pre-clamp** `original_grid_base_length`;
 /// 9. `region` — `0` global, clamped region for the region grid, `-1` local;
-/// 10. `count_threshold`.
+/// 10. `count_threshold`;
+/// 11. `x` — local-grid centre `x`, else `-`;
+/// 12. `y` — local-grid centre `y`, else `-`;
+/// 13. `data_area` — local-grid data area, else `-`.
 ///
 /// The other fields are separated by single tabs; only the `city` field is
 /// tab-padded (see [`CITY_TABS`] / [`pad_city`]).
 ///
-/// The raw client IP and the local `x`/`y`/`data_area` values are intentionally
-/// **not** written; a local request is distinguishable only by `region == -1`.
+/// The raw client IP is intentionally **not** written.  For the global/region
+/// flavours fields 11–13 are the `-` placeholders; a local request carries the
+/// local `x`/`y`/`data_area` values and is also distinguishable by `region == -1`.
 ///
 /// The timestamp is the UTC wall-clock time of [`ServiceLogEntry::now_us`],
 /// rendered as `HH:MM:SS.nnn` with **millisecond** precision (see
@@ -314,6 +319,17 @@ pub fn build_row(
     row.push_str(&entry.region.to_string());
     row.push('\t');
     row.push_str(&entry.count_threshold.to_string());
+    match entry.local {
+        Some(local) => {
+            row.push('\t');
+            row.push_str(&local.x.to_string());
+            row.push('\t');
+            row.push_str(&local.y.to_string());
+            row.push('\t');
+            row.push_str(&local.data_area.to_string());
+        }
+        None => row.push_str("\t-\t-\t-"),
+    }
     row
 }
 
@@ -781,14 +797,14 @@ mod tests {
         // "X" (1 char) stays within the first tab block -> CITY_TABS tabs.
         assert_eq!(
             short,
-            "22:13:20.500\tDE\tX\t\t\t\tA\t190\t0\t60\t10000\t0\t0"
+            "22:13:20.500\tDE\tX\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-"
         );
 
         let medium = build_row(&entry(0, None), Some(190), Some("DE"), Some("Berlin"));
         // "Berlin" (6 chars) stays within the first tab block -> CITY_TABS tabs.
         assert_eq!(
             medium,
-            "22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t0\t0"
+            "22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-"
         );
 
         let long = build_row(
@@ -800,14 +816,14 @@ mod tests {
         // 17 chars span 2 full tab blocks -> 4 - 2 = 2 tabs.
         assert_eq!(
             long,
-            "22:13:20.500\tDE\tFrankfurt am Main\t\tA\t190\t0\t60\t10000\t0\t0"
+            "22:13:20.500\tDE\tFrankfurt am Main\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-"
         );
 
         // Padding tabs show up as empty segments on a naive split; ignoring
-        // them recovers exactly the 10 logical fields.
+        // them recovers exactly the 13 logical fields.
         for row in [&short, &medium, &long] {
             let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
-            assert_eq!(logical.len(), 10, "row: {row}");
+            assert_eq!(logical.len(), 13, "row: {row}");
         }
     }
 
@@ -820,13 +836,13 @@ mod tests {
         // 27 chars span 3 full tab blocks -> CITY_TABS - 3 = 1 tab.
         assert_eq!(
             row,
-            "22:13:20.500\tRU\tSankt-Peterburg-Nikolaevsk\tA\t190\t0\t60\t10000\t0\t0"
+            "22:13:20.500\tRU\tSankt-Peterburg-Nikolaevsk\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-"
         );
         // The name is intact (no truncation).
         assert!(row.contains(long));
         let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
         assert_eq!(logical[2], long);
-        assert_eq!(logical.len(), 10);
+        assert_eq!(logical.len(), 13);
     }
 
     /// `pad_city` drops one tab per full tab block of city text and keeps a
@@ -877,14 +893,13 @@ mod tests {
         );
         // Absent country/city are `-`; the entry's user agent is Android so the
         // platform stays `A` while the (separately supplied) version is `None`.
-        // The local x/y/data_area are not part of the line; only `region == -1`
-        // distinguishes a local request.
+        // The local x/y/data_area are written after `count_threshold`.
         assert_eq!(
             row,
-            "22:13:20.500\t-\t-\t\t\t\tA\tNone\t0\t60\t10000\t-1\t0"
+            "22:13:20.500\t-\t-\t\t\t\tA\tNone\t0\t60\t10000\t-1\t0\t101\t202\t5"
         );
         let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
-        assert_eq!(logical.len(), 10);
+        assert_eq!(logical.len(), 13);
     }
 
     /// A non-Android (or absent) user agent yields platform `-`.
@@ -905,10 +920,10 @@ mod tests {
         assert_eq!(logical[4], "None");
     }
 
-    /// Neither the raw client IP nor the local x/y/data_area values appear in
-    /// the row.
+    /// The raw client IP is never written, while the local x/y/data_area values
+    /// are present for a local request.
     #[test]
-    fn row_never_contains_the_client_ip_or_local_coords() {
+    fn row_never_contains_the_client_ip_but_keeps_local_coords() {
         let mut e = entry(
             -1,
             Some(LocalGridLog {
@@ -920,10 +935,11 @@ mod tests {
         e.client = Some("203.0.113.7".into());
         let row = build_row(&e, Some(190), Some("DE"), Some("Berlin"));
         assert!(!row.contains("203.0.113.7"));
-        assert!(!row.contains("101"));
-        assert!(!row.contains("202"));
         let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
-        assert_eq!(logical.len(), 10);
+        assert_eq!(logical[10], "101");
+        assert_eq!(logical[11], "202");
+        assert_eq!(logical[12], "5");
+        assert_eq!(logical.len(), 13);
     }
 
     #[test]
@@ -935,7 +951,7 @@ mod tests {
         assert_eq!(logical[7], "2000"); // pre-clamp grid_baselength
         assert_eq!(logical[8], "3"); // region
         assert_eq!(logical[4], "42"); // version
-        assert_eq!(logical.len(), 10);
+        assert_eq!(logical.len(), 13);
     }
 
     #[test]
@@ -984,7 +1000,7 @@ mod tests {
         let content = std::fs::read_to_string(dir.join("servicelog_2023-11-14")).unwrap();
         assert_eq!(
             content,
-            "22:13:20.500\t-\t-\t\t\t\tA\t190\t0\t60\t10000\t0\t0\n"
+            "22:13:20.500\t-\t-\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1078,7 +1094,7 @@ mod tests {
         let day2 = std::fs::read_to_string(dir.join("servicelog_2023-11-15")).unwrap();
         assert_eq!(
             day2,
-            "00:00:00.000\t-\t-\t\t\t\tA\t190\t0\t60\t10000\t0\t0\n"
+            "00:00:00.000\t-\t-\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

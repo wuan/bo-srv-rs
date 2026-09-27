@@ -241,12 +241,12 @@ An empty env value disables it quietly.  When enabled the service logs
 
 ### File format
 
-Rows are appended to `{log_dir}/servicelog_{YYYY-MM-DD}`, 10 logical fields (one
+Rows are appended to `{log_dir}/servicelog_{YYYY-MM-DD}`, 13 logical fields (one
 line per request).  Tabs are shown as `\t` here; the file contains real tab
 characters:
 
 ```text
-22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t3\t0
+22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t3\t0\t-\t-\t-
 ```
 
 **City padding (tabs).** The `city` field is padded with **tab characters**, not
@@ -259,8 +259,8 @@ following columns further right.
 
 > **Consequence:** because the padding is made of tabs, splitting a line on
 > `'\t'` yields **empty fields**.  The line therefore no longer has a fixed
-> 10-element index layout.  Consumers must split on tabs and **ignore empty
-> segments** (the 10 logical fields are still all present and in order), or treat
+> 13-element index layout.  Consumers must split on tabs and **ignore empty
+> segments** (the 13 logical fields are still all present and in order), or treat
 > the column positions as display-only.
 
 | # | Logical field | Notes |
@@ -275,9 +275,13 @@ following columns further right.
 | 8 | `grid_baselength` | the **pre-clamp** `original_grid_base_length` |
 | 9 | `region` | `0` global, clamped region for the region grid, `-1` local |
 | 10 | `count_threshold` | |
+| 11 | `x` | local-grid centre `x`, else `-` |
+| 12 | `y` | local-grid centre `y`, else `-` |
+| 13 | `data_area` | local-grid data area, else `-` |
 
-Neither the raw client IP nor the local `x`/`y`/`data_area` values are written;
-a local request is distinguishable only by `region == -1`.  The `platform`
+The raw client IP is never written.  For the global/region flavours fields
+11–13 are `-`; a local request carries its `x`/`y`/`data_area` values and is
+also distinguishable by `region == -1`.  The `platform`
 marker recognises the Blitzortung Android client (`A`); a missing or non-Android
 user agent yields `-` and its version stays `None`.
 
@@ -656,12 +660,13 @@ cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
   (per-minute JSON reports written by `base.py` plus the `bo-webservice-insertlog`
   follow-up tool), the Rust port transforms and appends rows on a background
   thread fed by a bounded queue.  There are no intermediate JSON files and no
-  standalone tool to schedule.  The row is a 10-column format: the timestamp is
+standalone tool to schedule.  The row is a 13-column format: the timestamp is
   the UTC wall-clock time of day as `HH:MM:SS.nnn` (milliseconds; the daily file
   name carries the date), the masked client-IP
   column is dropped, a client **platform** marker (`A` for Android) is added,
-  and the local `x`/`y`/`data_area` columns are removed (a local request is
-identified by `region == -1`).  The `city` field is padded with tabs (four
+  and the local `x`/`y`/`data_area` columns carry the local request values (or
+  `-` for the global/region flavours; a local request is also
+  identified by `region == -1`).  The `city` field is padded with tabs (four
 8-column tab stops, one tab less per full block, at least one) so the following
 columns line up (never truncated); as a result a naive tab split yields empty
 segments that consumers must ignore.
