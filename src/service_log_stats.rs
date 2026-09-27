@@ -11,8 +11,9 @@
 //! * **top client versions** — requests grouped by the parsed
 //!   `bo-android-<n>` version;
 //! * **local query overlay** — the `(x, y, raster baselength)` grid locations
-//!   of the local requests, for plotting on a world map (`render_ascii_maps`
-//!   for the ASCII raster, `render_world_svg` for the geographic SVG maps).
+//!   of the local requests, for plotting on a world map (see [`crate::map`]:
+//!   `render_ascii_maps` for the ASCII raster, `render_world_svg` for the
+//!   geographic SVG maps).
 //!
 //! Besides the text, JSON and SVG renderers this module provides
 //! [`render_html`], a standalone static HTML report (issue #28) that embeds the
@@ -195,7 +196,7 @@ pub struct TopEntry {
 /// One `data_area` bucket of the local-query distribution.
 ///
 /// `data_area` is the tile size in degrees (the `data_area` field of a local
-/// request, always a multiple of [`RASTER_DEGREES`] in practice).
+/// request, always a multiple of [`crate::map::RASTER_DEGREES`] in practice).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DataAreaBucket {
     pub data_area: i64,
@@ -451,7 +452,7 @@ pub fn render_text(day: &str, stats: &ServiceLogStats) -> String {
     // The text report includes the ASCII world maps (issue #24): one for the
     // offline queries and one for the interactive queries; `--format map`
     // prints the maps alone.
-    out.push_str(&render_ascii_maps(stats));
+    out.push_str(&crate::map::render_ascii_maps(stats));
     out
 }
 
@@ -497,32 +498,6 @@ pub fn render_json(day: &str, stats: &ServiceLogStats) -> String {
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Render the local queries as ASCII world maps (5-degree raster, issue #24):
-/// one for the **offline** queries (a fixed 10-minute window) and a separate
-/// one for the **interactive** queries (any longer window).
-pub fn render_ascii_map(day: &str, stats: &ServiceLogStats) -> String {
-    format!(
-        "servicelog local-query maps for {day}\n{}",
-        render_ascii_maps(stats)
-    )
-}
-
-/// The two ASCII world maps (offline and interactive), each labelled and
-/// separated by a blank line.
-pub fn render_ascii_maps(stats: &ServiceLogStats) -> String {
-    let offline =
-        AsciiWorldMap::from_local_queries_filtered(&stats.local_queries, |q| q.is_offline());
-    let interactive =
-        AsciiWorldMap::from_local_queries_filtered(&stats.local_queries, |q| q.is_interactive());
-    format!(
-        "offline queries (minute_length == {}):\n{}\ninteractive queries (minute_length > {}):\n{}",
-        OFFLINE_MINUTE_LENGTH,
-        offline.render_titled("offline local-query world map"),
-        OFFLINE_MINUTE_LENGTH,
-        interactive.render_titled("interactive local-query world map"),
-    )
-}
-
 fn top_entries_json(entries: &[TopEntry]) -> Vec<serde_json::Value> {
     entries
         .iter()
@@ -530,71 +505,7 @@ fn top_entries_json(entries: &[TopEntry]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Render the local query overlay as a minimal SVG world scatter, one point
-/// per local request, scaled into the SVG viewport.
-///
-/// This is a **standalone** helper: it plots the raw UTM `(x, y)` values
-/// (normalised to the value range, not projected onto a geographic world map),
-/// which is enough to visualise query clusters without a map dependency.
-pub fn render_local_svg(stats: &ServiceLogStats, width: u32, height: u32) -> String {
-    let margin = 10.0;
-    let points = &stats.local_queries;
-    let (min_x, max_x, min_y, max_y) = bounds(points);
-
-    let mut svg = String::new();
-    svg.push_str(&format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
-         viewBox=\"0 0 {width} {height}\">\n"
-    ));
-    svg.push_str(&format!(
-        "  <rect width=\"{width}\" height=\"{height}\" fill=\"#101820\"/>\n"
-    ));
-    svg.push_str(&format!(
-        "  <text x=\"8\" y=\"16\" fill=\"#e0e0e0\" font-family=\"monospace\" font-size=\"12\">\
-         local queries: {}</text>\n",
-        points.len()
-    ));
-
-    for q in points {
-        let x = scale(q.x as f64, min_x, max_x, margin, width as f64 - margin);
-        // Invert y so north is up.
-        let y = scale(q.y as f64, min_y, max_y, height as f64 - margin, margin);
-        svg.push_str(&format!(
-            "  <circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"2\" fill=\"#ff6d3f\" fill-opacity=\"0.6\"/>\n"
-        ));
-    }
-    svg.push_str("</svg>\n");
-    svg
-}
-
-/// The min/max bounds of the points, or a degenerate `(0, 1)` box when empty.
-fn bounds(points: &[LocalQuery]) -> (f64, f64, f64, f64) {
-    if points.is_empty() {
-        return (0.0, 1.0, 0.0, 1.0);
-    }
-    let mut min_x = f64::INFINITY;
-    let mut max_x = f64::NEG_INFINITY;
-    let mut min_y = f64::INFINITY;
-    let mut max_y = f64::NEG_INFINITY;
-    for q in points {
-        min_x = min_x.min(q.x as f64);
-        max_x = max_x.max(q.x as f64);
-        min_y = min_y.min(q.y as f64);
-        max_y = max_y.max(q.y as f64);
-    }
-    (min_x, max_x, min_y, max_y)
-}
-
-/// Map `value` from `[min, max]` onto `[out_min, out_max]`; a degenerate input
-/// range maps to the midpoint so no division by zero occurs.
-fn scale(value: f64, min: f64, max: f64, out_min: f64, out_max: f64) -> f64 {
-    if (max - min).abs() < f64::EPSILON {
-        return (out_min + out_max) / 2.0;
-    }
-    out_min + (value - min) / (max - min) * (out_max - out_min)
-}
-
-// --- Geographic SVG world map + static HTML report (issue #28) -------------
+// --- Static HTML report (issue #28) ----------------------------------------
 
 /// Escape the five XML/HTML metacharacters so arbitrary labels (country, city)
 /// can be embedded safely in SVG/HTML.
@@ -611,179 +522,6 @@ fn escape_html(value: &str) -> String {
         }
     }
     out
-}
-
-/// The water / land / coast colours of the light basemap.
-const WATER_FILL: &str = "#f5f6f7";
-/// Light-gray land fill for the basemap (see [`WATER_FILL`]).
-const LAND_FILL: &str = "#d9dde1";
-/// Coastline stroke for the basemap.
-const COAST_STROKE: &str = "#aeb6bd";
-/// Graticule colour (equator/prime meridian on the light basemap).
-const GRATICULE_STROKE: &str = "#dde1e5";
-
-/// The `(R, G, B)` colour ramp for the shaded squares, light to dense.
-///
-/// A square's shade is keyed to its **absolute** query count (see
-/// [`square_colour`]) so the two separate maps are directly comparable and a
-/// tile with a single query is never rendered as a hot spot.
-const SQUARE_RAMP: [(u8, u8, u8); 6] = [
-    (255, 224, 138), // pale amber
-    (255, 197, 82),
-    (251, 160, 47),
-    (240, 116, 34),
-    (214, 75, 36),
-    (176, 42, 44), // deep red
-];
-
-/// The per-tile query count that saturates the ramp: `1` maps to the palest
-/// shade and `>= SQUARE_RAMP_MAX` to the deepest.
-const SQUARE_RAMP_MAX: u64 = 32;
-
-/// Pick a ramp colour for an absolute `count`.
-///
-/// The count is mapped onto the ramp with a logarithmic scale (so low counts
-/// stay visually distinct) and capped at [`SQUARE_RAMP_MAX`].  This is
-/// deliberately absolute rather than normalised against the map's maximum: the
-/// same tile count reads the same on both the background and interactive maps,
-/// and a lone query on an otherwise empty map is not painted the densest shade.
-fn square_colour(count: u64) -> String {
-    let count = count.min(SQUARE_RAMP_MAX);
-    let bucket = match count {
-        0 => 0,
-        1 => 1,
-        2..=3 => 2,
-        4..=7 => 3,
-        8..=15 => 4,
-        _ => 5,
-    };
-    let (r, g, b) = SQUARE_RAMP[bucket];
-    format!("#{r:02x}{g:02x}{b:02x}")
-}
-
-/// Render the local-query statistics of one category as shaded cells of the
-/// single underlying `WORLD_ROWS x WORLD_COLS` 5-degree raster.
-///
-/// Every query's footprint is added to one shared [`AsciiWorldMap`] grid: a
-/// `data_area` of `n` degrees covers `n / 5` cells per side starting at the
-/// tile origin, so a `data_area=10` query increments the four cells
-/// `(x, y)`, `(x+1, y)`, `(x, y+1)`, `(x+1, y+1)` (see
-/// [`AsciiWorldMap::add_local_query`]).  Only that one raster is drawn, so
-/// overlapping queries simply accumulate into the same cells.
-///
-/// Each non-empty cell becomes a semi-transparent rectangle shaded by its count
-/// (see [`square_colour`]) so the basemap stays visible underneath.  The
-/// south-up raster rows are flipped for the north-up SVG.  `label` names the
-/// group for the SVG `<title>`.
-fn raster_layer(raster: &AsciiWorldMap, width: f64, height: f64, label: &str) -> String {
-    let cell_w = width / WORLD_COLS as f64;
-    let cell_h = height / WORLD_ROWS as f64;
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "<g class=\"squares\" data-set=\"{}\" fill-opacity=\"0.55\">\n  <title>{}</title>\n",
-        escape_html(label),
-        escape_html(&format!("{label}: {} queries", raster.queries())),
-    );
-    for row in 0..WORLD_ROWS {
-        // The raster is south-up; flip so row 0 draws at the top.
-        let north_up_row = WORLD_ROWS - 1 - row;
-        for col in 0..WORLD_COLS {
-            let count = raster.count(col, row);
-            if count == 0 {
-                continue;
-            }
-            let x = col as f64 * cell_w;
-            let y = north_up_row as f64 * cell_h;
-            let fill = square_colour(count);
-            let _ = writeln!(
-                out,
-                "  <rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{cell_w:.2}\" height=\"{cell_h:.2}\" \
-                 fill=\"{fill}\"><title>{label}: {count} queries</title></rect>",
-            );
-        }
-    }
-    out.push_str("</g>\n");
-    out
-}
-
-/// Render a single geographic SVG world map for one query category.
-///
-/// The map is light-themed: a very light gray ocean, light gray continents and
-/// a faint graticule, with the category's statistics drawn on top as
-/// semi-transparent shaded cells of the shared 5-degree raster (see
-/// [`raster_layer`]).  Unlike [`render_local_svg`] (which normalises the raw UTM
-/// tile indices into an abstract scatter), the raster cells are georeferenced by
-/// their 5-degree footprint.
-///
-/// `queries` is the category to plot and `label` names it in the SVG title and
-/// `aria-label`.
-pub fn render_world_map_svg(
-    queries: &[LocalQuery],
-    label: &str,
-    width: u32,
-    height: u32,
-) -> String {
-    let (w, h) = (width as f64, height as f64);
-    let raster = AsciiWorldMap::from_local_queries(queries);
-    let mut svg = String::new();
-    let _ = writeln!(
-        svg,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" class=\"worldmap\" width=\"{width}\" \
-         height=\"{height}\" viewBox=\"0 0 {width} {height}\" role=\"img\" \
-         aria-label=\"{}\">",
-        escape_html(&format!("World map of {label} local queries"))
-    );
-    // Very light gray ocean background.
-    let _ = writeln!(
-        svg,
-        "  <rect x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" fill=\"{WATER_FILL}\"/>"
-    );
-    // Faint graticule (equator + prime meridian) for orientation.
-    let _ = write!(
-        svg,
-        "  <g class=\"graticule\" stroke=\"{GRATICULE_STROKE}\" stroke-width=\"0.5\">\n\
-         \x20   <line x1=\"0\" y1=\"{}\" x2=\"{width}\" y2=\"{}\"/>\n\
-         \x20   <line x1=\"{}\" y1=\"0\" x2=\"{}\" y2=\"{height}\"/>\n\
-         \x20 </g>\n",
-        height / 2,
-        height / 2,
-        width / 2,
-        width / 2,
-    );
-    svg.push_str(&crate::world_map::continent_layer(
-        width,
-        height,
-        LAND_FILL,
-        COAST_STROKE,
-    ));
-    svg.push_str(&raster_layer(&raster, w, h, label));
-    svg.push_str("</svg>\n");
-    svg
-}
-
-/// Render the separate offline (background) and interactive world maps used by
-/// the HTML report.
-///
-/// Returns `(offline_svg, interactive_svg)`; each map is a standalone
-/// [`render_world_map_svg`] so the two query categories never overlap visually.
-pub fn render_world_svg(stats: &ServiceLogStats, width: u32, height: u32) -> (String, String) {
-    let offline: Vec<LocalQuery> = stats
-        .local_queries
-        .iter()
-        .copied()
-        .filter(LocalQuery::is_offline)
-        .collect();
-    let interactive: Vec<LocalQuery> = stats
-        .local_queries
-        .iter()
-        .copied()
-        .filter(LocalQuery::is_interactive)
-        .collect();
-    (
-        render_world_map_svg(&offline, "background (offline)", width, height),
-        render_world_map_svg(&interactive, "interactive", width, height),
-    )
 }
 
 /// Render a "top N" list as HTML table rows (`<tr><td>label</td><td>count</td>`).
@@ -832,8 +570,9 @@ fn data_area_rows(buckets: &[DataAreaBucket]) -> String {
 /// `data_area` distribution) and two separate SVG world maps — one for the
 /// background/offline queries and one for the interactive queries — each with a
 /// light-gray continent basemap under semi-transparent squares shaded by the
-/// per-tile query count (see [`render_world_svg`]).  All styling is inline in a
-/// `<style>` block, so the file is self-contained and needs no network access.
+/// per-tile query count (see [`crate::map::render_world_svg`]).  All styling is
+/// inline in a `<style>` block, so the file is self-contained and needs no
+/// network access.
 pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
     let escape = |value: &str| escape_html(value);
     let offline = stats
@@ -923,11 +662,8 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
         offline,
         interactive
     ));
-    let (offline_svg, interactive_svg) = render_world_svg(
-        stats,
-        crate::world_map::MAP_WIDTH,
-        crate::world_map::MAP_HEIGHT,
-    );
+    let (offline_svg, interactive_svg) =
+        crate::map::render_world_svg(stats, crate::map::MAP_WIDTH, crate::map::MAP_HEIGHT);
     html.push_str("  <div class=\"maps\">\n");
     let _ = write!(
         html,
@@ -938,18 +674,21 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
     );
     html.push_str("  </div>\n");
     // Shade legend: the square ramp runs from one query to the densest tile.
-    html.push_str(
+    let _ = write!(
+        html,
         "  <p class=\"legend\">\
-         <span><span class=\"swatch\" style=\"background:#f5f6f7\"></span>water</span>\
-         <span><span class=\"swatch\" style=\"background:#d9dde1\"></span>land</span>\
+         <span><span class=\"swatch\" style=\"background:{}\"></span>water</span>\
+         <span><span class=\"swatch\" style=\"background:{}\"></span>land</span>\
          <span>queries per square:</span>",
+        crate::map::svg::WATER_FILL,
+        crate::map::svg::LAND_FILL,
     );
-    for (index, (r, g, b)) in SQUARE_RAMP.iter().enumerate() {
+    for (index, (r, g, b)) in crate::map::svg::SQUARE_RAMP.iter().enumerate() {
         let _ = write!(
             html,
             "<span class=\"swatch\" style=\"background:#{r:02x}{g:02x}{b:02x}\"></span>"
         );
-        if index + 1 == SQUARE_RAMP.len() {
+        if index + 1 == crate::map::svg::SQUARE_RAMP.len() {
             html.push_str("<span>more</span>");
         }
     }
@@ -982,205 +721,6 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
     html.push_str("  <footer>Generated by bo-servicelog-stats (static HTML report).</footer>\n");
     html.push_str("</body>\n</html>\n");
     html
-}
-
-/// The number of base-raster columns spanning the world (5-degree cells):
-/// `360 / 5 = 72`.
-pub const WORLD_COLS: usize = 72;
-
-/// The number of base-raster rows spanning the world (5-degree cells):
-/// `180 / 5 = 36`.
-pub const WORLD_ROWS: usize = 36;
-
-/// The base raster cell size in degrees (issue #24: "use 5 as the basic
-/// raster").
-pub const RASTER_DEGREES: i64 = 5;
-
-/// Density ramp for the ASCII map (light to dense), matching the symbol set of
-/// `data::GridData::to_map` (`" .-o*O8"`) plus a final `#`.  Index 0 (`' '`) is
-/// reserved for a zero count, so non-zero counts use indices 1..=7.
-pub const MAP_RAMP: [char; 8] = [' ', '.', '-', 'o', '*', 'O', '8', '#'];
-
-/// A 5-degree worldwide raster of local-query counts, rendered as ASCII
-/// (issue #24).
-///
-/// ## Footprint
-///
-/// A local query at tile `(x, y)` with data area `data_area` covers
-/// `data_area` degrees starting at the grid origin
-/// `((x-1) * data_area, (y-1) * data_area)` (see [`crate::geom::LocalGrid`]).
-/// In the base 5-degree raster that is an `n x n` block with `n = data_area / 5`
-/// (so `data_area=5` marks one cell, `10` a `2x2`, `15` a `3x3` and `20` a
-/// `4x4` block).  Every cell of the block is incremented, so overlapping
-/// queries accumulate ("higher data areas can be added on top").
-///
-/// ## Layout
-///
-/// Internally rows are stored south-up (row 0 covers latitude `-90..-85`) so
-/// the arithmetic reads naturally; [`render`](Self::render) prints them
-/// north-up (row 0 = the top line) like `data::GridData::to_map`.  Columns wrap
-/// across the antimeridian; rows outside the poles are clamped away (never
-/// counted).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AsciiWorldMap {
-    /// `WORLD_ROWS` rows (south-up) of `WORLD_COLS` counts.
-    cells: Vec<Vec<u64>>,
-    /// The total number of queries that contributed.
-    queries: u64,
-}
-
-impl Default for AsciiWorldMap {
-    fn default() -> Self {
-        AsciiWorldMap {
-            cells: vec![vec![0; WORLD_COLS]; WORLD_ROWS],
-            queries: 0,
-        }
-    }
-}
-
-impl AsciiWorldMap {
-    /// An empty map.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The number of contributing queries.
-    pub fn queries(&self) -> u64 {
-        self.queries
-    }
-
-    /// The count at `(col, row)` (row 0 = southernmost); `0` when out of range.
-    pub fn count(&self, col: usize, row: usize) -> u64 {
-        self.cells
-            .get(row)
-            .and_then(|r| r.get(col))
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// The total count across all cells.
-    pub fn total(&self) -> u64 {
-        self.cells.iter().flatten().sum()
-    }
-
-    /// The largest single-cell count.
-    pub fn maximum(&self) -> u64 {
-        self.cells.iter().flatten().copied().max().unwrap_or(0)
-    }
-
-    /// Add one local query's footprint to the raster.
-    ///
-    /// `x`/`y` are the local-grid tile indices (1-based; `y` may be `<= 0` in
-    /// the southern hemisphere).  `data_area` is the tile size in degrees,
-    /// clamped to at least [`RASTER_DEGREES`]; the footprint side is
-    /// `ceil(data_area / 5)` cells.
-    pub fn add_local_query(&mut self, x: i64, y: i64, data_area: i64) {
-        self.queries += 1;
-        let data_area = data_area.max(RASTER_DEGREES);
-        // Footprint side in base cells (ceil division; `data_area` is positive).
-        let side = ((data_area + RASTER_DEGREES - 1) / RASTER_DEGREES).clamp(1, WORLD_COLS as i64)
-            as usize;
-
-        // The grid origin (lower-left corner) in degrees.
-        let lon0 = (x - 1) * data_area;
-        let lat0 = (y - 1) * data_area;
-
-        // Column of the origin, wrapping across the antimeridian.
-        let col0 = (lon0 + 180).div_euclid(RASTER_DEGREES);
-        // Row of the origin (south-up), clamped away from out-of-range poles.
-        let row0 = (lat0 + 90).div_euclid(RASTER_DEGREES);
-
-        for d_row in 0..side as i64 {
-            let row = row0 + d_row;
-            if !(0..WORLD_ROWS as i64).contains(&row) {
-                continue;
-            }
-            for d_col in 0..side as i64 {
-                let col = (col0 + d_col).rem_euclid(WORLD_COLS as i64) as usize;
-                self.cells[row as usize][col] += 1;
-            }
-        }
-    }
-
-    /// Add every local query of `stats` to the map.
-    pub fn from_local_queries(queries: &[LocalQuery]) -> Self {
-        let mut map = Self::new();
-        for query in queries {
-            map.add_local_query(query.x, query.y, query.data_area);
-        }
-        map
-    }
-
-    /// Add only the queries matching `keep` to the map.
-    pub fn from_local_queries_filtered(
-        queries: &[LocalQuery],
-        keep: impl Fn(&LocalQuery) -> bool,
-    ) -> Self {
-        let mut map = Self::new();
-        for query in queries.iter().filter(|q| keep(q)) {
-            map.add_local_query(query.x, query.y, query.data_area);
-        }
-        map
-    }
-
-    /// Render the map as ASCII with the default title
-    /// (`local query world map`).
-    pub fn render(&self) -> String {
-        self.render_titled("local query world map")
-    }
-
-    /// Render the map as ASCII, framed with a `+`/`-`/`|` border and the
-    /// density ramp [`MAP_RAMP`], north-up, using `title` as the header.
-    ///
-    /// The ramp is scaled to the largest cell count: `0` renders as a space and
-    /// the densest cell as `#`.  A header with the query/hit counts and a
-    /// legend are printed around the frame.
-    pub fn render_titled(&self, title: &str) -> String {
-        let maximum = self.maximum();
-        let mut out = String::new();
-
-        out.push_str(&format!(
-            "{title} ({}x{} cells of {} degrees, {} queries, {} hits)\n",
-            WORLD_COLS,
-            WORLD_ROWS,
-            RASTER_DEGREES,
-            self.queries,
-            self.total()
-        ));
-
-        let border = format!("+{}+", "-".repeat(WORLD_COLS));
-        out.push_str(&border);
-        out.push('\n');
-
-        // Print north-up: the last internal row (highest latitude) first.
-        for row_index in (0..WORLD_ROWS).rev() {
-            out.push('|');
-            for col in 0..WORLD_COLS {
-                out.push(self.symbol(self.cells[row_index][col], maximum));
-            }
-            out.push_str("|\n");
-        }
-
-        out.push_str(&border);
-        out.push('\n');
-        out.push_str(&format!(
-            "legend: '{}' = 0, '{}' = max ({}); columns 5 degrees from 180W, rows 5 degrees from 90S\n",
-            MAP_RAMP[0], MAP_RAMP[MAP_RAMP.len() - 1], maximum
-        ));
-        out
-    }
-
-    /// The ramp symbol for `count` given the map `maximum`: `0` is a space and
-    /// the maximum is the last ramp symbol.
-    fn symbol(&self, count: u64, maximum: u64) -> char {
-        if count == 0 || maximum == 0 {
-            return MAP_RAMP[0];
-        }
-        // Scale into 1..=len-1 so a non-zero count never renders as blank.
-        let steps = MAP_RAMP.len() - 1;
-        let index = ((count as f64 / maximum as f64) * steps as f64).ceil() as usize;
-        MAP_RAMP[1 + index.min(steps - 1)]
-    }
 }
 
 /// The day name (`YYYY-MM-DD`) of a `servicelog_YYYY-MM-DD` file, or `None`.
@@ -1519,134 +1059,6 @@ mod tests {
         assert_eq!(value["local_queries"].as_array().unwrap().len(), 5);
     }
 
-    #[test]
-    fn svg_lists_one_circle_per_local_query() {
-        let outcome = parse_content(ISSUE_SAMPLE);
-        let stats = aggregate(&outcome.rows, 10);
-        let svg = render_local_svg(&stats, 640, 320);
-        assert!(svg.starts_with("<svg"));
-        assert!(svg.contains("local queries: 5"));
-        assert_eq!(svg.matches("<circle").count(), 5);
-    }
-
-    #[test]
-    fn svg_handles_no_local_queries() {
-        let svg = render_local_svg(&ServiceLogStats::default(), 100, 100);
-        assert!(svg.contains("local queries: 0"));
-        assert_eq!(svg.matches("<circle").count(), 0);
-    }
-
-    // --- geographic world map + HTML report (issue #28) --------------------
-
-    /// The tile centre is offset from the grid origin by `1.5 * data_area`.
-    #[test]
-    fn local_query_center_lon_lat_uses_tile_centre() {
-        let query = LocalQuery {
-            x: 4,
-            y: 13,
-            data_area: 5,
-            grid_baselength: 5000,
-            minute_length: 10,
-        };
-        // origin (15, 60) + 1.5*5 = (22.5, 67.5)
-        assert_eq!(query.center_lon_lat(), (22.5, 67.5));
-    }
-
-    /// `render_world_svg` lays a light continent basemap and the single shared
-    /// 5-degree raster in each of the two separate offline/interactive maps.
-    #[test]
-    fn world_svg_has_basemap_and_split_squares() {
-        let outcome = parse_content(ISSUE_SAMPLE);
-        let stats = aggregate(&outcome.rows, 10);
-        let (offline, interactive) = render_world_svg(&stats, 960, 480);
-
-        for svg in [&offline, &interactive] {
-            assert!(svg.starts_with("<svg"), "{svg}");
-            assert!(svg.contains("class=\"basemap\""), "{svg}");
-            assert_eq!(
-                svg.matches("<path").count(),
-                crate::world_map::land_rings().len()
-            );
-            // Light basemap: very light gray water, light gray land.
-            assert!(svg.contains(WATER_FILL), "{svg}");
-            assert!(svg.contains(LAND_FILL), "{svg}");
-            // Cells are semi-transparent so the basemap stays visible.
-            assert!(svg.contains("fill-opacity=\"0.55\""), "{svg}");
-        }
-
-        // Four offline local queries, each on a distinct 5-degree cell (one raster
-        // rectangle each); the one interactive query on its own map.
-        assert!(
-            offline.contains("data-set=\"background (offline)\""),
-            "{offline}"
-        );
-        assert!(
-            interactive.contains("data-set=\"interactive\""),
-            "{interactive}"
-        );
-        assert!(!offline.contains("<circle"), "no circle markers remain");
-        assert_eq!(raster_rects(&interactive), 1, "{interactive}");
-        assert_eq!(raster_rects(&offline), 4, "{offline}");
-    }
-
-    /// Count the raster `<rect>`s in a rendered map (excluding the background
-    /// rectangle that fills the whole viewport).
-    fn raster_rects(svg: &str) -> usize {
-        let cells = svg.split("<g class=\"squares\"").nth(1).unwrap_or("");
-        cells.matches("<rect ").count()
-    }
-
-    /// The square shade scales with the absolute raster-cell count.
-    #[test]
-    fn square_colour_is_a_shade_ramp() {
-        // A lone query is the palest (second) shade, not the densest.
-        assert_eq!(square_colour(1), "#ffc552");
-        // The ramp darkens monotonically and saturates at the deepest shade.
-        assert_ne!(square_colour(1), square_colour(2));
-        assert_ne!(square_colour(2), square_colour(4));
-        assert_eq!(square_colour(SQUARE_RAMP_MAX), "#b02a2c");
-        assert_eq!(square_colour(SQUARE_RAMP_MAX + 100), "#b02a2c");
-        // Zero (only reachable for a defensive empty tile) is the palest shade.
-        assert_eq!(square_colour(0), "#ffe08a");
-    }
-
-    /// A `data_area=10` query fills a 2x2 block of the 5-degree raster, so its
-    /// footprint lands on four distinct cells.
-    #[test]
-    fn raster_layer_increments_the_data_area_footprint() {
-        let make = |x, y, data_area| LocalQuery {
-            x,
-            y,
-            data_area,
-            grid_baselength: 5000,
-            minute_length: 10,
-        };
-        // A single data_area=10 query covers four 5-degree cells.
-        let one = AsciiWorldMap::from_local_queries(&[make(1, 1, 10)]);
-        assert_eq!(one.queries(), 1);
-        assert_eq!(one.total(), 4, "2x2 footprint");
-
-        // Two identical data_area=5 queries land on the same single cell, so they
-        // accumulate into one cell of count 2 (not two separate squares).
-        let two = AsciiWorldMap::from_local_queries(&[make(1, 1, 5), make(1, 1, 5)]);
-        assert_eq!(two.total(), 2);
-        assert_eq!(two.maximum(), 2);
-
-        // The rendered map draws one rectangle per non-empty cell.
-        let svg = render_world_map_svg(&[make(1, 1, 10)], "test", 960, 480);
-        assert_eq!(raster_rects(&svg), 4, "{svg}");
-    }
-
-    /// An empty report still renders empty world maps without panicking.
-    #[test]
-    fn world_svg_handles_no_local_queries() {
-        let (offline, interactive) = render_world_svg(&ServiceLogStats::default(), 960, 480);
-        for svg in [&offline, &interactive] {
-            assert!(svg.contains("class=\"basemap\""));
-            assert_eq!(svg.matches("<rect ").count(), 1, "only the background rect");
-        }
-    }
-
     /// The HTML report is a standalone document containing the map and tables.
     #[test]
     fn html_report_is_standalone_and_structured() {
@@ -1663,8 +1075,11 @@ mod tests {
         // background/interactive split.
         assert_eq!(html.matches("<svg").count(), 2, "one map per category");
         assert!(html.contains("class=\"basemap\""));
-        assert!(html.contains(WATER_FILL), "very light gray water");
-        assert!(html.contains(LAND_FILL), "light gray land");
+        assert!(
+            html.contains(crate::map::svg::WATER_FILL),
+            "very light gray water"
+        );
+        assert!(html.contains(crate::map::svg::LAND_FILL), "light gray land");
         assert!(html.contains("data-set=\"background (offline)\""));
         assert!(html.contains("data-set=\"interactive\""));
         assert!(
@@ -1746,178 +1161,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn scale_handles_degenerate_range() {
-        assert_eq!(scale(5.0, 5.0, 5.0, 0.0, 100.0), 50.0);
-        assert_eq!(scale(0.0, 0.0, 10.0, 0.0, 100.0), 0.0);
-        assert_eq!(scale(10.0, 0.0, 10.0, 0.0, 100.0), 100.0);
-    }
-
-    // --- ASCII world map (issue #24) ---------------------------------------
-
-    /// A `data_area=5` query marks exactly one base cell at its origin.
-    #[test]
-    fn ascii_map_data_area_5_marks_one_cell() {
-        let mut map = AsciiWorldMap::new();
-        map.add_local_query(2, 10, 5);
-        assert_eq!(map.queries(), 1);
-        assert_eq!(map.total(), 1);
-        assert_eq!(map.maximum(), 1);
-        // Origin (5E, 45N) -> col floor((5+180)/5)=37, row floor((45+90)/5)=27.
-        assert_eq!(map.count(37, 27), 1);
-    }
-
-    /// `data_area=10` (2x2), `15` (3x3) and `20` (4x4) blocks, anchored at the
-    /// grid origin, incrementing every covered cell.
-    #[test]
-    fn ascii_map_data_area_scales_the_footprint() {
-        for (data_area, side) in [(10_i64, 2_usize), (15, 3), (20, 4)] {
-            let mut map = AsciiWorldMap::new();
-            map.add_local_query(2, 1, data_area);
-            assert_eq!(map.queries(), 1);
-            assert_eq!(
-                map.total(),
-                (side * side) as u64,
-                "data_area={data_area} should cover {side}x{side}"
-            );
-            // Origin (data_area, 0) -> the block starts at its lower-left cell.
-            let col0 = (data_area + 180) / 5;
-            let row0 = 90 / 5;
-            for d in 0..side {
-                assert_eq!(map.count(col0 as usize + d, row0 as usize), 1);
-            }
-            // The cell (side, 0) is outside the block.
-            assert_eq!(map.count(col0 as usize + side, row0 as usize), 0);
-        }
-    }
-
-    /// Two overlapping queries accumulate counts ("added on top").
-    #[test]
-    fn ascii_map_overlapping_queries_accumulate() {
-        let mut map = AsciiWorldMap::new();
-        // A 2x2 block anchored at (10E, 0N): cells cols 38..39, rows 18..19.
-        map.add_local_query(2, 1, 10);
-        // A 1x1 query at (15E, 5N): col 39, row 19 -- inside the 2x2 block.
-        map.add_local_query(4, 2, 5);
-        assert_eq!(map.queries(), 2);
-        assert_eq!(map.total(), 5); // 4 + 1
-        assert_eq!(map.count(39, 19), 2);
-        assert_eq!(map.maximum(), 2);
-    }
-
-    /// Longitudes wrap across the antimeridian; rows outside the poles are
-    /// clamped away rather than counted.
-    #[test]
-    fn ascii_map_wraps_longitude_and_drops_out_of_range_latitude() {
-        let mut map = AsciiWorldMap::new();
-        // x=73, data_area=5 -> origin lon = 72*5 = 360 -> wraps to 0 (col 36).
-        map.add_local_query(73, 10, 5);
-        assert_eq!(map.count(36, 27), 1);
-
-        // Far-north tile: y=37, data_area=5 -> lat0 = 180 -> row 54, out of range.
-        let mut polar = AsciiWorldMap::new();
-        polar.add_local_query(2, 37, 5);
-        assert_eq!(polar.total(), 0, "out-of-range latitude is not counted");
-
-        // Southern hemisphere: y=-1, data_area=5 -> lat0=-10 -> row 16.
-        let mut south = AsciiWorldMap::new();
-        south.add_local_query(2, -1, 5);
-        assert_eq!(south.total(), 1);
-        assert_eq!(south.count((5 + 180) / 5, 16), 1);
-    }
-
-    /// A missing/`-` data_area falls back to the 5-degree minimum.
-    #[test]
-    fn ascii_map_missing_data_area_defaults_to_minimum() {
-        let mut map = AsciiWorldMap::new();
-        map.add_local_query(2, 10, 0);
-        assert_eq!(map.total(), 1);
-    }
-
-    /// The map is `WORLD_COLS` wide and `WORLD_ROWS` tall, framed, north-up.
-    #[test]
-    fn ascii_map_render_dimensions_and_orientation() {
-        let mut map = AsciiWorldMap::new();
-        map.add_local_query(2, 10, 5); // 45N -> south-up row 27
-
-        let rendered = map.render();
-        let lines: Vec<&str> = rendered.lines().collect();
-        let border = lines.iter().find(|l| l.starts_with('+')).unwrap();
-        assert_eq!(border.len(), WORLD_COLS + 2);
-
-        let body: Vec<&&str> = lines
-            .iter()
-            .filter(|l| l.starts_with('|') && l.ends_with('|'))
-            .collect();
-        assert_eq!(body.len(), WORLD_ROWS);
-        for row in &body {
-            assert_eq!(row.len(), WORLD_COLS + 2, "row: {row}");
-        }
-
-        // North-up: the marker (south-up row 27) is printed at line index
-        // `WORLD_ROWS - 1 - 27` within the body.
-        let expected_line = WORLD_ROWS - 1 - 27;
-        assert!(
-            body[expected_line].contains('#'),
-            "marker not at expected line: {expected_line}"
-        );
-        // No marker south of the equator.
-        for (index, row) in body.iter().enumerate() {
-            if index > expected_line {
-                assert!(
-                    !row.contains(|c: char| c != ' ' && c != '|'),
-                    "unexpected marker in line {index}: {row}"
-                );
-            }
-        }
-    }
-
-    /// The renderer includes a header, a frame and a legend.
-    #[test]
-    fn ascii_map_render_has_header_and_legend() {
-        let mut map = AsciiWorldMap::new();
-        map.add_local_query(2, 10, 5);
-        let rendered = map.render();
-        assert!(rendered.contains("local query world map (72x36 cells of 5 degrees"));
-        assert!(rendered.contains("1 queries, 1 hits"));
-        assert!(rendered.contains("legend:"));
-        assert!(rendered.contains("columns 5 degrees from 180W"));
-    }
-
-    /// `render_ascii_map` frames the day and builds the offline + interactive maps.
-    #[test]
-    fn ascii_map_from_stats_renders_the_day() {
-        let outcome = parse_content(ISSUE_SAMPLE);
-        let stats = aggregate(&outcome.rows, 10);
-        let rendered = render_ascii_map("2023-11-14", &stats);
-        assert!(rendered.starts_with("servicelog local-query maps for 2023-11-14"));
-        // Four offline local queries (`minute_length=10`) and one interactive
-        // (the Berlin row, `minute_length=60`).
-        assert!(rendered.contains("offline queries (minute_length == 10):"));
-        assert!(rendered.contains(
-            "offline local-query world map (72x36 cells of 5 degrees, 4 queries, 4 hits)"
-        ));
-        assert!(rendered.contains("interactive queries (minute_length > 10):"));
-        assert!(rendered.contains(
-            "interactive local-query world map (72x36 cells of 5 degrees, 1 queries, 1 hits)"
-        ));
-    }
-
-    /// An empty map renders a blank frame without panicking.
-    #[test]
-    fn ascii_map_empty_is_blank() {
-        let map = AsciiWorldMap::new();
-        let rendered = map.render();
-        assert!(rendered.contains("0 queries, 0 hits"));
-        // No non-space symbol inside any body row.
-        let marks: usize = rendered
-            .lines()
-            .filter(|l| l.starts_with('|'))
-            .map(|l| l.chars().filter(|c| *c != ' ' && *c != '|').count())
-            .sum();
-        assert_eq!(marks, 0);
-    }
-
     // --- offline / interactive split ---------------------------------------
 
     /// A local row builder with an explicit `minute_length`.
@@ -1979,16 +1222,19 @@ mod tests {
         let stats = aggregate(&parse_content(&content).rows, 10);
 
         let offline =
-            AsciiWorldMap::from_local_queries_filtered(&stats.local_queries, |q| q.is_offline());
-        let interactive = AsciiWorldMap::from_local_queries_filtered(&stats.local_queries, |q| {
-            q.is_interactive()
-        });
+            crate::map::AsciiWorldMap::from_local_queries_filtered(&stats.local_queries, |q| {
+                q.is_offline()
+            });
+        let interactive =
+            crate::map::AsciiWorldMap::from_local_queries_filtered(&stats.local_queries, |q| {
+                q.is_interactive()
+            });
         assert_eq!(offline.queries(), 1);
         assert_eq!(offline.count(37, 27), 1);
         assert_eq!(interactive.queries(), 1);
         assert_eq!(interactive.count(37, 27), 1);
 
-        let rendered = render_ascii_maps(&stats);
+        let rendered = crate::map::render_ascii_maps(&stats);
         assert!(rendered.contains("offline local-query world map"));
         assert!(rendered.contains("interactive local-query world map"));
     }

@@ -33,6 +33,7 @@ pub mod executor;
 pub mod geom;
 pub mod http;
 pub mod jsonrpc;
+pub mod map;
 pub mod metrics;
 pub mod mock;
 pub mod postgres;
@@ -45,6 +46,5 @@ pub mod transport;
 pub mod util;
 pub mod websocket;
 pub mod wkb;
-pub mod world_map;
 
 pub use executor::{Param, QueryExecutor, Row, Value};

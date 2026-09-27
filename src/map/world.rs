@@ -43,7 +43,7 @@ pub const MAP_WIDTH: u32 = 960;
 pub const MAP_HEIGHT: u32 = 480;
 
 /// The simplified Natural Earth 110m land basemap (see the module docs).
-const LAND_GEOJSON: &str = include_str!("../assets/world-110m-land.geojson");
+const LAND_GEOJSON: &str = include_str!("../../assets/world-110m-land.geojson");
 
 /// The parsed basemap: closed landmass rings of `(longitude, latitude)` degrees.
 ///

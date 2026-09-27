@@ -11,9 +11,10 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 
 use crate::config::Config;
+use crate::map::{render_ascii_map, render_local_svg};
 use crate::service_log_stats::{
-    day_from_filename, day_report, parse_file, render_ascii_map, render_html, render_json,
-    render_local_svg, render_text, today_utc, DayReport, DEFAULT_TOP_N,
+    day_from_filename, day_report, parse_file, render_html, render_json, render_text, today_utc,
+    DayReport, DEFAULT_TOP_N,
 };
 
 /// The default servicelog directory when nothing is configured: the location
