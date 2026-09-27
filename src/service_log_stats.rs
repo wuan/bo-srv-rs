@@ -613,58 +613,6 @@ fn escape_html(value: &str) -> String {
     out
 }
 
-/// One shaded map square: a local-grid tile with the number of queries that
-/// landed on it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ShadedSquare {
-    /// Tile centre longitude (degrees).
-    lon: f64,
-    /// Tile centre latitude (degrees).
-    lat: f64,
-    /// The tile size in degrees (drives the square's on-screen side).
-    data_area: i64,
-    /// How many queries fell on this tile.
-    count: u64,
-}
-
-/// Group `queries` into their distinct tiles and count the queries per tile.
-///
-/// Two queries share a square when they share `(x, y, data_area)`; the returned
-/// squares are ordered by descending count (then by tile) so the densest tiles
-/// are deterministic.  This is what turns the raw per-query stream into the
-/// "statistics as squares" overlay: a square's shade encodes its query count.
-fn shaded_squares(queries: &[LocalQuery]) -> Vec<ShadedSquare> {
-    let mut tiles: HashMap<(i64, i64, i64), ShadedSquare> = HashMap::new();
-    for q in queries {
-        let entry = tiles.entry((q.x, q.y, q.data_area)).or_insert_with(|| {
-            let (lon, lat) = q.center_lon_lat();
-            ShadedSquare {
-                lon,
-                lat,
-                data_area: q.data_area,
-                count: 0,
-            }
-        });
-        entry.count += 1;
-    }
-    let mut squares: Vec<ShadedSquare> = tiles.into_values().collect();
-    squares.sort_by(|a, b| {
-        b.count
-            .cmp(&a.count)
-            .then_with(|| {
-                a.lon
-                    .partial_cmp(&b.lon)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| {
-                a.lat
-                    .partial_cmp(&b.lat)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-    });
-    squares
-}
-
 /// The water / land / coast colours of the light basemap.
 const WATER_FILL: &str = "#f5f6f7";
 /// Light-gray land fill for the basemap (see [`WATER_FILL`]).
@@ -713,36 +661,47 @@ fn square_colour(count: u64) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
-/// Render one query category as a group of shaded squares on the equirectangular
-/// world map.
+/// Render the local-query statistics of one category as shaded cells of the
+/// single underlying `WORLD_ROWS x WORLD_COLS` 5-degree raster.
 ///
-/// Each distinct tile becomes a square whose fill is a [`SQUARE_RAMP`] shade
-/// selected from the tile's query count; the squares are semi-transparent
-/// (`fill-opacity`) so the basemap stays visible underneath.  `label` names the
+/// Every query's footprint is added to one shared [`AsciiWorldMap`] grid: a
+/// `data_area` of `n` degrees covers `n / 5` cells per side starting at the
+/// tile origin, so a `data_area=10` query increments the four cells
+/// `(x, y)`, `(x+1, y)`, `(x, y+1)`, `(x+1, y+1)` (see
+/// [`AsciiWorldMap::add_local_query`]).  Only that one raster is drawn, so
+/// overlapping queries simply accumulate into the same cells.
+///
+/// Each non-empty cell becomes a semi-transparent rectangle shaded by its count
+/// (see [`square_colour`]) so the basemap stays visible underneath.  The
+/// south-up raster rows are flipped for the north-up SVG.  `label` names the
 /// group for the SVG `<title>`.
-fn squares_layer(queries: &[LocalQuery], width: f64, height: f64, label: &str) -> String {
-    let squares = shaded_squares(queries);
+fn raster_layer(raster: &AsciiWorldMap, width: f64, height: f64, label: &str) -> String {
+    let cell_w = width / WORLD_COLS as f64;
+    let cell_h = height / WORLD_ROWS as f64;
     let mut out = String::new();
     let _ = writeln!(
         out,
         "<g class=\"squares\" data-set=\"{}\" fill-opacity=\"0.55\">\n  <title>{}</title>\n",
         escape_html(label),
-        escape_html(&format!("{label}: {} queries", queries.len())),
+        escape_html(&format!("{label}: {} queries", raster.queries())),
     );
-    for square in &squares {
-        let (x, y) = crate::world_map::project(square.lon, square.lat, width, height);
-        // Side grows mildly with the tile size so wider queries read bigger.
-        let side = 3.0 + (square.data_area.max(5) as f64 / 5.0).min(5.0);
-        let half = side / 2.0;
-        let fill = square_colour(square.count);
-        let _ = writeln!(
-            out,
-            "  <rect x=\"{:.1}\" y=\"{:.1}\" width=\"{side:.1}\" height=\"{side:.1}\" \
-             fill=\"{fill}\"><title>{label} {} queries</title></rect>",
-            x - half,
-            y - half,
-            square.count,
-        );
+    for row in 0..WORLD_ROWS {
+        // The raster is south-up; flip so row 0 draws at the top.
+        let north_up_row = WORLD_ROWS - 1 - row;
+        for col in 0..WORLD_COLS {
+            let count = raster.count(col, row);
+            if count == 0 {
+                continue;
+            }
+            let x = col as f64 * cell_w;
+            let y = north_up_row as f64 * cell_h;
+            let fill = square_colour(count);
+            let _ = writeln!(
+                out,
+                "  <rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{cell_w:.2}\" height=\"{cell_h:.2}\" \
+                 fill=\"{fill}\"><title>{label}: {count} queries</title></rect>",
+            );
+        }
     }
     out.push_str("</g>\n");
     out
@@ -751,11 +710,11 @@ fn squares_layer(queries: &[LocalQuery], width: f64, height: f64, label: &str) -
 /// Render a single geographic SVG world map for one query category.
 ///
 /// The map is light-themed: a very light gray ocean, light gray continents and
-/// a faint graticule, with the category's queries drawn on top as
-/// semi-transparent shaded squares (see [`squares_layer`]).  Unlike
-/// [`render_local_svg`] (which normalises the raw UTM tile indices into an
-/// abstract scatter), this projects the queries onto real longitude/latitude via
-/// [`LocalQuery::center_lon_lat`].
+/// a faint graticule, with the category's statistics drawn on top as
+/// semi-transparent shaded cells of the shared 5-degree raster (see
+/// [`raster_layer`]).  Unlike [`render_local_svg`] (which normalises the raw UTM
+/// tile indices into an abstract scatter), the raster cells are georeferenced by
+/// their 5-degree footprint.
 ///
 /// `queries` is the category to plot and `label` names it in the SVG title and
 /// `aria-label`.
@@ -766,6 +725,7 @@ pub fn render_world_map_svg(
     height: u32,
 ) -> String {
     let (w, h) = (width as f64, height as f64);
+    let raster = AsciiWorldMap::from_local_queries(queries);
     let mut svg = String::new();
     let _ = writeln!(
         svg,
@@ -797,7 +757,7 @@ pub fn render_world_map_svg(
         LAND_FILL,
         COAST_STROKE,
     ));
-    svg.push_str(&squares_layer(queries, w, h, label));
+    svg.push_str(&raster_layer(&raster, w, h, label));
     svg.push_str("</svg>\n");
     svg
 }
@@ -1592,8 +1552,8 @@ mod tests {
         assert_eq!(query.center_lon_lat(), (22.5, 67.5));
     }
 
-    /// `render_world_svg` lays a light continent basemap and one square per distinct
-    /// tile in each of the two separate offline/interactive maps.
+    /// `render_world_svg` lays a light continent basemap and the single shared
+    /// 5-degree raster in each of the two separate offline/interactive maps.
     #[test]
     fn world_svg_has_basemap_and_split_squares() {
         let outcome = parse_content(ISSUE_SAMPLE);
@@ -1610,12 +1570,12 @@ mod tests {
             // Light basemap: very light gray water, light gray land.
             assert!(svg.contains(WATER_FILL), "{svg}");
             assert!(svg.contains(LAND_FILL), "{svg}");
-            // Squares are semi-transparent so the basemap stays visible.
+            // Cells are semi-transparent so the basemap stays visible.
             assert!(svg.contains("fill-opacity=\"0.55\""), "{svg}");
         }
 
-        // Four offline local queries, each on a distinct tile, drawn as four
-        // squares; the one interactive query on its own map.
+        // Four offline local queries, each on a distinct 5-degree cell (one raster
+        // rectangle each); the one interactive query on its own map.
         assert!(
             offline.contains("data-set=\"background (offline)\""),
             "{offline}"
@@ -1625,18 +1585,18 @@ mod tests {
             "{interactive}"
         );
         assert!(!offline.contains("<circle"), "no circle markers remain");
-        assert_eq!(square_rects(&interactive), 1, "{interactive}");
-        assert_eq!(square_rects(&offline), 4, "{offline}");
+        assert_eq!(raster_rects(&interactive), 1, "{interactive}");
+        assert_eq!(raster_rects(&offline), 4, "{offline}");
     }
 
-    /// Count the square `<rect>`s in a rendered map (excluding the background
+    /// Count the raster `<rect>`s in a rendered map (excluding the background
     /// rectangle that fills the whole viewport).
-    fn square_rects(svg: &str) -> usize {
-        let squares = svg.split("<g class=\"squares\"").nth(1).unwrap_or("");
-        squares.matches("<rect ").count()
+    fn raster_rects(svg: &str) -> usize {
+        let cells = svg.split("<g class=\"squares\"").nth(1).unwrap_or("");
+        cells.matches("<rect ").count()
     }
 
-    /// The square shade scales with the absolute per-tile count.
+    /// The square shade scales with the absolute raster-cell count.
     #[test]
     fn square_colour_is_a_shade_ramp() {
         // A lone query is the palest (second) shade, not the densest.
@@ -1650,22 +1610,31 @@ mod tests {
         assert_eq!(square_colour(0), "#ffe08a");
     }
 
-    /// A single tile's query count collapses into one square with that count.
+    /// A `data_area=10` query fills a 2x2 block of the 5-degree raster, so its
+    /// footprint lands on four distinct cells.
     #[test]
-    fn shaded_squares_group_identical_tiles() {
-        let make = |x, y| LocalQuery {
+    fn raster_layer_increments_the_data_area_footprint() {
+        let make = |x, y, data_area| LocalQuery {
             x,
             y,
-            data_area: 5,
+            data_area,
             grid_baselength: 5000,
             minute_length: 10,
         };
-        let squares = shaded_squares(&[make(1, 1), make(1, 1), make(2, 3)]);
-        assert_eq!(squares.len(), 2);
-        // Ordered by descending count, so the twice-used tile comes first.
-        assert_eq!(squares[0].count, 2);
-        assert_eq!(squares[1].count, 1);
-        assert!(shaded_squares(&[]).is_empty());
+        // A single data_area=10 query covers four 5-degree cells.
+        let one = AsciiWorldMap::from_local_queries(&[make(1, 1, 10)]);
+        assert_eq!(one.queries(), 1);
+        assert_eq!(one.total(), 4, "2x2 footprint");
+
+        // Two identical data_area=5 queries land on the same single cell, so they
+        // accumulate into one cell of count 2 (not two separate squares).
+        let two = AsciiWorldMap::from_local_queries(&[make(1, 1, 5), make(1, 1, 5)]);
+        assert_eq!(two.total(), 2);
+        assert_eq!(two.maximum(), 2);
+
+        // The rendered map draws one rectangle per non-empty cell.
+        let svg = render_world_map_svg(&[make(1, 1, 10)], "test", 960, 480);
+        assert_eq!(raster_rects(&svg), 4, "{svg}");
     }
 
     /// An empty report still renders empty world maps without panicking.
