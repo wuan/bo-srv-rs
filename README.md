@@ -356,10 +356,13 @@ daily `servicelog_YYYY-MM-DD` files back and reports, per day:
 
   Two maps are produced: one for the **offline** queries (a fixed 10-minute
   window, `minute_length == 10`) and one for the **interactive** queries (any
-  longer window, `minute_length > 10`).  The report also lists the
+  longer window, `minute_length > 10`). 
+
+  ![servicelog stats map](doc/servicelog_stats_map.png)
+
+  The report also lists the
   offline/interactive counts next to the local totals, and each JSON
   `local_queries` entry carries `minute_length` and an `interactive` flag.
-
 ```sh
 bo-servicelog-stats [--dir <DIR|FILE>] [--date YYYY-MM-DD] [--all] [--top N] \
                     [--format text|json|svg|map|html] [--output FILE] \
