@@ -337,9 +337,12 @@ pub fn render_text(day: &str, stats: &ServiceLogStats) -> String {
     }
 
     out.push_str(&format!(
-        "\nlocal query locations: {} (with x/y)\n",
+        "\nlocal query locations: {}\n\n",
         stats.local_queries.len()
     ));
+    // The text report includes the ASCII world map (issue #24); `--format map`
+    // prints the map alone.
+    out.push_str(&AsciiWorldMap::from_local_queries(&stats.local_queries).render());
     out
 }
 
@@ -636,6 +639,14 @@ pub fn day_from_filename(path: &Path) -> Option<String> {
     }
 }
 
+/// The current UTC day as `YYYY-MM-DD`, the default day of the report.
+///
+/// The servicelog file name carries the UTC date of its rows (see
+/// [`crate::service_log::entry_day`]), so "today" must be UTC-based too.
+pub fn today_utc() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
 /// A servicelog source is a day plus its parsed rows, kept for per-day reports.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DayReport {
@@ -823,6 +834,9 @@ mod tests {
         assert!(text.contains("top countries:"));
         assert!(text.contains("DE"));
         assert!(text.contains("local query locations: 5"));
+        // The text report includes the ASCII world map.
+        assert!(text.contains("local query world map (72x36 cells of 5 degrees"));
+        assert!(text.contains("5 queries, 5 hits"));
     }
 
     #[test]

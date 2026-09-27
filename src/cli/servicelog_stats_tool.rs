@@ -10,10 +10,15 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
+use crate::config::Config;
 use crate::service_log_stats::{
     day_from_filename, day_report, parse_file, render_ascii_map, render_json, render_local_svg,
-    render_text, DayReport, DEFAULT_TOP_N,
+    render_text, today_utc, DayReport, DEFAULT_TOP_N,
 };
+
+/// The default servicelog directory when nothing is configured: the location
+/// the Python service used (`/var/log/blitzortung`).
+pub const DEFAULT_LOG_DIR: &str = "/var/log/blitzortung";
 
 /// The output format of the statistics report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,14 +55,18 @@ impl OutputFormat {
 )]
 pub struct ServicelogStatsArgs {
     /// servicelog directory (contains `servicelog_YYYY-MM-DD` files) or a
-    /// single servicelog file
+    /// single servicelog file (default: the configured servicelog directory,
+    /// else `/var/log/blitzortung`)
     #[arg(long)]
-    pub dir: PathBuf,
+    pub dir: Option<PathBuf>,
 
-    /// restrict to a single day, `YYYY-MM-DD` (default: every file in the
-    /// directory)
+    /// restrict to a single day, `YYYY-MM-DD` (default: today, UTC)
     #[arg(long)]
     pub date: Option<String>,
+
+    /// report every servicelog file instead of only the current day
+    #[arg(long)]
+    pub all: bool,
 
     /// number of entries in each top-N list
     #[arg(long, default_value_t = DEFAULT_TOP_N)]
@@ -80,6 +89,7 @@ pub struct ServicelogStatsArgs {
 #[derive(Debug, Clone)]
 pub struct ServicelogStatsOptions {
     pub dir: PathBuf,
+    /// The day to report, or `None` to report every file (`--all`).
     pub date: Option<String>,
     pub top: usize,
     pub format: OutputFormat,
@@ -88,16 +98,56 @@ pub struct ServicelogStatsOptions {
 }
 
 impl ServicelogStatsOptions {
-    /// Build from the clap-parsed command line; `None` on an unknown format.
+    /// Build from the clap-parsed command line, resolving defaults.
+    ///
+    /// `--dir` falls back to the configured servicelog directory
+    /// (`BO_SERVICE_SERVICELOG`/`[webservice] servicelog`) and then to
+    /// [`DEFAULT_LOG_DIR`].  Without `--all`, the day defaults to today (UTC)
+    /// and `--date` overrides it.
+    ///
+    /// Returns `None` on an unknown `--format`.
     pub fn from_args(args: &ServicelogStatsArgs) -> Option<Self> {
+        // Only consult the configuration when the directory is not given on the
+        // command line: this is a read-only stats tool, so it should not emit
+        // the service's DB-oriented "no configuration file" warning when `--dir`
+        // already pins the source.
+        let config = if args.dir.is_none() {
+            Config::from_env_with(|k| std::env::var(k).ok())
+        } else {
+            Config::default()
+        };
+        Self::from_args_with_config(args, &config)
+    }
+
+    /// Like [`from_args`](Self::from_args) but with an explicit [`Config`],
+    /// so the default directory can be tested without touching the process
+    /// environment.
+    pub fn from_args_with_config(args: &ServicelogStatsArgs, config: &Config) -> Option<Self> {
+        let dir = resolve_dir(args.dir.as_deref(), config);
+        let date = if args.all {
+            None
+        } else {
+            Some(args.date.clone().unwrap_or_else(today_utc))
+        };
         Some(ServicelogStatsOptions {
-            dir: args.dir.clone(),
-            date: args.date.clone(),
+            dir,
+            date,
             top: args.top,
             format: OutputFormat::parse(&args.format)?,
             width: args.width,
             height: args.height,
         })
+    }
+}
+
+/// Resolve the servicelog directory: an explicit `--dir` wins, then the
+/// configured directory, then [`DEFAULT_LOG_DIR`].
+pub fn resolve_dir(cli: Option<&Path>, config: &Config) -> PathBuf {
+    match cli {
+        Some(path) => path.to_path_buf(),
+        None => config
+            .configured_service_log_directory()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_LOG_DIR)),
     }
 }
 
@@ -132,15 +182,21 @@ pub fn filter_day(files: Vec<PathBuf>, date: Option<&str>) -> Vec<PathBuf> {
     }
 }
 
-/// Run the tool, writing the report(s) to stdout.
+/// Run the tool, returning the report(s) for stdout.
 ///
-/// One report per matched file.  Text/JSON reports are separated by a blank
-/// line; SVG output for multiple days is emitted back to back.
+/// One report per matched file.  Text/JSON/JSON-map reports are separated by a
+/// blank line; SVG output for multiple days is emitted back to back.  When no
+/// file matches (e.g. no servicelog written yet for the default day) a short
+/// note naming the directory and day is returned instead of an empty string, so
+/// the caller always has something meaningful to print.
 pub fn run(options: &ServicelogStatsOptions) -> std::io::Result<String> {
     let files = filter_day(
         list_servicelog_files(&options.dir)?,
         options.date.as_deref(),
     );
+    if files.is_empty() {
+        return Ok(no_data_note(options));
+    }
 
     match options.format {
         OutputFormat::Text | OutputFormat::Json | OutputFormat::Map => {
@@ -173,6 +229,20 @@ pub fn run(options: &ServicelogStatsOptions) -> std::io::Result<String> {
     }
 }
 
+/// The message shown when no servicelog file matched the requested scope.
+fn no_data_note(options: &ServicelogStatsOptions) -> String {
+    match &options.date {
+        Some(day) => format!(
+            "no servicelog file for {day} in {} (nothing to report)\n",
+            options.dir.display()
+        ),
+        None => format!(
+            "no servicelog files in {} (nothing to report)\n",
+            options.dir.display()
+        ),
+    }
+}
+
 /// Convenience: the single-day report for a `--date` or single-file run.
 pub fn statistics_for_single_file(path: &Path, top: usize) -> std::io::Result<DayReport> {
     let outcome = parse_file(path)?;
@@ -189,8 +259,9 @@ mod tests {
 
     fn args(dir: PathBuf) -> ServicelogStatsArgs {
         ServicelogStatsArgs {
-            dir,
+            dir: Some(dir),
             date: None,
+            all: true,
             top: DEFAULT_TOP_N,
             format: "text".to_string(),
             width: 1024,
@@ -224,7 +295,7 @@ mod tests {
     fn from_args_rejects_unknown_format() {
         let mut a = args(PathBuf::from("/tmp"));
         a.format = "bogus".to_string();
-        assert!(ServicelogStatsOptions::from_args(&a).is_none());
+        assert!(ServicelogStatsOptions::from_args_with_config(&a, &Config::default()).is_none());
     }
 
     #[test]
@@ -271,7 +342,8 @@ mod tests {
         std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
         let options = ServicelogStatsOptions {
             top: 10,
-            ..ServicelogStatsOptions::from_args(&args(dir.clone())).unwrap()
+            ..ServicelogStatsOptions::from_args_with_config(&args(dir.clone()), &Config::default())
+                .unwrap()
         };
         let output = run(&options).unwrap();
         assert!(output.contains("servicelog statistics for 2023-11-14"));
@@ -290,7 +362,8 @@ mod tests {
             height: 100,
             ..args(dir.clone())
         };
-        let options = ServicelogStatsOptions::from_args(&a).unwrap();
+        let options =
+            ServicelogStatsOptions::from_args_with_config(&a, &Config::default()).unwrap();
         let output = run(&options).unwrap();
         assert!(output.contains("local queries: 2"));
         assert!(output.contains("width=\"200\""));
@@ -305,7 +378,8 @@ mod tests {
             format: "map".to_string(),
             ..args(dir.clone())
         };
-        let options = ServicelogStatsOptions::from_args(&a).unwrap();
+        let options =
+            ServicelogStatsOptions::from_args_with_config(&a, &Config::default()).unwrap();
         let output = run(&options).unwrap();
         assert!(
             output.contains("servicelog local-query map for 2023-11-14"),
@@ -317,13 +391,80 @@ mod tests {
     }
 
     #[test]
-    fn run_on_empty_directory_is_empty() {
+    fn run_on_empty_directory_reports_no_data() {
         let dir = temp_dir("empty");
-        let options = ServicelogStatsOptions::from_args(&args(dir.clone())).unwrap();
-        assert_eq!(run(&options).unwrap(), "");
+        let options =
+            ServicelogStatsOptions::from_args_with_config(&args(dir.clone()), &Config::default())
+                .unwrap();
+        let output = run(&options).unwrap();
+        assert!(output.contains("no servicelog files"), "{output}");
+        assert!(output.contains("nothing to report"), "{output}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The default day is today (UTC) and only the matching file is reported.
+    #[test]
+    fn default_day_is_today_and_filters_to_it() {
+        let dir = temp_dir("today");
+        std::fs::write(dir.join(format!("servicelog_{}", today_utc())), SAMPLE).unwrap();
+        std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
+
+        let a = ServicelogStatsArgs {
+            all: false,
+            ..args(dir.clone())
+        };
+        let options =
+            ServicelogStatsOptions::from_args_with_config(&a, &Config::default()).unwrap();
+        assert_eq!(options.date.as_deref(), Some(today_utc().as_str()));
+
+        let output = run(&options).unwrap();
+        assert!(output.contains(&format!("servicelog statistics for {}", today_utc())));
+        assert!(!output.contains("2023-11-14"), "{output}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--date` overrides the today default; `--all` clears the day filter.
+    #[test]
+    fn explicit_date_and_all_control_the_scope() {
+        let mut a = args(PathBuf::from("/tmp"));
+        a.all = false;
+        a.date = Some("2023-11-14".to_string());
+        let options =
+            ServicelogStatsOptions::from_args_with_config(&a, &Config::default()).unwrap();
+        assert_eq!(options.date.as_deref(), Some("2023-11-14"));
+
+        a.all = true;
+        a.date = Some("2023-11-14".to_string());
+        let options =
+            ServicelogStatsOptions::from_args_with_config(&a, &Config::default()).unwrap();
+        assert_eq!(options.date, None, "--all clears the day filter");
+    }
+
+    /// `--dir` falls back to the configured servicelog directory, then to the
+    /// built-in default.
+    #[test]
+    fn dir_defaults_from_config_then_builtin() {
+        let configured = Config {
+            service_log_dir: Some("/custom/servicelog".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(
+            resolve_dir(None, &configured),
+            PathBuf::from("/custom/servicelog")
+        );
+        // An explicit `--dir` wins over the config.
+        assert_eq!(
+            resolve_dir(Some(Path::new("/explicit")), &configured),
+            PathBuf::from("/explicit")
+        );
+        // Nothing configured -> the built-in default.
+        assert_eq!(
+            resolve_dir(None, &Config::default()),
+            PathBuf::from(DEFAULT_LOG_DIR)
+        );
+    }
+
+    /// `statistics_for_single_file` reports the file's day.
     #[test]
     fn statistics_for_single_file_reports_day() {
         let dir = temp_dir("single-report");

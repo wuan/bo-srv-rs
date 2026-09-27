@@ -33,7 +33,14 @@ fn text_report_lists_totals_and_tops() {
     std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
 
     let output = Command::new(binary())
-        .args(["--dir", dir.to_str().unwrap(), "--top", "3"])
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--date",
+            "2023-11-14",
+            "--top",
+            "3",
+        ])
         .output()
         .expect("run bo-servicelog-stats");
     assert!(
@@ -55,6 +62,9 @@ fn text_report_lists_totals_and_tops() {
     assert!(stdout.contains("top countries:"), "{stdout}");
     assert!(stdout.contains("2  DE"), "{stdout}");
     assert!(stdout.contains("local query locations: 5"), "{stdout}");
+    // The default text report now includes the ASCII world map.
+    assert!(stdout.contains("local query world map"), "{stdout}");
+    assert!(stdout.contains("+---"), "{stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -64,7 +74,14 @@ fn json_report_is_valid_json() {
     std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
 
     let output = Command::new(binary())
-        .args(["--dir", dir.to_str().unwrap(), "--format", "json"])
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--date",
+            "2023-11-14",
+            "--format",
+            "json",
+        ])
         .output()
         .expect("run bo-servicelog-stats");
     assert!(output.status.success());
@@ -82,7 +99,14 @@ fn svg_report_contains_one_circle_per_local_query() {
     std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
 
     let output = Command::new(binary())
-        .args(["--dir", dir.to_str().unwrap(), "--format", "svg"])
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--date",
+            "2023-11-14",
+            "--format",
+            "svg",
+        ])
         .output()
         .expect("run bo-servicelog-stats");
     assert!(output.status.success());
@@ -98,7 +122,14 @@ fn ascii_map_report_has_frame_and_markers() {
     std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
 
     let output = Command::new(binary())
-        .args(["--dir", dir.to_str().unwrap(), "--format", "map"])
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--date",
+            "2023-11-14",
+            "--format",
+            "map",
+        ])
         .output()
         .expect("run bo-servicelog-stats");
     assert!(output.status.success());
@@ -166,4 +197,72 @@ fn missing_directory_exits_nonzero() {
         .expect("run bo-servicelog-stats");
     assert!(!output.status.success());
     let _ = std::fs::remove_dir_all("/nonexistent/bo-servicelog-stats");
+}
+
+/// Today's UTC date, matching the tool's default-day resolution.
+fn today_utc() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+        .unwrap()
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+/// Without `--date`/`--all` the tool reports the current UTC day only.
+#[test]
+fn defaults_to_todays_file() {
+    let dir = temp_dir("today");
+    std::fs::write(dir.join(format!("servicelog_{}", today_utc())), SAMPLE).unwrap();
+    std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
+
+    let output = Command::new(binary())
+        .args(["--dir", dir.to_str().unwrap(), "--format", "json"])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains(&format!("\"day\": \"{}\"", today_utc())),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("2023-11-14"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--all` reports every file in the directory.
+#[test]
+fn all_reports_every_file() {
+    let dir = temp_dir("all");
+    std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
+    std::fs::write(dir.join("servicelog_2023-11-15"), SAMPLE).unwrap();
+
+    let output = Command::new(binary())
+        .args(["--dir", dir.to_str().unwrap(), "--all", "--format", "json"])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"day\": \"2023-11-14\""), "{stdout}");
+    assert!(stdout.contains("\"day\": \"2023-11-15\""), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// When no file matches the default day, a clear note is printed (exit 0).
+#[test]
+fn no_data_for_today_prints_a_note() {
+    let dir = temp_dir("none");
+    std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
+
+    let output = Command::new(binary())
+        .args(["--dir", dir.to_str().unwrap()])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("no servicelog file for"), "{stdout}");
+    assert!(stdout.contains("nothing to report"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

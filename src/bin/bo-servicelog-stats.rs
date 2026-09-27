@@ -2,13 +2,17 @@
 //! `servicelog_YYYY-MM-DD` usage-log files.
 //!
 //! ```text
-//! bo-servicelog-stats --dir <DIR|FILE> [--date YYYY-MM-DD] [--top N]
+//! bo-servicelog-stats [--dir <DIR|FILE>] [--date YYYY-MM-DD] [--all] [--top N]
 //!                     [--format text|json|svg|map] [--width N] [--height N]
 //! ```
 //!
-//! Reads every `servicelog_YYYY-MM-DD` file in `--dir` (or one file directly)
-//! and reports, per day: the total request count, the top countries/cities/
-//! client versions and the local query locations for a world-map overlay.
+//! Reads `servicelog_YYYY-MM-DD` files and reports, per day: the total request
+//! count, the top countries/cities/client versions and an ASCII world map of
+//! the local queries.
+//!
+//! Defaults: `--dir` is the configured servicelog directory (else
+//! `/var/log/blitzortung`), the day is **today (UTC)** unless `--date` or
+//! `--all` is given, and `--format text` prints the summary plus the world map.
 //!
 //! Exit code 1 on an unreadable directory or file, 0 otherwise.
 
@@ -28,11 +32,7 @@ fn main() {
     };
 
     match servicelog_stats_tool::run(&options) {
-        Ok(output) => {
-            if !output.is_empty() {
-                println!("{output}");
-            }
-        }
+        Ok(output) => print!("{output}"),
         Err(error) => exit_with(
             &describe_error(
                 &format!("failed to read servicelog source {}", options.dir.display()),

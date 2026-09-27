@@ -352,17 +352,23 @@ daily `servicelog_YYYY-MM-DD` files back and reports, per day:
   `((x-1) * data_area, (y-1) * data_area)`.
 
 ```sh
-bo-servicelog-stats --dir /var/log/blitzortung [--date YYYY-MM-DD] [--top N] \
+bo-servicelog-stats [--dir <DIR|FILE>] [--date YYYY-MM-DD] [--all] [--top N] \
                     [--format text|json|svg|map] [--width N] [--height N]
 ```
 
-`--dir` may be the log directory (every `servicelog_*` file, or just `--date`)
-or a single `servicelog_YYYY-MM-DD` file.  `--format text` prints a readable
-summary, `--format json` the same data as JSON, `--format svg` a standalone
+`--dir` may be the log directory or a single `servicelog_YYYY-MM-DD` file.  It
+defaults to the configured servicelog directory
+(`BO_SERVICE_SERVICELOG`/`[webservice] servicelog`), else
+`/var/log/blitzortung`.  The report covers **today (UTC)** by default; `--date`
+selects another day and `--all` reports every file in the directory.  When no
+file matches, a short "nothing to report" note is printed instead of an empty
+report.
+
+`--format text` (the default) prints a readable summary **including the ASCII
+world map**, `--format json` the same data as JSON, `--format svg` a standalone
 scatter of the local query coordinates (a value-range normalised plot, not a
 geographic projection — it needs no map dependency) and `--format map`
-(`ascii` is accepted as an alias) a north-up ASCII world map with a density
-ramp and a count legend.
+(`ascii` is accepted as an alias) the north-up ASCII world map alone.
 
 Parsing splits each line on tabs and **ignores the empty segments** produced by
 the tab-padded `city` column, recovering the 14 logical fields; a line that
@@ -608,13 +614,15 @@ cargo run --bin bo-update -- --hours 2
 cargo run --bin bo-import-websocket -- -v
 cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
 
-# daily servicelog statistics (text, json, an SVG local-query overlay or an
-# ASCII world map)
-cargo run --bin bo-servicelog-stats -- --dir /var/log/blitzortung --top 10
-cargo run --bin bo-servicelog-stats -- --dir /var/log/blitzortung --format json
-cargo run --bin bo-servicelog-stats -- --dir /var/log/blitzortung --format map
-cargo run --bin bo-servicelog-stats -- --dir /var/log/blitzortung \
-  --date 2023-11-14 --format svg > local-queries.svg
+# daily servicelog statistics for today (default), including the text world map
+cargo run --bin bo-servicelog-stats
+# a specific day, the top 10 only, or every file in the directory
+cargo run --bin bo-servicelog-stats -- --date 2023-11-14 --top 10
+cargo run --bin bo-servicelog-stats -- --all
+# JSON, the ASCII world map alone, or an SVG local-query overlay
+cargo run --bin bo-servicelog-stats -- --format json
+cargo run --bin bo-servicelog-stats -- --format map
+cargo run --bin bo-servicelog-stats -- --date 2023-11-14 --format svg > local-queries.svg
 ```
 
 ## Documented differences from the Python implementation
