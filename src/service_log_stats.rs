@@ -205,12 +205,34 @@ pub struct DataAreaBucket {
 /// `data_area` was added for the ASCII world map (issue #24): it determines the
 /// footprint of a query in the base 5-degree raster (`data_area / 5` cells per
 /// side).  It is `5` (the minimum) when the row did not carry a usable value.
+///
+/// `minute_length` classifies the query as offline or interactive (see
+/// [`is_offline`](Self::is_offline) / [`is_interactive`](Self::is_interactive)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalQuery {
     pub x: i64,
     pub y: i64,
     pub data_area: i64,
     pub grid_baselength: i64,
+    /// The requested time span in minutes (`minute_length` in the servicelog).
+    pub minute_length: i64,
+}
+
+/// The `minute_length` of an **offline** query: the cached widget requests a
+/// fixed 10-minute window.  Every longer window is an interactive query.
+pub const OFFLINE_MINUTE_LENGTH: i64 = 10;
+
+impl LocalQuery {
+    /// Whether this is an offline query: a fixed 10-minute window.
+    pub fn is_offline(&self) -> bool {
+        self.minute_length == OFFLINE_MINUTE_LENGTH
+    }
+
+    /// Whether this is an interactive query: any window longer than the offline
+    /// 10 minutes.
+    pub fn is_interactive(&self) -> bool {
+        self.minute_length > OFFLINE_MINUTE_LENGTH
+    }
 }
 
 /// The aggregated daily statistics.
@@ -224,6 +246,10 @@ pub struct ServiceLogStats {
     pub global_requests: u64,
     /// Requests with `region > 0`.
     pub region_requests: u64,
+    /// Local requests with a 10-minute window (the offline widget).
+    pub offline_requests: u64,
+    /// Local requests with a window longer than 10 minutes (interactive).
+    pub interactive_requests: u64,
     /// Requests whose country was unknown (`-`).
     pub unknown_country: u64,
     /// Requests whose city was unknown (`-`).
@@ -299,12 +325,19 @@ pub fn aggregate(rows: &[ServiceLogRow], top_n: usize) -> ServiceLogStats {
             if let (Some(x), Some(y)) = (row.x, row.y) {
                 let data_area = row.data_area.unwrap_or(5).max(5);
                 *data_areas.entry(data_area).or_insert(0) += 1;
-                stats.local_queries.push(LocalQuery {
+                let query = LocalQuery {
                     x,
                     y,
                     data_area,
                     grid_baselength: row.grid_baselength,
-                });
+                    minute_length: row.minute_length,
+                };
+                if query.is_interactive() {
+                    stats.interactive_requests += 1;
+                } else {
+                    stats.offline_requests += 1;
+                }
+                stats.local_queries.push(query);
             }
         }
     }
@@ -347,6 +380,10 @@ pub fn render_text(day: &str, stats: &ServiceLogStats) -> String {
         stats.local_requests, stats.global_requests, stats.region_requests
     ));
     out.push_str(&format!(
+        "  offline: {}  interactive: {}\n",
+        stats.offline_requests, stats.interactive_requests
+    ));
+    out.push_str(&format!(
         "  unknown country: {}  unknown city: {}  unknown version: {}\n",
         stats.unknown_country, stats.unknown_city, stats.unknown_version
     ));
@@ -385,12 +422,15 @@ pub fn render_text(day: &str, stats: &ServiceLogStats) -> String {
     }
 
     out.push_str(&format!(
-        "\nlocal query locations: {}\n\n",
-        stats.local_queries.len()
+        "\nlocal query locations: {} (offline {}, interactive {})\n\n",
+        stats.local_queries.len(),
+        stats.offline_requests,
+        stats.interactive_requests
     ));
-    // The text report includes the ASCII world map (issue #24); `--format map`
-    // prints the map alone.
-    out.push_str(&AsciiWorldMap::from_local_queries(&stats.local_queries).render());
+    // The text report includes the ASCII world maps (issue #24): one for the
+    // offline queries and one for the interactive queries; `--format map`
+    // prints the maps alone.
+    out.push_str(&render_ascii_maps(stats));
     out
 }
 
@@ -412,6 +452,8 @@ pub fn render_json(day: &str, stats: &ServiceLogStats) -> String {
         "local_requests": stats.local_requests,
         "global_requests": stats.global_requests,
         "region_requests": stats.region_requests,
+        "offline_requests": stats.offline_requests,
+        "interactive_requests": stats.interactive_requests,
         "unknown_country": stats.unknown_country,
         "unknown_city": stats.unknown_city,
         "unknown_version": stats.unknown_version,
@@ -427,15 +469,37 @@ pub fn render_json(day: &str, stats: &ServiceLogStats) -> String {
             "y": q.y,
             "data_area": q.data_area,
             "grid_baselength": q.grid_baselength,
+            "minute_length": q.minute_length,
+            "interactive": q.is_interactive(),
         })).collect::<Vec<_>>(),
     });
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Render the local queries as an ASCII world map (5-degree raster, issue #24).
+/// Render the local queries as ASCII world maps (5-degree raster, issue #24):
+/// one for the **offline** queries (a fixed 10-minute window) and a separate
+/// one for the **interactive** queries (any longer window).
 pub fn render_ascii_map(day: &str, stats: &ServiceLogStats) -> String {
-    let map = AsciiWorldMap::from_local_queries(&stats.local_queries);
-    format!("servicelog local-query map for {day}\n{}", map.render())
+    format!(
+        "servicelog local-query maps for {day}\n{}",
+        render_ascii_maps(stats)
+    )
+}
+
+/// The two ASCII world maps (offline and interactive), each labelled and
+/// separated by a blank line.
+pub fn render_ascii_maps(stats: &ServiceLogStats) -> String {
+    let offline =
+        AsciiWorldMap::from_local_queries_filtered(&stats.local_queries, |q| q.is_offline());
+    let interactive =
+        AsciiWorldMap::from_local_queries_filtered(&stats.local_queries, |q| q.is_interactive());
+    format!(
+        "offline queries (minute_length == {}):\n{}\ninteractive queries (minute_length > {}):\n{}",
+        OFFLINE_MINUTE_LENGTH,
+        offline.render_titled("offline local-query world map"),
+        OFFLINE_MINUTE_LENGTH,
+        interactive.render_titled("interactive local-query world map"),
+    )
 }
 
 fn top_entries_json(entries: &[TopEntry]) -> Vec<serde_json::Value> {
@@ -636,18 +700,36 @@ impl AsciiWorldMap {
         map
     }
 
+    /// Add only the queries matching `keep` to the map.
+    pub fn from_local_queries_filtered(
+        queries: &[LocalQuery],
+        keep: impl Fn(&LocalQuery) -> bool,
+    ) -> Self {
+        let mut map = Self::new();
+        for query in queries.iter().filter(|q| keep(q)) {
+            map.add_local_query(query.x, query.y, query.data_area);
+        }
+        map
+    }
+
+    /// Render the map as ASCII with the default title
+    /// (`local query world map`).
+    pub fn render(&self) -> String {
+        self.render_titled("local query world map")
+    }
+
     /// Render the map as ASCII, framed with a `+`/`-`/`|` border and the
-    /// density ramp [`MAP_RAMP`], north-up.
+    /// density ramp [`MAP_RAMP`], north-up, using `title` as the header.
     ///
     /// The ramp is scaled to the largest cell count: `0` renders as a space and
     /// the densest cell as `#`.  A header with the query/hit counts and a
     /// legend are printed around the frame.
-    pub fn render(&self) -> String {
+    pub fn render_titled(&self, title: &str) -> String {
         let maximum = self.maximum();
         let mut out = String::new();
 
         out.push_str(&format!(
-            "local query world map ({}x{} cells of {} degrees, {} queries, {} hits)\n",
+            "{title} ({}x{} cells of {} degrees, {} queries, {} hits)\n",
             WORLD_COLS,
             WORLD_ROWS,
             RASTER_DEGREES,
@@ -868,7 +950,8 @@ mod tests {
                 x: 4,
                 y: 13,
                 data_area: 5,
-                grid_baselength: 5000
+                grid_baselength: 5000,
+                minute_length: 10
             }
         );
     }
@@ -1000,9 +1083,16 @@ mod tests {
         assert!(text.contains("top countries:"));
         assert!(text.contains("DE"));
         assert!(text.contains("local query locations: 5"));
-        // The text report includes the ASCII world map.
-        assert!(text.contains("local query world map (72x36 cells of 5 degrees"));
-        assert!(text.contains("5 queries, 5 hits"));
+        // The Berlin row uses `minute_length=60` -> one interactive query; the
+        // other four local rows use `minute_length=10` -> offline.
+        assert!(text.contains("offline: 4  interactive: 1"));
+        // The text report includes separate ASCII world maps for the offline
+        // (minute_length == 10) and interactive (minute_length > 10) queries.
+        assert!(text.contains("offline queries (minute_length == 10):"));
+        assert!(text.contains("offline local-query world map (72x36 cells of 5 degrees"));
+        assert!(text.contains("interactive queries (minute_length > 10):"));
+        assert!(text.contains("interactive local-query world map (72x36 cells of 5 degrees"));
+        assert!(text.contains("4 queries, 4 hits"));
     }
 
     #[test]
@@ -1202,15 +1292,23 @@ mod tests {
         assert!(rendered.contains("columns 5 degrees from 180W"));
     }
 
-    /// `render_ascii_map` frames the day and builds the map from the stats.
+    /// `render_ascii_map` frames the day and builds the offline + interactive maps.
     #[test]
     fn ascii_map_from_stats_renders_the_day() {
         let outcome = parse_content(ISSUE_SAMPLE);
         let stats = aggregate(&outcome.rows, 10);
         let rendered = render_ascii_map("2023-11-14", &stats);
-        assert!(rendered.starts_with("servicelog local-query map for 2023-11-14"));
-        // Five distinct local queries (all `data_area=5`).
-        assert!(rendered.contains("5 queries, 5 hits"));
+        assert!(rendered.starts_with("servicelog local-query maps for 2023-11-14"));
+        // Four offline local queries (`minute_length=10`) and one interactive
+        // (the Berlin row, `minute_length=60`).
+        assert!(rendered.contains("offline queries (minute_length == 10):"));
+        assert!(rendered.contains(
+            "offline local-query world map (72x36 cells of 5 degrees, 4 queries, 4 hits)"
+        ));
+        assert!(rendered.contains("interactive queries (minute_length > 10):"));
+        assert!(rendered.contains(
+            "interactive local-query world map (72x36 cells of 5 degrees, 1 queries, 1 hits)"
+        ));
     }
 
     /// An empty map renders a blank frame without panicking.
@@ -1226,5 +1324,99 @@ mod tests {
             .map(|l| l.chars().filter(|c| *c != ' ' && *c != '|').count())
             .sum();
         assert_eq!(marks, 0);
+    }
+
+    // --- offline / interactive split ---------------------------------------
+
+    /// A local row builder with an explicit `minute_length`.
+    fn local_row_minutes(x: i64, y: i64, data_area: &str, minute_length: i64) -> String {
+        format!(
+            "08:00:00.000\tDE\tCity\t\t\t\tA\t352\t0\t{minute_length}\t5000\t-1\t0\t{x}\t{y}\t{data_area}\t0.000"
+        )
+    }
+
+    #[test]
+    fn local_query_classifies_offline_and_interactive() {
+        let offline = LocalQuery {
+            x: 1,
+            y: 1,
+            data_area: 5,
+            grid_baselength: 5000,
+            minute_length: 10,
+        };
+        assert!(offline.is_offline());
+        assert!(!offline.is_interactive());
+
+        for len in [11, 60, 120] {
+            let interactive = LocalQuery {
+                minute_length: len,
+                ..offline
+            };
+            assert!(interactive.is_interactive(), "minute_length {len}");
+            assert!(!interactive.is_offline(), "minute_length {len}");
+        }
+    }
+
+    /// `aggregate` counts offline (`minute_length == 10`) and interactive
+    /// (`minute_length > 10`) local requests separately.
+    #[test]
+    fn aggregate_counts_offline_and_interactive() {
+        let content = [
+            local_row_minutes(1, 1, "5", 10),
+            local_row_minutes(2, 1, "5", 10),
+            local_row_minutes(3, 1, "5", 60),
+            local_row_minutes(4, 1, "5", 1440),
+        ]
+        .join("\n");
+        let stats = aggregate(&parse_content(&content).rows, 10);
+        assert_eq!(stats.local_requests, 4);
+        assert_eq!(stats.offline_requests, 2);
+        assert_eq!(stats.interactive_requests, 2);
+    }
+
+    /// The two maps separate the offline and interactive queries.
+    #[test]
+    fn separate_maps_for_offline_and_interactive() {
+        let content = [
+            // Offline at (5E, 45N) -> col 37, row 27.
+            local_row_minutes(2, 10, "5", 10),
+            // Interactive at (5E, 45N) too, so the same cell appears in both.
+            local_row_minutes(2, 10, "5", 60),
+        ]
+        .join("\n");
+        let stats = aggregate(&parse_content(&content).rows, 10);
+
+        let offline =
+            AsciiWorldMap::from_local_queries_filtered(&stats.local_queries, |q| q.is_offline());
+        let interactive = AsciiWorldMap::from_local_queries_filtered(&stats.local_queries, |q| {
+            q.is_interactive()
+        });
+        assert_eq!(offline.queries(), 1);
+        assert_eq!(offline.count(37, 27), 1);
+        assert_eq!(interactive.queries(), 1);
+        assert_eq!(interactive.count(37, 27), 1);
+
+        let rendered = render_ascii_maps(&stats);
+        assert!(rendered.contains("offline local-query world map"));
+        assert!(rendered.contains("interactive local-query world map"));
+    }
+
+    /// The JSON report marks each query and reports the split counts.
+    #[test]
+    fn json_reports_offline_and_interactive() {
+        let content = [
+            local_row_minutes(1, 1, "5", 10),
+            local_row_minutes(2, 1, "5", 60),
+        ]
+        .join("\n");
+        let stats = aggregate(&parse_content(&content).rows, 10);
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json("2023-11-14", &stats)).unwrap();
+        assert_eq!(value["offline_requests"], 1);
+        assert_eq!(value["interactive_requests"], 1);
+        assert_eq!(value["local_queries"][0]["interactive"], false);
+        assert_eq!(value["local_queries"][0]["minute_length"], 10);
+        assert_eq!(value["local_queries"][1]["interactive"], true);
+        assert_eq!(value["local_queries"][1]["minute_length"], 60);
     }
 }

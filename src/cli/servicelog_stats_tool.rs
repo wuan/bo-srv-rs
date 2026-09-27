@@ -382,11 +382,23 @@ mod tests {
             ServicelogStatsOptions::from_args_with_config(&a, &Config::default()).unwrap();
         let output = run(&options).unwrap();
         assert!(
-            output.contains("servicelog local-query map for 2023-11-14"),
+            output.contains("servicelog local-query maps for 2023-11-14"),
             "{output}"
         );
         assert!(output.contains("72x36 cells of 5 degrees"), "{output}");
-        assert!(output.contains("2 queries, 2 hits"), "{output}");
+        // Separate maps for the offline and interactive queries.
+        assert!(output.contains("offline local-query world map"), "{output}");
+        assert!(
+            output.contains("interactive local-query world map"),
+            "{output}"
+        );
+        // Both SAMPLE local rows use `minute_length=10`, so both are offline.
+        assert!(
+            output.contains(
+                "offline local-query world map (72x36 cells of 5 degrees, 2 queries, 2 hits)"
+            ),
+            "{output}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -62,8 +62,14 @@ fn text_report_lists_totals_and_tops() {
     assert!(stdout.contains("top countries:"), "{stdout}");
     assert!(stdout.contains("2  DE"), "{stdout}");
     assert!(stdout.contains("local query locations: 5"), "{stdout}");
-    // The default text report now includes the ASCII world map.
-    assert!(stdout.contains("local query world map"), "{stdout}");
+    assert!(stdout.contains("offline: 4  interactive: 1"), "{stdout}");
+    // The default text report now includes the separate offline/interactive
+    // ASCII world maps.
+    assert!(stdout.contains("offline local-query world map"), "{stdout}");
+    assert!(
+        stdout.contains("interactive local-query world map"),
+        "{stdout}"
+    );
     assert!(stdout.contains("+---"), "{stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -152,6 +158,77 @@ fn data_area_distribution_is_reported() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Local rows mixing offline (`minute_length=10`) and interactive (60) queries.
+const MIXED_MINUTES_SAMPLE: &str = "\
+08:00:00.000\tDE\tCity\t\t\t\tA\t352\t0\t10\t5000\t-1\t0\t1\t1\t5\t0.000\n\
+08:00:01.000\tDE\tCity\t\t\t\tA\t352\t0\t10\t5000\t-1\t0\t2\t1\t5\t0.000\n\
+08:00:02.000\tUS\tCity\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t-14\t9\t5\t0.000\n";
+
+#[test]
+fn offline_and_interactive_are_split_into_separate_maps() {
+    let dir = temp_dir("minutes");
+    std::fs::write(dir.join("servicelog_2023-11-14"), MIXED_MINUTES_SAMPLE).unwrap();
+
+    // Text: the counts and the two labelled maps.
+    let text = Command::new(binary())
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--date",
+            "2023-11-14",
+            "--format",
+            "text",
+        ])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(text.status.success());
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    assert!(stdout.contains("offline: 2  interactive: 1"), "{stdout}");
+    assert!(
+        stdout.contains("offline queries (minute_length == 10):"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("interactive queries (minute_length > 10):"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "offline local-query world map (72x36 cells of 5 degrees, 2 queries, 2 hits)"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "interactive local-query world map (72x36 cells of 5 degrees, 1 queries, 1 hits)"
+        ),
+        "{stdout}"
+    );
+
+    // JSON: the split counts and per-query classification.
+    let json = Command::new(binary())
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--date",
+            "2023-11-14",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(json.status.success());
+    let value: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(json.stdout).unwrap()).expect("valid json");
+    assert_eq!(value["offline_requests"], 2);
+    assert_eq!(value["interactive_requests"], 1);
+    let queries = value["local_queries"].as_array().unwrap();
+    assert_eq!(queries[0]["interactive"], false);
+    assert_eq!(queries[1]["interactive"], false);
+    assert_eq!(queries[2]["interactive"], true);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn svg_report_contains_one_circle_per_local_query() {
     let dir = temp_dir("svg");
@@ -194,12 +271,33 @@ fn ascii_map_report_has_frame_and_markers() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.contains("servicelog local-query map for 2023-11-14"),
+        stdout.contains("servicelog local-query maps for 2023-11-14"),
         "{stdout}"
     );
     assert!(stdout.contains("72x36 cells of 5 degrees"), "{stdout}");
-    assert!(stdout.contains("5 queries, 5 hits"), "{stdout}");
-    // Five distinct local queries -> five non-space map symbols.
+    // Separate maps: four offline queries (`minute_length=10`) and the one
+    // interactive Berlin query (`minute_length=60`).
+    assert!(
+        stdout.contains("offline queries (minute_length == 10):"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("interactive queries (minute_length > 10):"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "offline local-query world map (72x36 cells of 5 degrees, 4 queries, 4 hits)"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "interactive local-query world map (72x36 cells of 5 degrees, 1 queries, 1 hits)"
+        ),
+        "{stdout}"
+    );
+    // Four offline + one interactive -> five non-space map symbols in total.
     let marks: usize = stdout
         .lines()
         .filter(|l| l.starts_with('|'))

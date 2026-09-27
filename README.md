@@ -354,6 +354,12 @@ daily `servicelog_YYYY-MM-DD` files back and reports, per day:
   accumulate), anchored at the local-grid origin
   `((x-1) * data_area, (y-1) * data_area)`.
 
+  Two maps are produced: one for the **offline** queries (a fixed 10-minute
+  window, `minute_length == 10`) and one for the **interactive** queries (any
+  longer window, `minute_length > 10`).  The report also lists the
+  offline/interactive counts next to the local totals, and each JSON
+  `local_queries` entry carries `minute_length` and an `interactive` flag.
+
 ```sh
 bo-servicelog-stats [--dir <DIR|FILE>] [--date YYYY-MM-DD] [--all] [--top N] \
                     [--format text|json|svg|map] [--width N] [--height N]
@@ -367,11 +373,12 @@ selects another day and `--all` reports every file in the directory.  When no
 file matches, a short "nothing to report" note is printed instead of an empty
 report.
 
-`--format text` (the default) prints a readable summary **including the ASCII
-world map**, `--format json` the same data as JSON, `--format svg` a standalone
-scatter of the local query coordinates (a value-range normalised plot, not a
-geographic projection — it needs no map dependency) and `--format map`
-(`ascii` is accepted as an alias) the north-up ASCII world map alone.
+`--format text` (the default) prints a readable summary **including the offline
+and interactive ASCII world maps**, `--format json` the same data as JSON,
+`--format svg` a standalone scatter of the local query coordinates (a
+value-range normalised plot, not a geographic projection — it needs no map
+dependency) and `--format map` (`ascii` is accepted as an alias) the north-up
+ASCII world maps alone.
 
 Parsing splits each line on tabs and **ignores the empty segments** produced by
 the tab-padded `city` column, recovering the 14 logical fields; a line that
