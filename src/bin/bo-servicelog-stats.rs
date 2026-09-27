@@ -3,12 +3,17 @@
 //!
 //! ```text
 //! bo-servicelog-stats [--dir <DIR|FILE>] [--date YYYY-MM-DD] [--all] [--top N]
-//!                     [--format text|json|svg|map] [--width N] [--height N]
+//!                     [--format text|json|svg|map|html] [--output FILE]
+//!                     [--width N] [--height N]
 //! ```
 //!
 //! Reads `servicelog_YYYY-MM-DD` files and reports, per day: the total request
 //! count, the top countries/cities/client versions and an ASCII world map of
 //! the local queries.
+//!
+//! `--format html` produces a standalone static HTML document with an SVG world
+//! map (a coarse continent basemap plus the local-query overlay); combine it
+//! with `--output report.html` to write the document to a file.
 //!
 //! Defaults: `--dir` is the configured servicelog directory (else
 //! `/var/log/blitzortung`), the day is **today (UTC)** unless `--date` or
@@ -24,15 +29,15 @@ fn main() {
         Some(options) => options,
         None => exit_with(
             &format!(
-                "invalid --format {:?}: expected text, json, svg or map",
+                "invalid --format {:?}: expected text, json, svg, map or html",
                 args.format
             ),
             1,
         ),
     };
 
-    match servicelog_stats_tool::run(&options) {
-        Ok(output) => print!("{output}"),
+    let output = match servicelog_stats_tool::run(&options) {
+        Ok(output) => output,
         Err(error) => exit_with(
             &describe_error(
                 &format!("failed to read servicelog source {}", options.dir.display()),
@@ -40,5 +45,20 @@ fn main() {
             ),
             1,
         ),
+    };
+
+    match &args.output {
+        Some(path) => {
+            if let Err(error) = std::fs::write(path, &output) {
+                exit_with(
+                    &describe_error(
+                        &format!("failed to write report to {}", path.display()),
+                        &error,
+                    ),
+                    1,
+                );
+            }
+        }
+        None => print!("{output}"),
     }
 }

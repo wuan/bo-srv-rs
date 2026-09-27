@@ -230,6 +230,80 @@ fn offline_and_interactive_are_split_into_separate_maps() {
 }
 
 #[test]
+fn html_report_is_a_standalone_document_with_world_map() {
+    let dir = temp_dir("html");
+    std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
+
+    let output = Command::new(binary())
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--date",
+            "2023-11-14",
+            "--format",
+            "html",
+        ])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("<!DOCTYPE html>"), "{stdout}");
+    assert!(
+        stdout.contains("servicelog statistics for 2023-11-14"),
+        "{stdout}"
+    );
+    // The SVG world map with the continent basemap and both overlays.
+    assert!(stdout.contains("<svg"), "{stdout}");
+    assert!(stdout.contains("class=\"basemap\""), "{stdout}");
+    assert!(stdout.contains("data-set=\"offline\""), "{stdout}");
+    assert!(stdout.contains("data-set=\"interactive\""), "{stdout}");
+    // The statistical tables.
+    assert!(stdout.contains("Top countries"), "{stdout}");
+    assert!(
+        stdout.contains("data_area distribution (local queries)"),
+        "{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn html_report_can_be_written_to_a_file() {
+    let dir = temp_dir("html-output");
+    std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();
+    let report = dir.join("report.html");
+
+    let output = Command::new(binary())
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--date",
+            "2023-11-14",
+            "--format",
+            "html",
+            "--output",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Nothing goes to stdout when the report is written to a file.
+    assert!(output.stdout.is_empty(), "stdout should be empty");
+
+    let written = std::fs::read_to_string(&report).unwrap();
+    assert!(written.starts_with("<!DOCTYPE html>"), "{written}");
+    assert!(written.contains("class=\"basemap\""), "{written}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn svg_report_contains_one_circle_per_local_query() {
     let dir = temp_dir("svg");
     std::fs::write(dir.join("servicelog_2023-11-14"), SAMPLE).unwrap();

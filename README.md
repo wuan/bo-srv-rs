@@ -362,7 +362,8 @@ daily `servicelog_YYYY-MM-DD` files back and reports, per day:
 
 ```sh
 bo-servicelog-stats [--dir <DIR|FILE>] [--date YYYY-MM-DD] [--all] [--top N] \
-                    [--format text|json|svg|map] [--width N] [--height N]
+                    [--format text|json|svg|map|html] [--output FILE] \
+                    [--width N] [--height N]
 ```
 
 `--dir` may be the log directory or a single `servicelog_YYYY-MM-DD` file.  It
@@ -379,6 +380,20 @@ and interactive ASCII world maps**, `--format json` the same data as JSON,
 value-range normalised plot, not a geographic projection — it needs no map
 dependency) and `--format map` (`ascii` is accepted as an alias) the north-up
 ASCII world maps alone.
+
+`--format html` (see issue #28) produces a **standalone static HTML report**: a
+self-contained document (inline stylesheet, no external resources) with the
+summary cards, the top lists and the `data_area` distribution as tables, plus an
+**SVG world map**.  The map is an equirectangular projection of a coarse,
+embedded continent-outline basemap — enough to give the local-query markers a
+geographic frame without a GIS dependency — with the offline and interactive
+local queries plotted at their tile centres in separate colours.  Use
+`--output report.html` to write the document to a file (otherwise it goes to
+stdout, as with the other formats).
+
+```sh
+bo-servicelog-stats --format html --output report.html
+```
 
 Parsing splits each line on tabs and **ignores the empty segments** produced by
 the tab-padded `city` column, recovering the 14 logical fields; a line that
@@ -633,6 +648,9 @@ cargo run --bin bo-servicelog-stats -- --all
 cargo run --bin bo-servicelog-stats -- --format json
 cargo run --bin bo-servicelog-stats -- --format map
 cargo run --bin bo-servicelog-stats -- --date 2023-11-14 --format svg > local-queries.svg
+# a standalone static HTML report with an SVG world map
+cargo run --bin bo-servicelog-stats -- --date 2023-11-14 --format html \
+  --output report.html
 ```
 
 ## Documented differences from the Python implementation

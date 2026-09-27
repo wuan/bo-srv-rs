@@ -11,7 +11,12 @@
 //! * **top client versions** — requests grouped by the parsed
 //!   `bo-android-<n>` version;
 //! * **local query overlay** — the `(x, y, raster baselength)` grid locations
-//!   of the local requests, for plotting on a world map.
+//!   of the local requests, for plotting on a world map (`render_ascii_maps`
+//!   for the ASCII raster, `render_world_svg` for the geographic SVG basemap).
+//!
+//! Besides the text, JSON and SVG renderers this module provides
+//! [`render_html`], a standalone static HTML report (issue #28) that embeds the
+//! statistics tables and the SVG world map in a single self-contained document.
 //!
 //! ## Parsing
 //!
@@ -25,6 +30,7 @@
 //! is normalised to `None`, so the top lists never contain a `-` bucket.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::Path;
 
 /// The number of logical fields in a servicelog row.
@@ -232,6 +238,20 @@ impl LocalQuery {
     /// 10 minutes.
     pub fn is_interactive(&self) -> bool {
         self.minute_length > OFFLINE_MINUTE_LENGTH
+    }
+
+    /// The tile centre as `(longitude, latitude)` degrees.
+    ///
+    /// A local grid at `(x, y)` with tile size `data_area` starts at
+    /// `((x-1) * data_area, (y-1) * data_area)` and spans `data_area * 3`
+    /// degrees (see [`crate::geom::LocalGrid`]); the centre is therefore offset
+    /// by `1.5 * data_area` from the origin.  This is the geographic point the
+    /// SVG world map plots for the query.
+    pub fn center_lon_lat(&self) -> (f64, f64) {
+        let data_area = self.data_area.max(1) as f64;
+        let lon = (self.x - 1) as f64 * data_area + data_area * 1.5;
+        let lat = (self.y - 1) as f64 * data_area + data_area * 1.5;
+        (lon, lat)
     }
 }
 
@@ -571,6 +591,294 @@ fn scale(value: f64, min: f64, max: f64, out_min: f64, out_max: f64) -> f64 {
         return (out_min + out_max) / 2.0;
     }
     out_min + (value - min) / (max - min) * (out_max - out_min)
+}
+
+// --- Geographic SVG world map + static HTML report (issue #28) -------------
+
+/// Escape the five XML/HTML metacharacters so arbitrary labels (country, city)
+/// can be embedded safely in SVG/HTML.
+fn escape_html(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Render one query category (offline/interactive) as a `circle` per query on
+/// the equirectangular world map.
+///
+/// `centers` are the `(lon, lat)` degree pairs; `fill`/`opacity` theme the
+/// marker and `label` names the group for the SVG `<title>`.
+fn markers_layer(
+    queries: &[LocalQuery],
+    width: f64,
+    height: f64,
+    fill: &str,
+    opacity: f64,
+    label: &str,
+) -> String {
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "<g class=\"markers\" data-set=\"{}\" fill=\"{fill}\" fill-opacity=\"{opacity}\">\n  <title>{}</title>\n",
+        escape_html(label),
+        escape_html(&format!("{label}: {} queries", queries.len())),
+    );
+    for q in queries {
+        let (lon, lat) = q.center_lon_lat();
+        let (x, y) = crate::world_map::project(lon, lat, width, height);
+        // Radius scales mildly with the tile size so wider queries read bigger.
+        let r = 2.0 + (q.data_area.max(5) as f64 / 5.0).min(4.0);
+        let _ = writeln!(
+            out,
+            "  <circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"{r:.1}\"><title>{} {},{}</title></circle>",
+            escape_html(label),
+            q.x,
+            q.y
+        );
+    }
+    out.push_str("</g>\n");
+    out
+}
+
+/// Render the full geographic SVG world map (continent basemap + offline and
+/// interactive local-query overlays) used by the HTML report.
+///
+/// Unlike [`render_local_svg`] (which normalises the raw UTM tile indices into
+/// an abstract scatter), this projects the queries onto real
+/// longitude/latitude via [`LocalQuery::center_lon_lat`] and lays a simplified
+/// continent outline underneath for orientation.
+pub fn render_world_svg(stats: &ServiceLogStats, width: u32, height: u32) -> String {
+    let (w, h) = (width as f64, height as f64);
+    let offline: Vec<LocalQuery> = stats
+        .local_queries
+        .iter()
+        .copied()
+        .filter(LocalQuery::is_offline)
+        .collect();
+    let interactive: Vec<LocalQuery> = stats
+        .local_queries
+        .iter()
+        .copied()
+        .filter(LocalQuery::is_interactive)
+        .collect();
+
+    let mut svg = String::new();
+    let _ = writeln!(
+        svg,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" class=\"worldmap\" width=\"{width}\" \
+         height=\"{height}\" viewBox=\"0 0 {width} {height}\" role=\"img\" \
+         aria-label=\"World map of local queries\">"
+    );
+    // Ocean background.
+    let _ = writeln!(
+        svg,
+        "  <rect x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" fill=\"#0b2740\"/>"
+    );
+    // Graticule (equator + prime meridian) for orientation.
+    svg.push_str(
+        "  <g class=\"graticule\" stroke=\"#1f4a6e\" stroke-width=\"0.5\">\n\
+         \x20   <line x1=\"0\" y1=\"240\" x2=\"960\" y2=\"240\"/>\n\
+         \x20   <line x1=\"480\" y1=\"0\" x2=\"480\" y2=\"480\"/>\n\
+         \x20 </g>\n",
+    );
+    svg.push_str(&crate::world_map::continent_layer(
+        width, height, "#1d3b2a", "#3f7a5a",
+    ));
+    svg.push_str(&markers_layer(&offline, w, h, "#ffb347", 0.85, "offline"));
+    svg.push_str(&markers_layer(
+        &interactive,
+        w,
+        h,
+        "#ff5c33",
+        0.9,
+        "interactive",
+    ));
+    svg.push_str("</svg>\n");
+    svg
+}
+
+/// Render a "top N" list as HTML table rows (`<tr><td>label</td><td>count</td>`).
+fn top_table_rows(entries: &[TopEntry]) -> String {
+    if entries.is_empty() {
+        return "      <tr><td colspan=\"2\" class=\"empty\">(none)</td></tr>\n".to_string();
+    }
+    let mut rows = String::new();
+    for entry in entries {
+        let _ = writeln!(
+            rows,
+            "      <tr><td>{}</td><td class=\"num\">{}</td></tr>",
+            escape_html(&entry.label),
+            entry.count
+        );
+    }
+    rows
+}
+
+/// Render the `data_area` distribution as HTML table rows with a scaled bar.
+fn data_area_rows(buckets: &[DataAreaBucket]) -> String {
+    if buckets.is_empty() {
+        return "      <tr><td colspan=\"3\" class=\"empty\">(none)</td></tr>\n".to_string();
+    }
+    let max = buckets.iter().map(|b| b.count).max().unwrap_or(0);
+    let mut rows = String::new();
+    for bucket in buckets {
+        let pct = if max == 0 {
+            0.0
+        } else {
+            bucket.count as f64 / max as f64 * 100.0
+        };
+        let _ = writeln!(
+            rows,
+            "      <tr><td class=\"num\">{}</td><td class=\"num\">{}</td>\
+             <td><span class=\"bar\" style=\"width:{pct:.1}%\"></span></td></tr>",
+            bucket.data_area, bucket.count
+        );
+    }
+    rows
+}
+
+/// Render a complete, standalone static HTML report for `day`.
+///
+/// The document embeds the statistics (totals, top countries/cities/versions,
+/// `data_area` distribution) and an SVG world map with a continent basemap and
+/// the local-query overlay (offline and interactive markers distinguished).
+/// All styling is inline in a `<style>` block, so the file is self-contained and
+/// needs no network access.
+pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
+    let escape = |value: &str| escape_html(value);
+    let offline = stats
+        .local_queries
+        .iter()
+        .filter(|q| q.is_offline())
+        .count();
+    let interactive = stats.local_queries.len() - offline;
+
+    let mut html = String::new();
+    html.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
+    html.push_str("  <meta charset=\"utf-8\">\n");
+    html.push_str(&format!(
+        "  <title>servicelog statistics for {}</title>\n",
+        escape(day)
+    ));
+    html.push_str("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+    html.push_str("  <style>\n");
+    html.push_str(
+        "    :root { color-scheme: dark; }\n\
+         \x20   body { margin: 0; padding: 2rem; background: #07141f; color: #d7e3ec;\n\
+         \x20          font-family: system-ui, -apple-system, Segoe UI, sans-serif; }\n\
+         \x20   h1 { font-size: 1.4rem; margin: 0 0 .25rem; }\n\
+         \x20   h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; color: #9fd3ff; }\n\
+         \x20   .sub { color: #7d94a6; margin: 0 0 1.5rem; }\n\
+         \x20   .cards { display: flex; flex-wrap: wrap; gap: .75rem; margin-bottom: 1rem; }\n\
+         \x20   .card { background: #0e2130; border: 1px solid #1c3a4f; border-radius: 8px;\n\
+         \x20           padding: .6rem .9rem; min-width: 8rem; }\n\
+         \x20   .card .label { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em;\n\
+         \x20                  color: #7d94a6; }\n\
+         \x20   .card .value { font-size: 1.3rem; font-variant-numeric: tabular-nums; }\n\
+         \x20   svg.worldmap { display: block; max-width: 100%; height: auto;\n\
+         \x20                 border: 1px solid #1c3a4f; border-radius: 8px; background: #0b2740; }\n\
+         \x20   .legend { display: flex; gap: 1rem; margin: .5rem 0 0; font-size: .85rem; }\n\
+         \x20   .swatch { display: inline-block; width: .8rem; height: .8rem; border-radius: 50%;\n\
+         \x20             vertical-align: middle; margin-right: .35rem; }\n\
+         \x20   table { border-collapse: collapse; width: 100%; max-width: 34rem; }\n\
+         \x20   th, td { text-align: left; padding: .3rem .6rem; border-bottom: 1px solid #16303f; }\n\
+         \x20   th { color: #7d94a6; font-weight: 600; font-size: .8rem; }\n\
+         \x20   td.num { text-align: right; font-variant-numeric: tabular-nums; width: 6rem; }\n\
+         \x20   td.empty { color: #55707f; font-style: italic; }\n\
+         \x20   .bar { display: inline-block; height: .7rem; min-width: 1px; background: #2f9e6a;\n\
+         \x20          border-radius: 3px; }\n\
+         \x20   footer { margin-top: 2rem; color: #55707f; font-size: .8rem; }\n\
+         \x20 </style>\n",
+    );
+    html.push_str("</head>\n<body>\n");
+    html.push_str(&format!(
+        "  <h1>servicelog statistics for {}</h1>\n  <p class=\"sub\">{} requests</p>\n",
+        escape(day),
+        stats.total_requests
+    ));
+
+    // Summary cards.
+    html.push_str("  <div class=\"cards\">\n");
+    for (label, value) in [
+        ("total", stats.total_requests),
+        ("local", stats.local_requests),
+        ("global", stats.global_requests),
+        ("region", stats.region_requests),
+        ("offline", stats.offline_requests),
+        ("interactive", stats.interactive_requests),
+        ("unknown country", stats.unknown_country),
+        ("unknown city", stats.unknown_city),
+        ("unknown version", stats.unknown_version),
+    ] {
+        let _ = writeln!(
+            html,
+            "    <div class=\"card\"><div class=\"label\">{}</div>\
+             <div class=\"value\">{value}</div></div>",
+            escape(label)
+        );
+    }
+    html.push_str("  </div>\n");
+
+    // World map.
+    html.push_str("  <h2>Local query locations</h2>\n");
+    html.push_str(&format!(
+        "  <p class=\"sub\">{} local query locations (offline {}, interactive {}); \
+         continent outlines are a coarse orientation aid.</p>\n",
+        stats.local_queries.len(),
+        offline,
+        interactive
+    ));
+    html.push_str("  <div class=\"map\">\n");
+    html.push_str(&render_world_svg(
+        stats,
+        crate::world_map::MAP_WIDTH,
+        crate::world_map::MAP_HEIGHT,
+    ));
+    html.push_str("  </div>\n");
+    html.push_str(
+        "  <p class=\"legend\">\
+         <span><span class=\"swatch\" style=\"background:#ffb347\"></span>offline \
+         (minute_length == 10)</span>\
+         <span><span class=\"swatch\" style=\"background:#ff5c33\"></span>interactive \
+         (minute_length &gt; 10)</span></p>\n",
+    );
+
+    // Top lists.
+    for (title, entries) in [
+        ("Top countries", &stats.countries),
+        ("Top cities", &stats.cities),
+        ("Top client versions", &stats.versions),
+    ] {
+        let _ = write!(
+            html,
+            "  <h2>{title}</h2>\n  <table>\n    <thead><tr><th>{}</th>\
+             <th class=\"num\">requests</th></tr></thead>\n    <tbody>\n{}    </tbody>\n  </table>\n",
+            escape(title),
+            top_table_rows(entries)
+        );
+    }
+
+    // data_area distribution.
+    html.push_str("  <h2>data_area distribution (local queries)</h2>\n");
+    html.push_str(
+        "  <table>\n    <thead><tr><th class=\"num\">data_area</th>\
+         <th class=\"num\">count</th><th></th></tr></thead>\n    <tbody>\n",
+    );
+    html.push_str(&data_area_rows(&stats.data_area_distribution));
+    html.push_str("    </tbody>\n  </table>\n");
+
+    html.push_str("  <footer>Generated by bo-servicelog-stats (static HTML report).</footer>\n");
+    html.push_str("</body>\n</html>\n");
+    html
 }
 
 /// The number of base-raster columns spanning the world (5-degree cells):
@@ -1123,6 +1431,106 @@ mod tests {
         let svg = render_local_svg(&ServiceLogStats::default(), 100, 100);
         assert!(svg.contains("local queries: 0"));
         assert_eq!(svg.matches("<circle").count(), 0);
+    }
+
+    // --- geographic world map + HTML report (issue #28) --------------------
+
+    /// The tile centre is offset from the grid origin by `1.5 * data_area`.
+    #[test]
+    fn local_query_center_lon_lat_uses_tile_centre() {
+        let query = LocalQuery {
+            x: 4,
+            y: 13,
+            data_area: 5,
+            grid_baselength: 5000,
+            minute_length: 10,
+        };
+        // origin (15, 60) + 1.5*5 = (22.5, 67.5)
+        assert_eq!(query.center_lon_lat(), (22.5, 67.5));
+    }
+
+    /// `render_world_svg` lays the continent basemap and one marker per query,
+    /// split into the offline/interactive groups.
+    #[test]
+    fn world_svg_has_basemap_and_split_markers() {
+        let outcome = parse_content(ISSUE_SAMPLE);
+        let stats = aggregate(&outcome.rows, 10);
+        let svg = render_world_svg(&stats, 960, 480);
+        assert!(svg.starts_with("<svg"), "{svg}");
+        assert!(svg.contains("class=\"basemap\""), "{svg}");
+        assert_eq!(
+            svg.matches("<path").count(),
+            crate::world_map::CONTINENT_OUTLINES.len()
+        );
+        // Four offline local queries and one interactive.
+        assert_eq!(svg.matches("<circle").count(), 5);
+        assert!(svg.contains("data-set=\"offline\""), "{svg}");
+        assert!(svg.contains("data-set=\"interactive\""), "{svg}");
+    }
+
+    /// An empty report still renders an empty world map without panicking.
+    #[test]
+    fn world_svg_handles_no_local_queries() {
+        let svg = render_world_svg(&ServiceLogStats::default(), 960, 480);
+        assert!(svg.contains("class=\"basemap\""));
+        assert_eq!(svg.matches("<circle").count(), 0);
+    }
+
+    /// The HTML report is a standalone document containing the map and tables.
+    #[test]
+    fn html_report_is_standalone_and_structured() {
+        let outcome = parse_content(ISSUE_SAMPLE);
+        let stats = aggregate(&outcome.rows, 10);
+        let html = render_html("2023-11-14", &stats);
+
+        assert!(html.starts_with("<!DOCTYPE html>"), "{html}");
+        assert!(html.trim_end().ends_with("</html>"));
+        assert!(html.contains("<style>"), "styling must be inline");
+        assert!(html.contains("servicelog statistics for 2023-11-14"));
+        assert!(html.contains("<div class=\"label\">total</div>"));
+        // The embedded SVG world map with the continent basemap.
+        assert!(html.contains("<svg"));
+        assert!(html.contains("class=\"basemap\""));
+        // The top lists are rendered as tables.
+        assert!(html.contains("Top countries"));
+        assert!(html.contains("Top cities"));
+        assert!(html.contains("Top client versions"));
+        assert!(html.contains("data_area distribution (local queries)"));
+        // No external resources: the document is self-contained (the only URL is
+        // the SVG namespace declaration, which is not fetched).
+        assert!(!html.contains("href="), "{html}");
+        assert!(!html.contains("src="), "{html}");
+        assert!(!html.contains("<link"), "{html}");
+        assert_eq!(html.matches("http").count(), 1, "only the SVG xmlns URL");
+    }
+
+    /// Labels from the log are HTML-escaped so a crafted city cannot inject
+    /// markup into the report.
+    #[test]
+    fn html_report_escapes_labels() {
+        let stats = ServiceLogStats {
+            total_requests: 1,
+            countries: vec![TopEntry {
+                label: "<script>alert(1)</script>".to_string(),
+                count: 1,
+            }],
+            ..ServiceLogStats::default()
+        };
+        let html = render_html("2023-11-14", &stats);
+        assert!(!html.contains("<script>alert"), "{html}");
+        assert!(
+            html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "{html}"
+        );
+    }
+
+    /// `escape_html` covers the five metacharacters.
+    #[test]
+    fn escape_html_covers_metacharacters() {
+        assert_eq!(
+            escape_html("a&b<c>d\"e'f"),
+            "a&amp;b&lt;c&gt;d&quot;e&#39;f"
+        );
     }
 
     #[test]
