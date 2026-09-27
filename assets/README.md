@@ -19,13 +19,22 @@ The source is noted here purely for provenance.
 
 ## Processing
 
-The asset is produced from the source above with Douglas-Peucker simplification
-at ~0.1 degrees, quantizing coordinates to 0.02 degrees, and covering the full
-latitude range `[-90, 90]` (Antarctica reaches the south pole).  Rings that cross
-the antimeridian are split so no SVG path draws a horizontal streak across the
-map.
+The asset is produced from the source above by
+`generate_world_basemap.py`, which applies Douglas-Peucker simplification at
+~0.1 degrees and rounds coordinates to 2 decimal places.  Latitudes span the full
+range `[-90, 90]` (Antarctica reaches the south pole).
 
-Result: ~128 rings, ~4200 points, ~72 KB — detailed enough to embed while still
+Antarctica is the only landmass that crosses the antimeridian.  It is emitted as
+**one** ring that closes along the antimeridian / south-pole map edge
+(`[180, -90] -> [-180, -90]`), exactly as in the Natural Earth source, so its
+closure lies on the map border and is invisible.  An earlier revision had split
+Antarctica into two rings at an interior meridian (~59W), which drew straight
+vertical closure segments from the south pole up to the Antarctic peninsula and
+rendered as a visible seam in the servicelog world map.  The generator rebuilds
+only Antarctica from the source and copies every other landmass ring unchanged,
+so the fix stays scoped to the ring that had the bug.
+
+Result: 127 rings, ~4165 points, ~71 KB — detailed enough to embed while still
 self-contained, and recognizable at 360x180 SVG and the 72x36 ASCII raster.
 
 The landmass is **only** an orientation aid; it is not a survey-accurate
