@@ -229,15 +229,27 @@ fn legend_layer(max: u64, _width: f64, height: f64) -> String {
     const SWATCH_H: f64 = 12.0;
     const GAP: f64 = 2.0;
     const PAD: f64 = 6.0;
+    const FONT: f64 = 10.0;
+    // The value row needs room for the font's descenders below its baseline.
+    const LINE_GAP: f64 = 4.0;
+    const TEXT_H: f64 = FONT + 2.0;
+
     let swatches_w = SQUARE_RAMP.len() as f64 * SWATCH_W + (SQUARE_RAMP.len() - 1) as f64 * GAP;
     let box_w = swatches_w + 2.0 * PAD;
-    let box_h = 40.0;
+
+    // Vertical layout, top to bottom: caption, swatches, value row, each with
+    // padding so nothing reaches the box edge.
+    let caption_y = PAD + TEXT_H; // text baseline
+    let swatch_y = caption_y + LINE_GAP;
+    let value_y = swatch_y + SWATCH_H + LINE_GAP + FONT; // text baseline
+    let box_h = value_y + PAD;
+
     // Bottom-left corner, inset from the map edges.
     let box_x = 10.0;
     let box_y = height - box_h - 10.0;
-    let label_y = box_y + 14.0; // "queries per cell" caption
-    let swatch_y = box_y + 20.0;
-    let value_y = swatch_y + SWATCH_H + 10.0;
+    let caption_y = box_y + caption_y;
+    let swatch_y = box_y + swatch_y;
+    let value_y = box_y + value_y;
 
     let mut out = String::new();
     let _ = writeln!(
@@ -252,7 +264,7 @@ fn legend_layer(max: u64, _width: f64, height: f64) -> String {
     );
     let _ = writeln!(
         out,
-        "  <text x=\"{:.1}\" y=\"{label_y:.1}\" font-size=\"10\" fill=\"#24313b\">queries per cell</text>",
+        "  <text x=\"{:.1}\" y=\"{caption_y:.1}\" font-size=\"{FONT}\" fill=\"#24313b\">queries per cell</text>",
         box_x + PAD
     );
     for (i, (r, g, b)) in SQUARE_RAMP.iter().enumerate() {
@@ -268,12 +280,12 @@ fn legend_layer(max: u64, _width: f64, height: f64) -> String {
     }
     let _ = writeln!(
         out,
-        "  <text x=\"{:.1}\" y=\"{value_y:.1}\" font-size=\"10\" fill=\"#5f707d\">1</text>",
+        "  <text x=\"{:.1}\" y=\"{value_y:.1}\" font-size=\"{FONT}\" fill=\"#5f707d\">1</text>",
         box_x + PAD
     );
     let _ = writeln!(
         out,
-        "  <text x=\"{:.1}\" y=\"{value_y:.1}\" font-size=\"10\" fill=\"#5f707d\" \
+        "  <text x=\"{:.1}\" y=\"{value_y:.1}\" font-size=\"{FONT}\" fill=\"#5f707d\" \
          text-anchor=\"end\">{max}</text>",
         box_x + PAD + swatches_w
     );
@@ -385,6 +397,15 @@ mod tests {
         let cells = svg.split("<g class=\"squares\"").nth(1).unwrap_or("");
         let cells = cells.split("map-legend").next().unwrap_or(cells);
         cells.matches("<rect ").count()
+    }
+
+    /// The numeric value of `name="..."` on the first `tag` in `svg`.
+    fn attr(svg: &str, tag: &str, name: &str) -> f64 {
+        let seg = svg.split(tag).nth(1).unwrap_or("");
+        let key = format!("{name}=\"");
+        let rest = seg.split_once(&key).unwrap_or(("", "")).1;
+        let value = rest.split('"').next().unwrap_or("");
+        value.parse().unwrap_or(f64::NAN)
     }
 
     #[test]
@@ -568,6 +589,25 @@ mod tests {
         // The maximum and the minimum endpoints are labelled.
         assert!(legend.contains(">1</text>"), "{legend}");
         assert!(legend.contains(">80</text>"), "{legend}");
+
+        // The value row must sit inside the containing box (regression guard:
+        // the third line used to reach past the bottom edge).
+        let box_y: f64 = attr(&legend, "rect", "y");
+        let box_h: f64 = attr(&legend, "rect", "height");
+        // The value texts are the `#5f707d`-filled ones; find their `y`.
+        let value_ys: Vec<f64> = legend
+            .lines()
+            .filter(|l| l.contains("fill=\"#5f707d\""))
+            .map(|l| attr(l, "text", "y"))
+            .collect();
+        assert_eq!(value_ys.len(), 2, "{legend}");
+        for y in value_ys {
+            assert!(
+                y < box_y + box_h,
+                "value baseline {y} reaches past the box bottom {}",
+                box_y + box_h
+            );
+        }
     }
 
     /// The rendered world map embeds the legend with the densest cell's count.
