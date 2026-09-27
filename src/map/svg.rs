@@ -113,38 +113,54 @@ const GRATICULE_STROKE: &str = "#dde1e5";
 
 /// The `(R, G, B)` colour ramp for the shaded squares, light to dense.
 ///
-/// A square's shade is keyed to its **absolute** query count (see
-/// [`square_colour`]) so the two separate maps are directly comparable and a
-/// tile with a single query is never rendered as a hot spot.
-pub(crate) const SQUARE_RAMP: [(u8, u8, u8); 6] = [
-    (255, 224, 138), // pale amber
-    (255, 197, 82),
-    (251, 160, 47),
-    (240, 116, 34),
-    (214, 75, 36),
-    (176, 42, 44), // deep red
+/// A square's shade is chosen from its count **relative to the map's densest
+/// cell**: the range `1..=max` is split into eight equal buckets, so a map whose
+/// maximum is `80` paints counts `1..=10` in shade 1, `11..=20` in shade 2, ...,
+/// `71..=80` in shade 8.  Cells with a count of `0` are never drawn.
+///
+/// The eight steps run a sequential yellow -> orange -> red -> dark-red "heat"
+/// progression (ColorBrewer `YlOrRd`-inspired but ending in a deep red rather
+/// than a magenta-pink, and with the pale end kept just saturated enough to stay
+/// distinct over the light basemap).
+pub(crate) const SQUARE_RAMP: [(u8, u8, u8); 8] = [
+    (255, 242, 168), // pale yellow   (lowest bucket)
+    (255, 221, 82),  // yellow
+    (255, 190, 26),  // amber
+    (250, 144, 16),  // orange
+    (239, 98, 18),   // dark orange
+    (221, 58, 22),   // red-orange
+    (191, 26, 22),   // red
+    (143, 13, 18),   // deep red      (the densest cell)
 ];
 
-/// The per-tile query count that saturates the ramp: `1` maps to the palest
-/// shade and `>= SQUARE_RAMP_MAX` to the deepest.
-const SQUARE_RAMP_MAX: u64 = 32;
+/// The number of shades in [`SQUARE_RAMP`].
+const SQUARE_SHADES: u64 = 8;
 
-/// Pick a ramp colour for an absolute `count`.
+/// The SVG `fill-opacity` of the shaded cells.
 ///
-/// The count is mapped onto the ramp with a logarithmic scale (so low counts
-/// stay visually distinct) and capped at [`SQUARE_RAMP_MAX`].  This is
-/// deliberately absolute rather than normalised against the map's maximum: the
-/// same tile count reads the same on both the background and interactive maps,
-/// and a lone query on an otherwise empty map is not painted the densest shade.
-fn square_colour(count: u64) -> String {
-    let count = count.min(SQUARE_RAMP_MAX);
-    let bucket = match count {
-        0 => 0,
-        1 => 1,
-        2..=3 => 2,
-        4..=7 => 3,
-        8..=15 => 4,
-        _ => 5,
+/// High enough that the eight ramp shades stay distinguishable over the light
+/// basemap (the deep reds would otherwise wash out toward grey), yet below 1.0
+/// so the land outline still shows through.
+pub(crate) const SQUARE_FILL_OPACITY: &str = "0.7";
+
+/// Pick a ramp colour for a cell `count` given the map's densest cell `max`.
+///
+/// `1..=max` is divided into [`SQUARE_SHADES`] **equal** buckets and the shade
+/// index is `ceil(count * 8 / max) - 1`, so all eight shades span the observed
+/// range (e.g. `max=80`: `1..=10` -> shade 1, ..., `71..=80` -> shade 8).  The
+/// densest cell always gets the deepest shade; a `count` of `0` is never drawn.
+///
+/// This makes the shading **relative to the map's own maximum** so the full
+/// ramp is always used across each map, rather than an absolute count scale
+/// that saturates well below the observed maximum.
+fn square_colour(count: u64, max: u64) -> String {
+    debug_assert!(count > 0, "zero-count cells are not drawn");
+    let bucket = if count >= max {
+        SQUARE_RAMP.len() - 1
+    } else {
+        // `ceil(count * 8 / max) - 1`, clamped to the ramp.
+        let scaled = (count * SQUARE_SHADES).div_ceil(max.max(1));
+        (scaled.saturating_sub(1) as usize).min(SQUARE_RAMP.len() - 1)
     };
     let (r, g, b) = SQUARE_RAMP[bucket];
     format!("#{r:02x}{g:02x}{b:02x}")
@@ -161,16 +177,18 @@ fn square_colour(count: u64) -> String {
 /// overlapping queries simply accumulate into the same cells.
 ///
 /// Each non-empty cell becomes a semi-transparent rectangle shaded by its count
-/// (see [`square_colour`]) so the basemap stays visible underneath.  The
-/// south-up raster rows are flipped for the north-up SVG.  `label` names the
-/// group for the SVG `<title>`.
+/// relative to the map's densest cell (see [`square_colour`]) so the basemap
+/// stays visible underneath.  The south-up raster rows are flipped for the
+/// north-up SVG.  `label` names the group for the SVG `<title>`.
 fn raster_layer(raster: &AsciiWorldMap, width: f64, height: f64, label: &str) -> String {
     let cell_w = width / WORLD_COLS as f64;
     let cell_h = height / WORLD_ROWS as f64;
+    // The densest cell anchors the eight shades (1..=max -> eight equal buckets).
+    let max = raster.maximum();
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "<g class=\"squares\" data-set=\"{}\" fill-opacity=\"0.55\">\n  <title>{}</title>\n",
+        "<g class=\"squares\" data-set=\"{}\" fill-opacity=\"{SQUARE_FILL_OPACITY}\">\n  <title>{}</title>\n",
         escape_html(label),
         escape_html(&format!("{label}: {} queries", raster.queries())),
     );
@@ -184,7 +202,7 @@ fn raster_layer(raster: &AsciiWorldMap, width: f64, height: f64, label: &str) ->
             }
             let x = col as f64 * cell_w;
             let y = north_up_row as f64 * cell_h;
-            let fill = square_colour(count);
+            let fill = square_colour(count, max);
             let _ = writeln!(
                 out,
                 "  <rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{cell_w:.2}\" height=\"{cell_h:.2}\" \
@@ -196,6 +214,85 @@ fn raster_layer(raster: &AsciiWorldMap, width: f64, height: f64, label: &str) ->
     out
 }
 
+/// Render a compact shade legend in the map's lower-left (over the Antarctic
+/// band): a row of the eight [`SQUARE_RAMP`] swatches labelled `1 .. max`, where
+/// `max` is the map's densest-cell query count.
+///
+/// Because a cell's shade is relative to the map's own maximum, the legend
+/// states the absolute count range so the scale is unambiguous.  A `max` of `0`
+/// (no cells) renders nothing.
+fn legend_layer(max: u64, _width: f64, height: f64) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    const SWATCH_W: f64 = 18.0;
+    const SWATCH_H: f64 = 12.0;
+    const GAP: f64 = 2.0;
+    const PAD: f64 = 6.0;
+    const FONT: f64 = 10.0;
+    // The value row needs room for the font's descenders below its baseline.
+    const LINE_GAP: f64 = 4.0;
+    const TEXT_H: f64 = FONT + 2.0;
+
+    let swatches_w = SQUARE_RAMP.len() as f64 * SWATCH_W + (SQUARE_RAMP.len() - 1) as f64 * GAP;
+    let box_w = swatches_w + 2.0 * PAD;
+
+    // Vertical layout, top to bottom: caption, swatches, value row, each with
+    // padding so nothing reaches the box edge.
+    let caption_y = PAD + TEXT_H; // text baseline
+    let swatch_y = caption_y + LINE_GAP;
+    let value_y = swatch_y + SWATCH_H + LINE_GAP + FONT; // text baseline
+    let box_h = value_y + PAD;
+
+    // Bottom-left corner, inset from the map edges.
+    let box_x = 10.0;
+    let box_y = height - box_h - 10.0;
+    let caption_y = box_y + caption_y;
+    let swatch_y = box_y + swatch_y;
+    let value_y = box_y + value_y;
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "<g class=\"map-legend\" font-family=\"system-ui, sans-serif\">"
+    );
+    let _ = writeln!(
+        out,
+        "  <rect x=\"{box_x:.1}\" y=\"{box_y:.1}\" width=\"{box_w:.1}\" height=\"{box_h:.1}\" \
+         rx=\"4\" fill=\"#ffffff\" fill-opacity=\"0.85\" stroke=\"{COAST_STROKE}\" \
+         stroke-width=\"0.5\"/>"
+    );
+    let _ = writeln!(
+        out,
+        "  <text x=\"{:.1}\" y=\"{caption_y:.1}\" font-size=\"{FONT}\" fill=\"#24313b\">queries per cell</text>",
+        box_x + PAD
+    );
+    for (i, (r, g, b)) in SQUARE_RAMP.iter().enumerate() {
+        let x = box_x + PAD + i as f64 * (SWATCH_W + GAP);
+        // The swatches are drawn at full opacity (the on-map cells are blended
+        // with the basemap), so the legend shows the pure ramp colours.
+        let _ = write!(
+            out,
+            "  <rect x=\"{x:.1}\" y=\"{swatch_y:.1}\" width=\"{SWATCH_W}\" height=\"{SWATCH_H}\" \
+             fill=\"#{r:02x}{g:02x}{b:02x}\"/>"
+        );
+        let _ = writeln!(out);
+    }
+    let _ = writeln!(
+        out,
+        "  <text x=\"{:.1}\" y=\"{value_y:.1}\" font-size=\"{FONT}\" fill=\"#5f707d\">1</text>",
+        box_x + PAD
+    );
+    let _ = writeln!(
+        out,
+        "  <text x=\"{:.1}\" y=\"{value_y:.1}\" font-size=\"{FONT}\" fill=\"#5f707d\" \
+         text-anchor=\"end\">{max}</text>",
+        box_x + PAD + swatches_w
+    );
+    out.push_str("</g>\n");
+    out
+}
+
 /// Render a single geographic SVG world map for one query category.
 ///
 /// The map is light-themed: a very light gray ocean, light gray continents and
@@ -203,7 +300,8 @@ fn raster_layer(raster: &AsciiWorldMap, width: f64, height: f64, label: &str) ->
 /// semi-transparent shaded cells of the shared 5-degree raster (see
 /// [`raster_layer`]).  Unlike [`render_local_svg`] (which normalises the raw UTM
 /// tile indices into an abstract scatter), the raster cells are georeferenced by
-/// their 5-degree footprint.
+/// their 5-degree footprint.  A small [`legend_layer`] in the lower-left maps the
+/// eight shades to the count range `1..=max` so the relative scale is explicit.
 ///
 /// `queries` is the category to plot and `label` names it in the SVG title and
 /// `aria-label`.
@@ -247,6 +345,9 @@ pub fn render_world_map_svg(
         COAST_STROKE,
     ));
     svg.push_str(&raster_layer(&raster, w, h, label));
+    // A small legend in the lower-left explains the relative shade scale and
+    // states the map's maximum cell count.
+    svg.push_str(&legend_layer(raster.maximum(), w, h));
     svg.push_str("</svg>\n");
     svg
 }
@@ -291,8 +392,20 @@ mod tests {
     /// Count the raster `<rect>`s in a rendered map (excluding the background
     /// rectangle that fills the whole viewport).
     fn raster_rects(svg: &str) -> usize {
+        // Only the shaded cells: stop before the `map-legend` group (whose
+        // swatches are also `<rect>`s).
         let cells = svg.split("<g class=\"squares\"").nth(1).unwrap_or("");
+        let cells = cells.split("map-legend").next().unwrap_or(cells);
         cells.matches("<rect ").count()
+    }
+
+    /// The numeric value of `name="..."` on the first `tag` in `svg`.
+    fn attr(svg: &str, tag: &str, name: &str) -> f64 {
+        let seg = svg.split(tag).nth(1).unwrap_or("");
+        let key = format!("{name}=\"");
+        let rest = seg.split_once(&key).unwrap_or(("", "")).1;
+        let value = rest.split('"').next().unwrap_or("");
+        value.parse().unwrap_or(f64::NAN)
     }
 
     #[test]
@@ -324,7 +437,10 @@ mod tests {
             assert!(svg.contains(WATER_FILL), "{svg}");
             assert!(svg.contains(LAND_FILL), "{svg}");
             // Cells are semi-transparent so the basemap stays visible.
-            assert!(svg.contains("fill-opacity=\"0.55\""), "{svg}");
+            assert!(
+                svg.contains(&format!("fill-opacity=\"{SQUARE_FILL_OPACITY}\"")),
+                "{svg}"
+            );
         }
 
         // Four offline local queries, each on a distinct 5-degree cell (one raster
@@ -342,18 +458,78 @@ mod tests {
         assert_eq!(raster_rects(&offline), 4, "{offline}");
     }
 
-    /// The square shade scales with the absolute raster-cell count.
+    /// The square shade uses eight **equal** buckets spanning `1..=max` (the
+    /// densest cell of the map), so all eight shades are reachable and equidistant.
     #[test]
-    fn square_colour_is_a_shade_ramp() {
-        // A lone query is the palest (second) shade, not the densest.
-        assert_eq!(square_colour(1), "#ffc552");
-        // The ramp darkens monotonically and saturates at the deepest shade.
-        assert_ne!(square_colour(1), square_colour(2));
-        assert_ne!(square_colour(2), square_colour(4));
-        assert_eq!(square_colour(SQUARE_RAMP_MAX), "#b02a2c");
-        assert_eq!(square_colour(SQUARE_RAMP_MAX + 100), "#b02a2c");
-        // Zero (only reachable for a defensive empty tile) is the palest shade.
-        assert_eq!(square_colour(0), "#ffe08a");
+    fn square_colour_is_an_eight_shade_ramp() {
+        // The ramp has eight, perceptually separated shades.
+        assert_eq!(SQUARE_RAMP.len(), 8);
+        let ramp_hex: Vec<String> = SQUARE_RAMP
+            .iter()
+            .map(|(r, g, b)| format!("#{r:02x}{g:02x}{b:02x}"))
+            .collect();
+
+        // The densest cell is always the deepest shade; a single-count cell on a
+        // large map is the palest.
+        assert_eq!(square_colour(80, 80), ramp_hex[7]);
+        assert_eq!(square_colour(1, 80), ramp_hex[0]);
+        assert_eq!(square_colour(1, 1_000_000), ramp_hex[0]);
+
+        // max = 80 -> eight equal 10-wide buckets: 1..=10 -> shade 1, ..., 71..=80
+        // -> shade 8.  This is the user-visible contract.
+        let expected = [
+            (1, 0),
+            (5, 0),
+            (10, 0),
+            (11, 1),
+            (20, 1),
+            (21, 2),
+            (30, 2),
+            (31, 3),
+            (40, 3),
+            (41, 4),
+            (50, 4),
+            (51, 5),
+            (60, 5),
+            (61, 6),
+            (70, 6),
+            (71, 7),
+            (75, 7),
+            (80, 7),
+        ];
+        for (count, bucket) in expected {
+            assert_eq!(
+                square_colour(count, 80),
+                ramp_hex[bucket],
+                "count {count} with max 80 -> shade {}",
+                bucket + 1
+            );
+        }
+
+        // With enough distinct counts every shade is reachable on a max-80 map.
+        let reachable: std::collections::BTreeSet<String> =
+            (1..=80).map(|c| square_colour(c, 80)).collect();
+        assert_eq!(
+            reachable.len(),
+            8,
+            "all eight shades reachable: {reachable:?}"
+        );
+    }
+
+    /// A small maximum still spreads its counts across the ramp and always puts the
+    /// densest cell in the deepest shade.
+    #[test]
+    fn square_colour_handles_small_maxima() {
+        let deepest = format!(
+            "#{:02x}{:02x}{:02x}",
+            SQUARE_RAMP[7].0, SQUARE_RAMP[7].1, SQUARE_RAMP[7].2
+        );
+        assert_eq!(square_colour(1, 1), deepest);
+        assert_eq!(square_colour(5, 5), deepest);
+        // The counts 1..=5 on a max-5 map spread over several (not just one) shades.
+        let shades: std::collections::BTreeSet<String> =
+            (1..=5).map(|c| square_colour(c, 5)).collect();
+        assert!(shades.len() >= 3, "small maxima spread: {shades:?}");
     }
 
     /// A `data_area=10` query fills a 2x2 block of the 5-degree raster, so its
@@ -390,7 +566,64 @@ mod tests {
         for svg in [&offline, &interactive] {
             assert!(svg.contains("class=\"basemap\""));
             assert_eq!(svg.matches("<rect ").count(), 1, "only the background rect");
+            // No cells -> no legend.
+            assert!(!svg.contains("map-legend"), "{svg}");
         }
+    }
+
+    /// The in-map legend lists all eight shades and the map's maximum count.
+    #[test]
+    fn map_legend_shows_all_shades_and_the_maximum() {
+        // An empty map has no legend.
+        assert!(legend_layer(0, 960.0, 480.0).is_empty());
+        assert!(!legend_layer(0, 960.0, 480.0).contains("map-legend"));
+
+        let legend = legend_layer(80, 960.0, 480.0);
+        assert!(legend.contains("class=\"map-legend\""), "{legend}");
+        assert!(legend.contains("queries per cell"), "{legend}");
+        // Every ramp colour appears as a swatch.
+        for (r, g, b) in SQUARE_RAMP {
+            let hex = format!("#{r:02x}{g:02x}{b:02x}");
+            assert!(legend.contains(&hex), "missing swatch {hex}: {legend}");
+        }
+        // The maximum and the minimum endpoints are labelled.
+        assert!(legend.contains(">1</text>"), "{legend}");
+        assert!(legend.contains(">80</text>"), "{legend}");
+
+        // The value row must sit inside the containing box (regression guard:
+        // the third line used to reach past the bottom edge).
+        let box_y: f64 = attr(&legend, "rect", "y");
+        let box_h: f64 = attr(&legend, "rect", "height");
+        // The value texts are the `#5f707d`-filled ones; find their `y`.
+        let value_ys: Vec<f64> = legend
+            .lines()
+            .filter(|l| l.contains("fill=\"#5f707d\""))
+            .map(|l| attr(l, "text", "y"))
+            .collect();
+        assert_eq!(value_ys.len(), 2, "{legend}");
+        for y in value_ys {
+            assert!(
+                y < box_y + box_h,
+                "value baseline {y} reaches past the box bottom {}",
+                box_y + box_h
+            );
+        }
+    }
+
+    /// The rendered world map embeds the legend with the densest cell's count.
+    #[test]
+    fn world_map_svg_includes_the_legend() {
+        let make = |x, y| LocalQuery {
+            x,
+            y,
+            data_area: 5,
+            grid_baselength: 5000,
+            minute_length: 10,
+        };
+        // Two queries on the same cell -> maximum 2.
+        let svg = render_world_map_svg(&[make(1, 1), make(1, 1)], "test", 960, 480);
+        assert!(svg.contains("class=\"map-legend\""), "{svg}");
+        assert!(svg.contains(">2</text>"), "{svg}");
     }
 
     #[test]

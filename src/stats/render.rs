@@ -220,10 +220,6 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
          \x20   .maps { display: flex; flex-wrap: wrap; gap: 1rem; }\n\
          \x20   .maps figure { flex: 1 1 26rem; margin: 0; }\n\
          \x20   .maps figcaption { font-size: .85rem; color: #5f707d; margin: .4rem 0 0; }\n\
-         \x20   .legend { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem;\n\
-         \x20             margin: .5rem 0 0; font-size: .85rem; color: #5f707d; }\n\
-         \x20   .swatch { display: inline-block; width: .8rem; height: .8rem; border-radius: 2px;\n\
-         \x20             vertical-align: middle; margin-right: .35rem; }\n\
          \x20   table { border-collapse: collapse; width: 100%; max-width: 34rem; }\n\
          \x20   th, td { text-align: left; padding: .3rem .6rem; border-bottom: 1px solid #e7eaee; }\n\
          \x20   th { color: #5f707d; font-weight: 600; font-size: .8rem; }\n\
@@ -284,26 +280,6 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
          (minute_length &gt; 10): {interactive}</figcaption></figure>\n"
     );
     html.push_str("  </div>\n");
-    // Shade legend: the square ramp runs from one query to the densest tile.
-    let _ = write!(
-        html,
-        "  <p class=\"legend\">\
-         <span><span class=\"swatch\" style=\"background:{}\"></span>water</span>\
-         <span><span class=\"swatch\" style=\"background:{}\"></span>land</span>\
-         <span>queries per square:</span>",
-        crate::map::svg::WATER_FILL,
-        crate::map::svg::LAND_FILL,
-    );
-    for (index, (r, g, b)) in crate::map::svg::SQUARE_RAMP.iter().enumerate() {
-        let _ = write!(
-            html,
-            "<span class=\"swatch\" style=\"background:#{r:02x}{g:02x}{b:02x}\"></span>"
-        );
-        if index + 1 == crate::map::svg::SQUARE_RAMP.len() {
-            html.push_str("<span>more</span>");
-        }
-    }
-    html.push_str("</p>\n");
 
     // Top lists.
     for (title, entries) in [
