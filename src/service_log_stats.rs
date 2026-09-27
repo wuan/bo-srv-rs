@@ -12,11 +12,12 @@
 //!   `bo-android-<n>` version;
 //! * **local query overlay** — the `(x, y, raster baselength)` grid locations
 //!   of the local requests, for plotting on a world map (`render_ascii_maps`
-//!   for the ASCII raster, `render_world_svg` for the geographic SVG basemap).
+//!   for the ASCII raster, `render_world_svg` for the geographic SVG maps).
 //!
 //! Besides the text, JSON and SVG renderers this module provides
 //! [`render_html`], a standalone static HTML report (issue #28) that embeds the
-//! statistics tables and the SVG world map in a single self-contained document.
+//! statistics tables and two light-themed SVG world maps (background/offline and
+//! interactive) in a single self-contained document.
 //!
 //! ## Parsing
 //!
@@ -612,52 +613,201 @@ fn escape_html(value: &str) -> String {
     out
 }
 
-/// Render one query category (offline/interactive) as a `circle` per query on
-/// the equirectangular world map.
+/// One shaded map square: a local-grid tile with the number of queries that
+/// landed on it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ShadedSquare {
+    /// Tile centre longitude (degrees).
+    lon: f64,
+    /// Tile centre latitude (degrees).
+    lat: f64,
+    /// The tile size in degrees (drives the square's on-screen side).
+    data_area: i64,
+    /// How many queries fell on this tile.
+    count: u64,
+}
+
+/// Group `queries` into their distinct tiles and count the queries per tile.
 ///
-/// `centers` are the `(lon, lat)` degree pairs; `fill`/`opacity` theme the
-/// marker and `label` names the group for the SVG `<title>`.
-fn markers_layer(
-    queries: &[LocalQuery],
-    width: f64,
-    height: f64,
-    fill: &str,
-    opacity: f64,
-    label: &str,
-) -> String {
+/// Two queries share a square when they share `(x, y, data_area)`; the returned
+/// squares are ordered by descending count (then by tile) so the densest tiles
+/// are deterministic.  This is what turns the raw per-query stream into the
+/// "statistics as squares" overlay: a square's shade encodes its query count.
+fn shaded_squares(queries: &[LocalQuery]) -> Vec<ShadedSquare> {
+    let mut tiles: HashMap<(i64, i64, i64), ShadedSquare> = HashMap::new();
+    for q in queries {
+        let entry = tiles.entry((q.x, q.y, q.data_area)).or_insert_with(|| {
+            let (lon, lat) = q.center_lon_lat();
+            ShadedSquare {
+                lon,
+                lat,
+                data_area: q.data_area,
+                count: 0,
+            }
+        });
+        entry.count += 1;
+    }
+    let mut squares: Vec<ShadedSquare> = tiles.into_values().collect();
+    squares.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| {
+                a.lon
+                    .partial_cmp(&b.lon)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                a.lat
+                    .partial_cmp(&b.lat)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    squares
+}
+
+/// The water / land / coast colours of the light basemap.
+const WATER_FILL: &str = "#f5f6f7";
+/// Light-gray land fill for the basemap (see [`WATER_FILL`]).
+const LAND_FILL: &str = "#d9dde1";
+/// Coastline stroke for the basemap.
+const COAST_STROKE: &str = "#aeb6bd";
+/// Graticule colour (equator/prime meridian on the light basemap).
+const GRATICULE_STROKE: &str = "#dde1e5";
+
+/// The `(R, G, B)` colour ramp for the shaded squares, light to dense.
+///
+/// A square's shade is keyed to its **absolute** query count (see
+/// [`square_colour`]) so the two separate maps are directly comparable and a
+/// tile with a single query is never rendered as a hot spot.
+const SQUARE_RAMP: [(u8, u8, u8); 6] = [
+    (255, 224, 138), // pale amber
+    (255, 197, 82),
+    (251, 160, 47),
+    (240, 116, 34),
+    (214, 75, 36),
+    (176, 42, 44), // deep red
+];
+
+/// The per-tile query count that saturates the ramp: `1` maps to the palest
+/// shade and `>= SQUARE_RAMP_MAX` to the deepest.
+const SQUARE_RAMP_MAX: u64 = 32;
+
+/// Pick a ramp colour for an absolute `count`.
+///
+/// The count is mapped onto the ramp with a logarithmic scale (so low counts
+/// stay visually distinct) and capped at [`SQUARE_RAMP_MAX`].  This is
+/// deliberately absolute rather than normalised against the map's maximum: the
+/// same tile count reads the same on both the background and interactive maps,
+/// and a lone query on an otherwise empty map is not painted the densest shade.
+fn square_colour(count: u64) -> String {
+    let count = count.min(SQUARE_RAMP_MAX);
+    let bucket = match count {
+        0 => 0,
+        1 => 1,
+        2..=3 => 2,
+        4..=7 => 3,
+        8..=15 => 4,
+        _ => 5,
+    };
+    let (r, g, b) = SQUARE_RAMP[bucket];
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+/// Render one query category as a group of shaded squares on the equirectangular
+/// world map.
+///
+/// Each distinct tile becomes a square whose fill is a [`SQUARE_RAMP`] shade
+/// selected from the tile's query count; the squares are semi-transparent
+/// (`fill-opacity`) so the basemap stays visible underneath.  `label` names the
+/// group for the SVG `<title>`.
+fn squares_layer(queries: &[LocalQuery], width: f64, height: f64, label: &str) -> String {
+    let squares = shaded_squares(queries);
     let mut out = String::new();
-    let _ = write!(
+    let _ = writeln!(
         out,
-        "<g class=\"markers\" data-set=\"{}\" fill=\"{fill}\" fill-opacity=\"{opacity}\">\n  <title>{}</title>\n",
+        "<g class=\"squares\" data-set=\"{}\" fill-opacity=\"0.55\">\n  <title>{}</title>\n",
         escape_html(label),
         escape_html(&format!("{label}: {} queries", queries.len())),
     );
-    for q in queries {
-        let (lon, lat) = q.center_lon_lat();
-        let (x, y) = crate::world_map::project(lon, lat, width, height);
-        // Radius scales mildly with the tile size so wider queries read bigger.
-        let r = 2.0 + (q.data_area.max(5) as f64 / 5.0).min(4.0);
+    for square in &squares {
+        let (x, y) = crate::world_map::project(square.lon, square.lat, width, height);
+        // Side grows mildly with the tile size so wider queries read bigger.
+        let side = 3.0 + (square.data_area.max(5) as f64 / 5.0).min(5.0);
+        let half = side / 2.0;
+        let fill = square_colour(square.count);
         let _ = writeln!(
             out,
-            "  <circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"{r:.1}\"><title>{} {},{}</title></circle>",
-            escape_html(label),
-            q.x,
-            q.y
+            "  <rect x=\"{:.1}\" y=\"{:.1}\" width=\"{side:.1}\" height=\"{side:.1}\" \
+             fill=\"{fill}\"><title>{label} {} queries</title></rect>",
+            x - half,
+            y - half,
+            square.count,
         );
     }
     out.push_str("</g>\n");
     out
 }
 
-/// Render the full geographic SVG world map (continent basemap + offline and
-/// interactive local-query overlays) used by the HTML report.
+/// Render a single geographic SVG world map for one query category.
 ///
-/// Unlike [`render_local_svg`] (which normalises the raw UTM tile indices into
-/// an abstract scatter), this projects the queries onto real
-/// longitude/latitude via [`LocalQuery::center_lon_lat`] and lays a simplified
-/// continent outline underneath for orientation.
-pub fn render_world_svg(stats: &ServiceLogStats, width: u32, height: u32) -> String {
+/// The map is light-themed: a very light gray ocean, light gray continents and
+/// a faint graticule, with the category's queries drawn on top as
+/// semi-transparent shaded squares (see [`squares_layer`]).  Unlike
+/// [`render_local_svg`] (which normalises the raw UTM tile indices into an
+/// abstract scatter), this projects the queries onto real longitude/latitude via
+/// [`LocalQuery::center_lon_lat`].
+///
+/// `queries` is the category to plot and `label` names it in the SVG title and
+/// `aria-label`.
+pub fn render_world_map_svg(
+    queries: &[LocalQuery],
+    label: &str,
+    width: u32,
+    height: u32,
+) -> String {
     let (w, h) = (width as f64, height as f64);
+    let mut svg = String::new();
+    let _ = writeln!(
+        svg,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" class=\"worldmap\" width=\"{width}\" \
+         height=\"{height}\" viewBox=\"0 0 {width} {height}\" role=\"img\" \
+         aria-label=\"{}\">",
+        escape_html(&format!("World map of {label} local queries"))
+    );
+    // Very light gray ocean background.
+    let _ = writeln!(
+        svg,
+        "  <rect x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" fill=\"{WATER_FILL}\"/>"
+    );
+    // Faint graticule (equator + prime meridian) for orientation.
+    let _ = write!(
+        svg,
+        "  <g class=\"graticule\" stroke=\"{GRATICULE_STROKE}\" stroke-width=\"0.5\">\n\
+         \x20   <line x1=\"0\" y1=\"{}\" x2=\"{width}\" y2=\"{}\"/>\n\
+         \x20   <line x1=\"{}\" y1=\"0\" x2=\"{}\" y2=\"{height}\"/>\n\
+         \x20 </g>\n",
+        height / 2,
+        height / 2,
+        width / 2,
+        width / 2,
+    );
+    svg.push_str(&crate::world_map::continent_layer(
+        width,
+        height,
+        LAND_FILL,
+        COAST_STROKE,
+    ));
+    svg.push_str(&squares_layer(queries, w, h, label));
+    svg.push_str("</svg>\n");
+    svg
+}
+
+/// Render the separate offline (background) and interactive world maps used by
+/// the HTML report.
+///
+/// Returns `(offline_svg, interactive_svg)`; each map is a standalone
+/// [`render_world_map_svg`] so the two query categories never overlap visually.
+pub fn render_world_svg(stats: &ServiceLogStats, width: u32, height: u32) -> (String, String) {
     let offline: Vec<LocalQuery> = stats
         .local_queries
         .iter()
@@ -670,40 +820,10 @@ pub fn render_world_svg(stats: &ServiceLogStats, width: u32, height: u32) -> Str
         .copied()
         .filter(LocalQuery::is_interactive)
         .collect();
-
-    let mut svg = String::new();
-    let _ = writeln!(
-        svg,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" class=\"worldmap\" width=\"{width}\" \
-         height=\"{height}\" viewBox=\"0 0 {width} {height}\" role=\"img\" \
-         aria-label=\"World map of local queries\">"
-    );
-    // Ocean background.
-    let _ = writeln!(
-        svg,
-        "  <rect x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" fill=\"#0b2740\"/>"
-    );
-    // Graticule (equator + prime meridian) for orientation.
-    svg.push_str(
-        "  <g class=\"graticule\" stroke=\"#1f4a6e\" stroke-width=\"0.5\">\n\
-         \x20   <line x1=\"0\" y1=\"240\" x2=\"960\" y2=\"240\"/>\n\
-         \x20   <line x1=\"480\" y1=\"0\" x2=\"480\" y2=\"480\"/>\n\
-         \x20 </g>\n",
-    );
-    svg.push_str(&crate::world_map::continent_layer(
-        width, height, "#1d3b2a", "#3f7a5a",
-    ));
-    svg.push_str(&markers_layer(&offline, w, h, "#ffb347", 0.85, "offline"));
-    svg.push_str(&markers_layer(
-        &interactive,
-        w,
-        h,
-        "#ff5c33",
-        0.9,
-        "interactive",
-    ));
-    svg.push_str("</svg>\n");
-    svg
+    (
+        render_world_map_svg(&offline, "background (offline)", width, height),
+        render_world_map_svg(&interactive, "interactive", width, height),
+    )
 }
 
 /// Render a "top N" list as HTML table rows (`<tr><td>label</td><td>count</td>`).
@@ -749,10 +869,11 @@ fn data_area_rows(buckets: &[DataAreaBucket]) -> String {
 /// Render a complete, standalone static HTML report for `day`.
 ///
 /// The document embeds the statistics (totals, top countries/cities/versions,
-/// `data_area` distribution) and an SVG world map with a continent basemap and
-/// the local-query overlay (offline and interactive markers distinguished).
-/// All styling is inline in a `<style>` block, so the file is self-contained and
-/// needs no network access.
+/// `data_area` distribution) and two separate SVG world maps — one for the
+/// background/offline queries and one for the interactive queries — each with a
+/// light-gray continent basemap under semi-transparent squares shaded by the
+/// per-tile query count (see [`render_world_svg`]).  All styling is inline in a
+/// `<style>` block, so the file is self-contained and needs no network access.
 pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
     let escape = |value: &str| escape_html(value);
     let offline = stats
@@ -772,31 +893,35 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
     html.push_str("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
     html.push_str("  <style>\n");
     html.push_str(
-        "    :root { color-scheme: dark; }\n\
-         \x20   body { margin: 0; padding: 2rem; background: #07141f; color: #d7e3ec;\n\
+        "    :root { color-scheme: light; }\n\
+         \x20   body { margin: 0; padding: 2rem; background: #ffffff; color: #24313b;\n\
          \x20          font-family: system-ui, -apple-system, Segoe UI, sans-serif; }\n\
          \x20   h1 { font-size: 1.4rem; margin: 0 0 .25rem; }\n\
-         \x20   h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; color: #9fd3ff; }\n\
-         \x20   .sub { color: #7d94a6; margin: 0 0 1.5rem; }\n\
+         \x20   h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; color: #2b5d8a; }\n\
+         \x20   .sub { color: #5f707d; margin: 0 0 1.5rem; }\n\
          \x20   .cards { display: flex; flex-wrap: wrap; gap: .75rem; margin-bottom: 1rem; }\n\
-         \x20   .card { background: #0e2130; border: 1px solid #1c3a4f; border-radius: 8px;\n\
+         \x20   .card { background: #f4f6f8; border: 1px solid #dde1e5; border-radius: 8px;\n\
          \x20           padding: .6rem .9rem; min-width: 8rem; }\n\
          \x20   .card .label { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em;\n\
-         \x20                  color: #7d94a6; }\n\
+         \x20                  color: #5f707d; }\n\
          \x20   .card .value { font-size: 1.3rem; font-variant-numeric: tabular-nums; }\n\
          \x20   svg.worldmap { display: block; max-width: 100%; height: auto;\n\
-         \x20                 border: 1px solid #1c3a4f; border-radius: 8px; background: #0b2740; }\n\
-         \x20   .legend { display: flex; gap: 1rem; margin: .5rem 0 0; font-size: .85rem; }\n\
-         \x20   .swatch { display: inline-block; width: .8rem; height: .8rem; border-radius: 50%;\n\
+         \x20                 border: 1px solid #dde1e5; border-radius: 8px; background: #f5f6f7; }\n\
+         \x20   .maps { display: flex; flex-wrap: wrap; gap: 1rem; }\n\
+         \x20   .maps figure { flex: 1 1 26rem; margin: 0; }\n\
+         \x20   .maps figcaption { font-size: .85rem; color: #5f707d; margin: .4rem 0 0; }\n\
+         \x20   .legend { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem;\n\
+         \x20             margin: .5rem 0 0; font-size: .85rem; color: #5f707d; }\n\
+         \x20   .swatch { display: inline-block; width: .8rem; height: .8rem; border-radius: 2px;\n\
          \x20             vertical-align: middle; margin-right: .35rem; }\n\
          \x20   table { border-collapse: collapse; width: 100%; max-width: 34rem; }\n\
-         \x20   th, td { text-align: left; padding: .3rem .6rem; border-bottom: 1px solid #16303f; }\n\
-         \x20   th { color: #7d94a6; font-weight: 600; font-size: .8rem; }\n\
+         \x20   th, td { text-align: left; padding: .3rem .6rem; border-bottom: 1px solid #e7eaee; }\n\
+         \x20   th { color: #5f707d; font-weight: 600; font-size: .8rem; }\n\
          \x20   td.num { text-align: right; font-variant-numeric: tabular-nums; width: 6rem; }\n\
-         \x20   td.empty { color: #55707f; font-style: italic; }\n\
+         \x20   td.empty { color: #8a99a5; font-style: italic; }\n\
          \x20   .bar { display: inline-block; height: .7rem; min-width: 1px; background: #2f9e6a;\n\
          \x20          border-radius: 3px; }\n\
-         \x20   footer { margin-top: 2rem; color: #55707f; font-size: .8rem; }\n\
+         \x20   footer { margin-top: 2rem; color: #8a99a5; font-size: .8rem; }\n\
          \x20 </style>\n",
     );
     html.push_str("</head>\n<body>\n");
@@ -828,29 +953,47 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
     }
     html.push_str("  </div>\n");
 
-    // World map.
+    // World maps: one per query category so the overlays never overlap.
     html.push_str("  <h2>Local query locations</h2>\n");
     html.push_str(&format!(
-        "  <p class=\"sub\">{} local query locations (offline {}, interactive {}); \
-         continent outlines are a coarse orientation aid.</p>\n",
+        "  <p class=\"sub\">{} local query locations (background {}, interactive {}); \
+         each square is a query tile, shaded by its query count; continent outlines \
+         are a coarse orientation aid.</p>\n",
         stats.local_queries.len(),
         offline,
         interactive
     ));
-    html.push_str("  <div class=\"map\">\n");
-    html.push_str(&render_world_svg(
+    let (offline_svg, interactive_svg) = render_world_svg(
         stats,
         crate::world_map::MAP_WIDTH,
         crate::world_map::MAP_HEIGHT,
-    ));
+    );
+    html.push_str("  <div class=\"maps\">\n");
+    let _ = write!(
+        html,
+        "    <figure>{offline_svg}<figcaption>Background / offline queries \
+         (minute_length == 10): {offline}</figcaption></figure>\n\
+         \x20   <figure>{interactive_svg}<figcaption>Interactive queries \
+         (minute_length &gt; 10): {interactive}</figcaption></figure>\n"
+    );
     html.push_str("  </div>\n");
+    // Shade legend: the square ramp runs from one query to the densest tile.
     html.push_str(
         "  <p class=\"legend\">\
-         <span><span class=\"swatch\" style=\"background:#ffb347\"></span>offline \
-         (minute_length == 10)</span>\
-         <span><span class=\"swatch\" style=\"background:#ff5c33\"></span>interactive \
-         (minute_length &gt; 10)</span></p>\n",
+         <span><span class=\"swatch\" style=\"background:#f5f6f7\"></span>water</span>\
+         <span><span class=\"swatch\" style=\"background:#d9dde1\"></span>land</span>\
+         <span>queries per square:</span>",
     );
+    for (index, (r, g, b)) in SQUARE_RAMP.iter().enumerate() {
+        let _ = write!(
+            html,
+            "<span class=\"swatch\" style=\"background:#{r:02x}{g:02x}{b:02x}\"></span>"
+        );
+        if index + 1 == SQUARE_RAMP.len() {
+            html.push_str("<span>more</span>");
+        }
+    }
+    html.push_str("</p>\n");
 
     // Top lists.
     for (title, entries) in [
@@ -1449,31 +1592,90 @@ mod tests {
         assert_eq!(query.center_lon_lat(), (22.5, 67.5));
     }
 
-    /// `render_world_svg` lays the continent basemap and one marker per query,
-    /// split into the offline/interactive groups.
+    /// `render_world_svg` lays a light continent basemap and one square per distinct
+    /// tile in each of the two separate offline/interactive maps.
     #[test]
-    fn world_svg_has_basemap_and_split_markers() {
+    fn world_svg_has_basemap_and_split_squares() {
         let outcome = parse_content(ISSUE_SAMPLE);
         let stats = aggregate(&outcome.rows, 10);
-        let svg = render_world_svg(&stats, 960, 480);
-        assert!(svg.starts_with("<svg"), "{svg}");
-        assert!(svg.contains("class=\"basemap\""), "{svg}");
-        assert_eq!(
-            svg.matches("<path").count(),
-            crate::world_map::CONTINENT_OUTLINES.len()
+        let (offline, interactive) = render_world_svg(&stats, 960, 480);
+
+        for svg in [&offline, &interactive] {
+            assert!(svg.starts_with("<svg"), "{svg}");
+            assert!(svg.contains("class=\"basemap\""), "{svg}");
+            assert_eq!(
+                svg.matches("<path").count(),
+                crate::world_map::CONTINENT_OUTLINES.len()
+            );
+            // Light basemap: very light gray water, light gray land.
+            assert!(svg.contains(WATER_FILL), "{svg}");
+            assert!(svg.contains(LAND_FILL), "{svg}");
+            // Squares are semi-transparent so the basemap stays visible.
+            assert!(svg.contains("fill-opacity=\"0.55\""), "{svg}");
+        }
+
+        // Four offline local queries, each on a distinct tile, drawn as four
+        // squares; the one interactive query on its own map.
+        assert!(
+            offline.contains("data-set=\"background (offline)\""),
+            "{offline}"
         );
-        // Four offline local queries and one interactive.
-        assert_eq!(svg.matches("<circle").count(), 5);
-        assert!(svg.contains("data-set=\"offline\""), "{svg}");
-        assert!(svg.contains("data-set=\"interactive\""), "{svg}");
+        assert!(
+            interactive.contains("data-set=\"interactive\""),
+            "{interactive}"
+        );
+        assert!(!offline.contains("<circle"), "no circle markers remain");
+        assert_eq!(square_rects(&interactive), 1, "{interactive}");
+        assert_eq!(square_rects(&offline), 4, "{offline}");
     }
 
-    /// An empty report still renders an empty world map without panicking.
+    /// Count the square `<rect>`s in a rendered map (excluding the background
+    /// rectangle that fills the whole viewport).
+    fn square_rects(svg: &str) -> usize {
+        let squares = svg.split("<g class=\"squares\"").nth(1).unwrap_or("");
+        squares.matches("<rect ").count()
+    }
+
+    /// The square shade scales with the absolute per-tile count.
+    #[test]
+    fn square_colour_is_a_shade_ramp() {
+        // A lone query is the palest (second) shade, not the densest.
+        assert_eq!(square_colour(1), "#ffc552");
+        // The ramp darkens monotonically and saturates at the deepest shade.
+        assert_ne!(square_colour(1), square_colour(2));
+        assert_ne!(square_colour(2), square_colour(4));
+        assert_eq!(square_colour(SQUARE_RAMP_MAX), "#b02a2c");
+        assert_eq!(square_colour(SQUARE_RAMP_MAX + 100), "#b02a2c");
+        // Zero (only reachable for a defensive empty tile) is the palest shade.
+        assert_eq!(square_colour(0), "#ffe08a");
+    }
+
+    /// A single tile's query count collapses into one square with that count.
+    #[test]
+    fn shaded_squares_group_identical_tiles() {
+        let make = |x, y| LocalQuery {
+            x,
+            y,
+            data_area: 5,
+            grid_baselength: 5000,
+            minute_length: 10,
+        };
+        let squares = shaded_squares(&[make(1, 1), make(1, 1), make(2, 3)]);
+        assert_eq!(squares.len(), 2);
+        // Ordered by descending count, so the twice-used tile comes first.
+        assert_eq!(squares[0].count, 2);
+        assert_eq!(squares[1].count, 1);
+        assert!(shaded_squares(&[]).is_empty());
+    }
+
+    /// An empty report still renders empty world maps without panicking.
     #[test]
     fn world_svg_handles_no_local_queries() {
-        let svg = render_world_svg(&ServiceLogStats::default(), 960, 480);
-        assert!(svg.contains("class=\"basemap\""));
-        assert_eq!(svg.matches("<circle").count(), 0);
+        let (offline, interactive) = render_world_svg(&ServiceLogStats::default(), 960, 480);
+        for svg in [&offline, &interactive] {
+            assert!(svg.contains("class=\"basemap\""));
+            assert_eq!(svg.matches("<rect ").count(), 1, "only the background rect");
+        }
     }
 
     /// The HTML report is a standalone document containing the map and tables.
@@ -1488,20 +1690,33 @@ mod tests {
         assert!(html.contains("<style>"), "styling must be inline");
         assert!(html.contains("servicelog statistics for 2023-11-14"));
         assert!(html.contains("<div class=\"label\">total</div>"));
-        // The embedded SVG world map with the continent basemap.
-        assert!(html.contains("<svg"));
+        // Two separate SVG world maps with the light continent basemap and the
+        // background/interactive split.
+        assert_eq!(html.matches("<svg").count(), 2, "one map per category");
         assert!(html.contains("class=\"basemap\""));
+        assert!(html.contains(WATER_FILL), "very light gray water");
+        assert!(html.contains(LAND_FILL), "light gray land");
+        assert!(html.contains("data-set=\"background (offline)\""));
+        assert!(html.contains("data-set=\"interactive\""));
+        assert!(
+            html.contains("fill-opacity=\"0.55\""),
+            "transparent squares"
+        );
         // The top lists are rendered as tables.
         assert!(html.contains("Top countries"));
         assert!(html.contains("Top cities"));
         assert!(html.contains("Top client versions"));
         assert!(html.contains("data_area distribution (local queries)"));
-        // No external resources: the document is self-contained (the only URL is
-        // the SVG namespace declaration, which is not fetched).
+        // No external resources: the document is self-contained (the only URLs are
+        // the SVG namespace declarations, which are not fetched).
         assert!(!html.contains("href="), "{html}");
         assert!(!html.contains("src="), "{html}");
         assert!(!html.contains("<link"), "{html}");
-        assert_eq!(html.matches("http").count(), 1, "only the SVG xmlns URL");
+        assert_eq!(
+            html.matches("http").count(),
+            2,
+            "only the two SVG xmlns URLs"
+        );
     }
 
     /// Labels from the log are HTML-escaped so a crafted city cannot inject

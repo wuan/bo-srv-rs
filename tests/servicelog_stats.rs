@@ -256,10 +256,19 @@ fn html_report_is_a_standalone_document_with_world_map() {
         stdout.contains("servicelog statistics for 2023-11-14"),
         "{stdout}"
     );
-    // The SVG world map with the continent basemap and both overlays.
+    // Two separate SVG world maps (background and interactive) with the light
+    // continent basemap and semi-transparent count-shaded squares.
     assert!(stdout.contains("<svg"), "{stdout}");
+    assert!(
+        stdout.matches("<svg").count() == 2,
+        "one map per query category: {stdout}"
+    );
     assert!(stdout.contains("class=\"basemap\""), "{stdout}");
-    assert!(stdout.contains("data-set=\"offline\""), "{stdout}");
+    assert!(stdout.contains("fill-opacity=\"0.55\""), "{stdout}");
+    assert!(
+        stdout.contains("data-set=\"background (offline)\""),
+        "{stdout}"
+    );
     assert!(stdout.contains("data-set=\"interactive\""), "{stdout}");
     // The statistical tables.
     assert!(stdout.contains("Top countries"), "{stdout}");

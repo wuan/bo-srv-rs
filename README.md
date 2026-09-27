@@ -383,11 +383,13 @@ ASCII world maps alone.
 
 `--format html` (see issue #28) produces a **standalone static HTML report**: a
 self-contained document (inline stylesheet, no external resources) with the
-summary cards, the top lists and the `data_area` distribution as tables, plus an
-**SVG world map**.  The map is an equirectangular projection of a coarse,
-embedded continent-outline basemap — enough to give the local-query markers a
-geographic frame without a GIS dependency — with the offline and interactive
-local queries plotted at their tile centres in separate colours.  Use
+summary cards, the top lists and the `data_area` distribution as tables, plus
+**two SVG world maps** — one for the background/offline queries and one for the
+interactive queries.  Each map is an equirectangular projection of a light-gray,
+coarse continent-outline basemap (very light gray water, light gray land) — enough
+to give the local-query data a geographic frame without a GIS dependency — with
+each query tile drawn on top as a **semi-transparent square shaded by its query
+count** (so the basemap stays visible and denser tiles read darker).  Use
 `--output report.html` to write the document to a file (otherwise it goes to
 stdout, as with the other formats).
 

@@ -401,8 +401,12 @@ mod tests {
         );
         assert!(output.contains("<svg"), "{output}");
         assert!(output.contains("class=\"basemap\""), "{output}");
-        // Both offline and interactive overlays are present.
-        assert!(output.contains("data-set=\"offline\""), "{output}");
+        // Both offline/background and interactive overlays are present, on
+        // separate maps.
+        assert!(
+            output.contains("data-set=\"background (offline)\""),
+            "{output}"
+        );
         assert!(output.contains("data-set=\"interactive\""), "{output}");
         let _ = std::fs::remove_dir_all(&dir);
     }
