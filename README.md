@@ -334,6 +334,59 @@ prefix:
 org.blitzortung.service.access,version=190,region=3,minutes=60,offset=0,grid=10000,data_area=101x202-5,country=DE:1|c
 ```
 
+### Statistics from the log files
+
+`bo-servicelog-stats` (there is no Python counterpart; see issue #24) reads the
+daily `servicelog_YYYY-MM-DD` files back and reports, per day:
+
+* **total requests**, split into local (`region == -1`), global (`region == 0`)
+  and region (`region > 0`) flavours, plus the unknown geo/version counts;
+* **top countries**, **top cities** and **top client versions** (each `--top N`
+  entries, default 10; ties are broken alphabetically for a stable order);
+* **`data_area` distribution** over the local queries — how many requests used
+  each `data_area` (tile size in degrees), listed ascending so the histogram
+  reads fine → coarse from left to right);
+* **local query locations** — the `(x, y, data_area, grid_baselength)` of every
+  local request, for plotting an overlay.  The `--format map` output renders
+  these onto a **72 x 36 ASCII world raster** of 5-degree cells: a query with
+  `data_area=5` marks one cell, `10` a `2x2` block, `15` a `3x3` and `20` a
+  `4x4` block (every covered cell is incremented, so overlapping queries
+  accumulate), anchored at the local-grid origin
+  `((x-1) * data_area, (y-1) * data_area)`.
+
+  Two maps are produced: one for the **offline** queries (a fixed 10-minute
+  window, `minute_length == 10`) and one for the **interactive** queries (any
+  longer window, `minute_length > 10`).  The report also lists the
+  offline/interactive counts next to the local totals, and each JSON
+  `local_queries` entry carries `minute_length` and an `interactive` flag.
+
+```sh
+bo-servicelog-stats [--dir <DIR|FILE>] [--date YYYY-MM-DD] [--all] [--top N] \
+                    [--format text|json|svg|map] [--width N] [--height N]
+```
+
+`--dir` may be the log directory or a single `servicelog_YYYY-MM-DD` file.  It
+defaults to the configured servicelog directory
+(`BO_SERVICE_SERVICELOG`/`[webservice] servicelog`), else
+`/var/log/blitzortung`.  The report covers **today (UTC)** by default; `--date`
+selects another day and `--all` reports every file in the directory.  When no
+file matches, a short "nothing to report" note is printed instead of an empty
+report.
+
+`--format text` (the default) prints a readable summary **including the offline
+and interactive ASCII world maps**, `--format json` the same data as JSON,
+`--format svg` a standalone scatter of the local query coordinates (a
+value-range normalised plot, not a geographic projection — it needs no map
+dependency) and `--format map` (`ascii` is accepted as an alias) the north-up
+ASCII world maps alone.
+
+Parsing splits each line on tabs and **ignores the empty segments** produced by
+the tab-padded `city` column, recovering the 14 logical fields; a line that
+does not yield 14 parseable fields is counted as malformed and skipped (the
+parser never panics on a truncated or hand-edited file).  The `-` placeholder
+for unknown country/city is normalised to "unknown" and never appears as a
+"top" entry.
+
 ## Metrics
 
 Like the Python service (`blitzortung/service/metrics.py`), the service sends
@@ -515,6 +568,9 @@ histogram bins (empty when `minute_length <= 10`).
   response shapes, caching and metrics reporting
 - `service_log` — the in-process usage-log pipeline: the bounded queue, the
   background consumer thread, row formatting and best-effort GeoIP
+- `service_log_stats` — parsing and aggregation of the daily `servicelog_*`
+  files (totals, top countries/cities/versions, local-query overlay) used by
+  the `bo-servicelog-stats` tool
 - `jsonrpc` — JSON-RPC parsing/dispatch and the pre-1.0 / v1 / v2 envelope
   dialects
 - `metrics` — the `Metrics` trait, the service and importer metric helpers, the
@@ -551,6 +607,7 @@ names match bo-python's `pyproject.toml` `[project.scripts]` entries:
 | `bo-import` | `cli/imprt.py` | Import protected ten-minute strike logs |
 | `bo-update` | `cli/update.py` | Import recent strikes from `last_strikes.php` |
 | `bo-import-websocket` | `cli/imprt_websocket.py` | Live websocket strike import |
+| `bo-servicelog-stats` | — (new, see `#24`) | Daily statistics from the `servicelog_*` files |
 
 ```sh
 # last hour, UTC, text output
@@ -566,6 +623,16 @@ cargo run --bin bo-import -- --update        # now - 30min window
 cargo run --bin bo-update -- --hours 2
 cargo run --bin bo-import-websocket -- -v
 cargo run --bin bo-import-websocket -- -t    # connection test, no DB writes
+
+# daily servicelog statistics for today (default), including the text world map
+cargo run --bin bo-servicelog-stats
+# a specific day, the top 10 only, or every file in the directory
+cargo run --bin bo-servicelog-stats -- --date 2023-11-14 --top 10
+cargo run --bin bo-servicelog-stats -- --all
+# JSON, the ASCII world map alone, or an SVG local-query overlay
+cargo run --bin bo-servicelog-stats -- --format json
+cargo run --bin bo-servicelog-stats -- --format map
+cargo run --bin bo-servicelog-stats -- --date 2023-11-14 --format svg > local-queries.svg
 ```
 
 ## Documented differences from the Python implementation

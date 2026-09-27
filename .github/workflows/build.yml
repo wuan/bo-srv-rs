@@ -186,7 +186,7 @@ jobs:
       - name: Build Release
         run: |
           cargo build --release
-          for bin in bo-webservice bo-db bo-import bo-update bo-import-websocket; do
+          for bin in bo-webservice bo-db bo-import bo-update bo-import-websocket bo-servicelog-stats; do
             echo "== $bin =="
             ldd "target/release/$bin"
           done
@@ -201,13 +201,14 @@ jobs:
             target/release/bo-import
             target/release/bo-update
             target/release/bo-import-websocket
+            target/release/bo-servicelog-stats
 
       - name: Create Release Archive
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           cd target/release
           zip "bo-srv-rs-${GITHUB_REF_NAME}.zip" \
-            bo-webservice bo-db bo-import bo-update bo-import-websocket
+            bo-webservice bo-db bo-import bo-update bo-import-websocket bo-servicelog-stats
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
