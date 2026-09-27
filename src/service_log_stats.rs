@@ -185,6 +185,16 @@ pub struct TopEntry {
     pub count: u64,
 }
 
+/// One `data_area` bucket of the local-query distribution.
+///
+/// `data_area` is the tile size in degrees (the `data_area` field of a local
+/// request, always a multiple of [`RASTER_DEGREES`] in practice).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataAreaBucket {
+    pub data_area: i64,
+    pub count: u64,
+}
+
 /// A local query location for the world-map overlay.
 ///
 /// `x`/`y` are the local-grid tile indices written in the servicelog; the grid
@@ -223,6 +233,10 @@ pub struct ServiceLogStats {
     pub countries: Vec<TopEntry>,
     pub cities: Vec<TopEntry>,
     pub versions: Vec<TopEntry>,
+    /// The distribution of `data_area` over the local queries, sorted by
+    /// `data_area` ascending (not by count): a small `data_area` is a small,
+    /// fine-grained query, a large one a coarse, wide-area query.
+    pub data_area_distribution: Vec<DataAreaBucket>,
     /// All local query grid locations, in file order.
     pub local_queries: Vec<LocalQuery>,
 }
@@ -256,6 +270,7 @@ pub fn aggregate(rows: &[ServiceLogRow], top_n: usize) -> ServiceLogStats {
     let mut countries: HashMap<String, u64> = HashMap::new();
     let mut cities: HashMap<String, u64> = HashMap::new();
     let mut versions: HashMap<String, u64> = HashMap::new();
+    let mut data_areas: HashMap<i64, u64> = HashMap::new();
 
     for row in rows {
         stats.total_requests += 1;
@@ -282,10 +297,12 @@ pub fn aggregate(rows: &[ServiceLogRow], top_n: usize) -> ServiceLogStats {
 
         if row.is_local() {
             if let (Some(x), Some(y)) = (row.x, row.y) {
+                let data_area = row.data_area.unwrap_or(5).max(5);
+                *data_areas.entry(data_area).or_insert(0) += 1;
                 stats.local_queries.push(LocalQuery {
                     x,
                     y,
-                    data_area: row.data_area.unwrap_or(5).max(5),
+                    data_area,
                     grid_baselength: row.grid_baselength,
                 });
             }
@@ -295,7 +312,19 @@ pub fn aggregate(rows: &[ServiceLogRow], top_n: usize) -> ServiceLogStats {
     stats.countries = take_top(countries, top_n);
     stats.cities = take_top(cities, top_n);
     stats.versions = take_top(versions, top_n);
+    stats.data_area_distribution = take_distribution(data_areas);
     stats
+}
+
+/// Sort a `data_area` counter into a distribution: ascending by `data_area`
+/// (so the histogram reads fine -> coarse from left to right).
+fn take_distribution(counter: HashMap<i64, u64>) -> Vec<DataAreaBucket> {
+    let mut buckets: Vec<DataAreaBucket> = counter
+        .into_iter()
+        .map(|(data_area, count)| DataAreaBucket { data_area, count })
+        .collect();
+    buckets.sort_by_key(|b| b.data_area);
+    buckets
 }
 
 /// Parse and aggregate a single servicelog file.
@@ -336,6 +365,25 @@ pub fn render_text(day: &str, stats: &ServiceLogStats) -> String {
         }
     }
 
+    out.push_str("\ndata_area distribution (local queries):\n");
+    if stats.data_area_distribution.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    let max = stats
+        .data_area_distribution
+        .iter()
+        .map(|b| b.count)
+        .max()
+        .unwrap_or(0);
+    for bucket in &stats.data_area_distribution {
+        out.push_str(&format!(
+            "  {:>4}  {:>8}  {}\n",
+            bucket.data_area,
+            bucket.count,
+            histogram_bar(bucket.count, max, 40)
+        ));
+    }
+
     out.push_str(&format!(
         "\nlocal query locations: {}\n\n",
         stats.local_queries.len()
@@ -344,6 +392,16 @@ pub fn render_text(day: &str, stats: &ServiceLogStats) -> String {
     // prints the map alone.
     out.push_str(&AsciiWorldMap::from_local_queries(&stats.local_queries).render());
     out
+}
+
+/// A `#` bar of `width` columns scaled to `max` (at least one `#` for a
+/// non-zero count so no bucket renders as blank).
+fn histogram_bar(count: u64, max: u64, width: usize) -> String {
+    if count == 0 || max == 0 {
+        return String::new();
+    }
+    let columns = ((count as f64 / max as f64) * width as f64).ceil() as usize;
+    "#".repeat(columns.clamp(1, width))
 }
 
 /// Render the statistics as pretty-printed JSON.
@@ -360,6 +418,10 @@ pub fn render_json(day: &str, stats: &ServiceLogStats) -> String {
         "countries": top_entries_json(&stats.countries),
         "cities": top_entries_json(&stats.cities),
         "versions": top_entries_json(&stats.versions),
+        "data_area_distribution": stats.data_area_distribution.iter().map(|b| serde_json::json!({
+            "data_area": b.data_area,
+            "count": b.count,
+        })).collect::<Vec<_>>(),
         "local_queries": stats.local_queries.iter().map(|q| serde_json::json!({
             "x": q.x,
             "y": q.y,
@@ -822,6 +884,110 @@ mod tests {
         assert!(stats.countries.is_empty());
         assert!(stats.cities.is_empty());
         assert!(stats.versions.is_empty());
+    }
+
+    /// A local row builder for the distribution tests.
+    fn local_row(x: i64, y: i64, data_area: &str) -> String {
+        format!("08:00:00.000\tDE\tCity\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t{x}\t{y}\t{data_area}\t0.000")
+    }
+
+    /// The `data_area` distribution counts every local query, sorted ascending
+    /// by `data_area`.
+    #[test]
+    fn data_area_distribution_counts_and_sorts() {
+        let content = [
+            local_row(1, 1, "5"),
+            local_row(2, 1, "10"),
+            local_row(3, 1, "5"),
+            local_row(4, 1, "20"),
+            local_row(5, 1, "10"),
+            local_row(6, 1, "5"),
+        ]
+        .join("\n");
+        let stats = aggregate(&parse_content(&content).rows, 10);
+        assert_eq!(
+            stats.data_area_distribution,
+            vec![
+                DataAreaBucket {
+                    data_area: 5,
+                    count: 3
+                },
+                DataAreaBucket {
+                    data_area: 10,
+                    count: 2
+                },
+                DataAreaBucket {
+                    data_area: 20,
+                    count: 1
+                },
+            ]
+        );
+    }
+
+    /// Non-local rows do not contribute to the distribution.
+    #[test]
+    fn data_area_distribution_ignores_non_local_rows() {
+        let content =
+            "08:00:00.000\tDE\tBerlin\t\t\t\tA\t352\t0\t60\t10000\t0\t0\t-\t-\t-\t0.000\n";
+        let stats = aggregate(&parse_content(content).rows, 10);
+        assert!(stats.data_area_distribution.is_empty());
+    }
+
+    /// A missing (`-`) data_area counts as the 5-degree minimum, matching the
+    /// map footprint.
+    #[test]
+    fn data_area_distribution_defaults_missing_to_minimum() {
+        let content = local_row(1, 1, "-");
+        let stats = aggregate(&parse_content(&content).rows, 10);
+        assert_eq!(
+            stats.data_area_distribution,
+            vec![DataAreaBucket {
+                data_area: 5,
+                count: 1
+            }]
+        );
+    }
+
+    /// The text report lists the distribution with a scaled bar.
+    #[test]
+    fn text_render_includes_data_area_distribution() {
+        let content = [
+            local_row(1, 1, "5"),
+            local_row(2, 1, "5"),
+            local_row(3, 1, "10"),
+            local_row(4, 1, "5"),
+        ]
+        .join("\n");
+        let stats = aggregate(&parse_content(&content).rows, 10);
+        let text = render_text("2023-11-14", &stats);
+        assert!(text.contains("data_area distribution (local queries):"));
+        assert!(text.contains("5         3"), "{text}");
+        assert!(text.contains("10         1"), "{text}");
+        // The largest bucket gets the full-width bar.
+        assert!(text.contains("######"), "{text}");
+    }
+
+    /// `histogram_bar` scales to the max and keeps non-zero buckets visible.
+    #[test]
+    fn histogram_bar_scaling() {
+        assert_eq!(histogram_bar(0, 10, 40), "");
+        assert_eq!(histogram_bar(10, 10, 40), "#".repeat(40));
+        assert_eq!(histogram_bar(5, 10, 40), "#".repeat(20));
+        // A tiny count relative to the max still shows one `#`.
+        assert_eq!(histogram_bar(1, 1000, 40), "#");
+        // A zero max renders nothing (all buckets zero).
+        assert_eq!(histogram_bar(0, 0, 40), "");
+    }
+
+    /// The JSON report carries the distribution as objects.
+    #[test]
+    fn json_render_includes_data_area_distribution() {
+        let outcome = parse_content(ISSUE_SAMPLE);
+        let stats = aggregate(&outcome.rows, 10);
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json("2023-11-14", &stats)).unwrap();
+        assert_eq!(value["data_area_distribution"][0]["data_area"], 5);
+        assert_eq!(value["data_area_distribution"][0]["count"], 5);
     }
 
     #[test]

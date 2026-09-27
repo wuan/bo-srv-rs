@@ -343,6 +343,9 @@ daily `servicelog_YYYY-MM-DD` files back and reports, per day:
   and region (`region > 0`) flavours, plus the unknown geo/version counts;
 * **top countries**, **top cities** and **top client versions** (each `--top N`
   entries, default 10; ties are broken alphabetically for a stable order);
+* **`data_area` distribution** over the local queries — how many requests used
+  each `data_area` (tile size in degrees), listed ascending so the histogram
+  reads fine → coarse from left to right);
 * **local query locations** — the `(x, y, data_area, grid_baselength)` of every
   local request, for plotting an overlay.  The `--format map` output renders
   these onto a **72 x 36 ASCII world raster** of 5-degree cells: a query with

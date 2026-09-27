@@ -93,6 +93,65 @@ fn json_report_is_valid_json() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Local rows with varied `data_area` values (5, 10, 15, 20).
+const DATA_AREA_SAMPLE: &str = "\
+08:00:00.000\tDE\tCity\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t1\t1\t5\t0.000\n\
+08:00:01.000\tDE\tCity\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t2\t1\t10\t0.000\n\
+08:00:02.000\tDE\tCity\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t3\t1\t15\t0.000\n\
+08:00:03.000\tDE\tCity\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t4\t1\t20\t0.000\n";
+
+#[test]
+fn data_area_distribution_is_reported() {
+    let dir = temp_dir("data-area");
+    std::fs::write(dir.join("servicelog_2023-11-14"), DATA_AREA_SAMPLE).unwrap();
+
+    // Text output: the distribution section lists each data_area.
+    let text = Command::new(binary())
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--date",
+            "2023-11-14",
+            "--format",
+            "text",
+        ])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(text.status.success());
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    assert!(
+        stdout.contains("data_area distribution (local queries):"),
+        "{stdout}"
+    );
+    for area in ["5", "10", "15", "20"] {
+        assert!(stdout.contains(area), "missing data_area {area}: {stdout}");
+    }
+
+    // JSON output: one bucket per data_area, sorted ascending.
+    let json = Command::new(binary())
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--date",
+            "2023-11-14",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run bo-servicelog-stats");
+    assert!(json.status.success());
+    let value: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(json.stdout).unwrap()).expect("valid json");
+    let buckets = value["data_area_distribution"].as_array().unwrap();
+    let areas: Vec<i64> = buckets
+        .iter()
+        .map(|b| b["data_area"].as_i64().unwrap())
+        .collect();
+    assert_eq!(areas, [5, 10, 15, 20]);
+    assert!(buckets.iter().all(|b| b["count"] == 1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn svg_report_contains_one_circle_per_local_query() {
     let dir = temp_dir("svg");
