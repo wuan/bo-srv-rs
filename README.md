@@ -385,16 +385,20 @@ ASCII world maps alone.
 self-contained document (inline stylesheet, no external resources) with the
 summary cards, the top lists and the `data_area` distribution as tables, plus
 **two SVG world maps** — one for the background/offline queries and one for the
-interactive queries.  Each map is an equirectangular projection of a light-gray,
-coarse continent-outline basemap (very light gray water, light gray land) — enough
-to give the local-query data a geographic frame without a GIS dependency — with
-the statistics aggregated onto a **single 72x36 raster of 5-degree cells** drawn
-on top.  Every local query increments the cells its `data_area` footprint covers
+interactive queries.  Each map is an equirectangular projection of a light-gray
+landmass basemap (very light gray water, light gray land) — enough to give the
+local-query data a geographic frame without a GIS dependency — with the
+statistics aggregated onto a **single 72x36 raster of 5-degree cells** drawn on
+top.  Every local query increments the cells its `data_area` footprint covers
 (a `data_area=10` query fills a `2x2` block, `15` a `3x3`, ...), and each cell is
 rendered as a **semi-transparent rectangle shaded by its query count** (so the
 basemap stays visible and denser cells read darker).  Use `--output report.html`
 to write the document to a file (otherwise it goes to stdout, as with the other
 formats).
+
+The basemap is derived from the **Natural Earth** 1:110m "Land" physical vectors
+(public domain) and embedded from `assets/world-110m-land.geojson` via
+`include_str!`, so the report stays self-contained and needs no GIS dependency.
 
 ```sh
 bo-servicelog-stats --format html --output report.html

@@ -917,8 +917,8 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
     html.push_str("  <h2>Local query locations</h2>\n");
     html.push_str(&format!(
         "  <p class=\"sub\">{} local query locations (background {}, interactive {}); \
-         each square is a query tile, shaded by its query count; continent outlines \
-         are a coarse orientation aid.</p>\n",
+         each square is a 5-degree raster cell, shaded by its query count; the land \
+         outline is a coarse orientation aid.</p>\n",
         stats.local_queries.len(),
         offline,
         interactive
@@ -1565,7 +1565,7 @@ mod tests {
             assert!(svg.contains("class=\"basemap\""), "{svg}");
             assert_eq!(
                 svg.matches("<path").count(),
-                crate::world_map::CONTINENT_OUTLINES.len()
+                crate::world_map::land_rings().len()
             );
             // Light basemap: very light gray water, light gray land.
             assert!(svg.contains(WATER_FILL), "{svg}");
