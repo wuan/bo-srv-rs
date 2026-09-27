@@ -20,9 +20,10 @@ The source is noted here purely for provenance.
 ## Processing
 
 The asset is produced from the source above with Douglas-Peucker simplification
-at ~0.5 degrees, quantizing coordinates to 0.1 degrees, and clamping latitudes
-to `[-85, 90]` (Antarctica gets a flat bottom).  Rings that cross the
-antimeridian are split so no SVG path draws a horizontal streak across the map.
+at ~0.5 degrees, quantizing coordinates to 0.1 degrees, and covering the full
+latitude range `[-90, 90]` (Antarctica reaches the south pole).  Rings that cross
+the antimeridian are split so no SVG path draws a horizontal streak across the
+map.
 
 Result: ~126 rings, ~1800 points, ~34 KB — coarse enough to embed but still
 recognizable at 360x180 SVG and the 72x36 ASCII raster.

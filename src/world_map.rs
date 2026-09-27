@@ -23,9 +23,9 @@
 //! asset was produced from the official GeoJSON release
 //! (`nvkelso/natural-earth-vector`, `geojson/ne_110m_land.geojson`) by applying
 //! Douglas-Peucker simplification at ~0.5 degrees and quantizing the coordinates
-//! to 0.1 degrees; latitudes were clamped to `[-85, 90]` (Antarctica gets a flat
-//! bottom) and rings crossing the antimeridian were split so no path draws a
-//! horizontal streak across the map.
+//! to 0.1 degrees; latitudes span the full `[-90, 90]` range (Antarctica reaches
+//! the south pole) and rings crossing the antimeridian were split so no path
+//! draws a horizontal streak across the map.
 //!
 //! ## Accuracy
 //!
@@ -227,6 +227,13 @@ mod tests {
                 assert!((-90.0..=90.0).contains(lat), "lat {lat} out of range");
             }
         }
+        // The basemap covers the full latitude range: Antarctica reaches -90.
+        let min_lat = land_rings()
+            .iter()
+            .flatten()
+            .map(|(_, lat)| *lat)
+            .fold(f64::INFINITY, f64::min);
+        assert_eq!(min_lat, -90.0, "basemap must extend to the south pole");
     }
 
     /// No ring draws a horizontal streak across the map: consecutive points may
