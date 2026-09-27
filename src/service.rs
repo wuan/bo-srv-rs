@@ -637,6 +637,7 @@ impl<M: Metrics> Service<M> {
 
         // `base.jsonrpc_get_strikes_grid`: record the request (pre-clamp
         // `original_grid_base_length`, clamped `region`).
+        let fill = grid_fill_percent(&response).unwrap_or(0.0);
         let now = Utc::now();
         self.record_usage(crate::service_log::region_entry(
             epoch_microseconds(now),
@@ -645,6 +646,7 @@ impl<M: Metrics> Service<M> {
             minute_offset,
             region,
             count_threshold,
+            fill,
             client.clone(),
             request.user_agent.clone(),
         ));
@@ -744,6 +746,7 @@ impl<M: Metrics> Service<M> {
         let _ = request.fix_bad_accept_header();
 
         // `base.jsonrpc_get_global_strikes_grid`: region 0, pre-clamp baselength.
+        let fill = grid_fill_percent(&response).unwrap_or(0.0);
         let now = Utc::now();
         self.record_usage(crate::service_log::global_entry(
             epoch_microseconds(now),
@@ -751,6 +754,7 @@ impl<M: Metrics> Service<M> {
             original_grid_base_length,
             minute_offset,
             count_threshold,
+            fill,
             client.clone(),
             request.user_agent.clone(),
         ));
@@ -842,6 +846,7 @@ impl<M: Metrics> Service<M> {
             .map_err(service_error)?;
 
         // `base.jsonrpc_get_local_strikes_grid`: region -1 plus x/y/data_area.
+        let fill = grid_fill_percent(&response).unwrap_or(0.0);
         let now = Utc::now();
         self.record_usage(crate::service_log::local_entry(
             epoch_microseconds(now),
@@ -849,6 +854,7 @@ impl<M: Metrics> Service<M> {
             original_grid_base_length,
             minute_offset,
             count_threshold,
+            fill,
             client.clone(),
             request.user_agent.clone(),
             x,
@@ -1012,6 +1018,20 @@ fn build_grid_rows(rows: &[Row], grid: &Grid, end_time: DateTime<Utc>, global: b
         }
     }
     out
+}
+
+/// The fill percentage of a built grid response: the number of populated
+/// raster cells (`r`) divided by the number of available cells (`xc * yc`),
+/// scaled to `0..=100`.  `None` when the response is not a grid object, lacks
+/// the required fields, or has no available cells.
+fn grid_fill_percent(response: &Value) -> Option<f64> {
+    let grid = response.as_object()?;
+    let filled = grid.get("r")?.as_array()?.len() as f64;
+    let available = grid.get("xc")?.as_i64()? as f64 * grid.get("yc")?.as_i64()? as f64;
+    if available <= 0.0 {
+        return None;
+    }
+    Some(filled / available * 100.0)
 }
 
 #[cfg(test)]
@@ -1363,6 +1383,21 @@ mod tests {
     }
 
     #[test]
+    fn grid_fill_percent_is_filled_over_available() {
+        // 2 filled cells out of 10 * 20 = 200 -> 1.0 %.
+        let response = json!({"r": [[0, 1, 4, -5], [2, 3, 1, -5]], "xc": 10, "yc": 20});
+        assert_eq!(grid_fill_percent(&response), Some(1.0));
+        // A full matrix -> 100 %.
+        assert_eq!(
+            grid_fill_percent(&json!({"r": [[0, 1, 1, 0]], "xc": 1, "yc": 1})),
+            Some(100.0)
+        );
+        // Non-grid / empty / no-available responses yield `None`.
+        assert_eq!(grid_fill_percent(&json!({})), None);
+        assert_eq!(grid_fill_percent(&json!({"r": [], "xc": 0, "yc": 0})), None);
+    }
+
+    #[test]
     fn histogram_bins_counts() {
         let rows = vec![
             Row::new(vec![DBValue::Int(-2), DBValue::Int(1)]),
@@ -1531,6 +1566,12 @@ mod tests {
             .unwrap();
         // The response is unaffected by recording (still the grid object).
         assert!(response.get("r").is_some());
+        // Expected fill percentage for the recorded row.
+        let obj = response.as_object().unwrap();
+        let xc = obj["xc"].as_i64().unwrap() as f64;
+        let yc = obj["yc"].as_i64().unwrap() as f64;
+        let filled = obj["r"].as_array().unwrap().len() as f64;
+        let expected_fill = crate::round::py_format_fixed(filled / (xc * yc) * 100.0, 3);
 
         // Drop the service (releasing the sender) and join the consumer.
         drop(service);
@@ -1542,9 +1583,9 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 1);
         // City padding is made of tabs, so a naive split yields empty
-        // segments; ignore them to recover the 13 logical fields.
+        // segments; ignore them to recover the 14 logical fields.
         let logical: Vec<&str> = lines[0].split('\t').filter(|s| !s.is_empty()).collect();
-        assert_eq!(logical.len(), 13);
+        assert_eq!(logical.len(), 14);
         // Field 1 is the UTC wall-clock time of day, `HH:MM:SS.nnn`.
         let timestamp = logical[0];
         assert_eq!(timestamp.len(), 12, "got {timestamp}");
@@ -1565,13 +1606,15 @@ mod tests {
         assert_eq!(logical[6], "30"); // minute_length
         assert_eq!(logical[7], "10000"); // pre-clamp grid_baselength
         assert_eq!(logical[8], "1"); // region
-                                     // The raw client IP is never written.
+                                     // The fill is `filled / (xc * yc) * 100` with three decimals.
+        assert_eq!(logical[13], expected_fill);
+        // The raw client IP is never written.
         assert!(!lines[0].contains("5.6.7.8"));
 
         let _ = std::fs::remove_dir_all(&log_dir);
     }
 
-    /// A local-grid request writes the 13-field row with region `-1` and the
+    /// A local-grid request writes the 14-field row with region `-1` and the
     /// local x/y/data_area values.
     #[tokio::test]
     async fn jsonrpc_get_local_strikes_grid_records_usage_entry() {
@@ -1605,12 +1648,13 @@ mod tests {
         let content = read_servicelog(&log_dir, &today());
         let line = content.lines().next().unwrap();
         let logical: Vec<&str> = line.split('\t').filter(|s| !s.is_empty()).collect();
-        assert_eq!(logical.len(), 13);
+        assert_eq!(logical.len(), 14);
         assert_eq!(logical[8], "-1"); // region -1 for local
         assert_eq!(logical[10], "101"); // local x
         assert_eq!(logical[11], "202"); // local y
         assert_eq!(logical[12], "5"); // local data_area
-                                      // The raw client IP is never written.
+        assert_eq!(logical[13], "0.000"); // no filled cells
+                                          // The raw client IP is never written.
         assert!(!line.contains("5.6.7.8"));
 
         let _ = std::fs::remove_dir_all(&log_dir);
@@ -1651,8 +1695,9 @@ mod tests {
             .split('\t')
             .filter(|s| !s.is_empty())
             .collect();
-        assert_eq!(logical.len(), 13);
+        assert_eq!(logical.len(), 14);
         assert_eq!(logical[8], "0"); // region 0 for global
+        assert_eq!(logical[13], "0.000"); // no filled cells
 
         let _ = std::fs::remove_dir_all(&log_dir);
     }

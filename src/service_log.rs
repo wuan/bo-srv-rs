@@ -8,11 +8,12 @@
 //!
 //! This replaces the Python two-step design (`base.py` writing per-minute JSON
 //! reports + the `bo-webservice-insertlog` follow-up tool): there are **no JSON
-//! intermediate files** and the transform happens in-process.  The row has 13
+//! intermediate files** and the transform happens in-process.  The row has 14
 //! logical fields (see [`build_row`]): the UTC request time as `HH:MM:SS.nnn`,
 //! country/city, a client **platform** marker, the version, then the request
-//! parameters and the local `x`/`y`/`data_area` (or `-` placeholders).  The old
-//! masked-IP column is gone.  The `city` field is tab-padded (see [`pad_city`]), so splitting a line
+//! parameters, the local `x`/`y`/`data_area` (or `-` placeholders) and the
+//! raster `fill` percentage.  The old masked-IP column is gone.  The `city`
+//! field is tab-padded (see [`pad_city`]), so splitting a line
 //! on `'\t'` produces empty segments for the padding — consumers must ignore
 //! empty segments rather than rely on fixed indices.
 //!
@@ -90,6 +91,9 @@ pub struct ServiceLogEntry {
     pub minute_offset: i64,
     pub region: i64,
     pub count_threshold: i64,
+    /// Percentage of the raster matrix that is filled, `filled / available *
+    /// 100` (`0..=100`), rendered with three decimals.
+    pub fill: f64,
     pub client: Option<String>,
     pub user_agent: Option<String>,
     /// Local grid only: the request centre and data area.
@@ -131,6 +135,7 @@ pub fn global_entry(
     grid_baselength: i64,
     minute_offset: i64,
     count_threshold: i64,
+    fill: f64,
     client: Option<String>,
     user_agent: Option<String>,
 ) -> ServiceLogEntry {
@@ -141,6 +146,7 @@ pub fn global_entry(
         minute_offset,
         region: 0,
         count_threshold,
+        fill,
         client,
         user_agent,
         local: None,
@@ -156,6 +162,7 @@ pub fn region_entry(
     minute_offset: i64,
     region: i64,
     count_threshold: i64,
+    fill: f64,
     client: Option<String>,
     user_agent: Option<String>,
 ) -> ServiceLogEntry {
@@ -166,6 +173,7 @@ pub fn region_entry(
         minute_offset,
         region,
         count_threshold,
+        fill,
         client,
         user_agent,
         local: None,
@@ -180,6 +188,7 @@ pub fn local_entry(
     grid_baselength: i64,
     minute_offset: i64,
     count_threshold: i64,
+    fill: f64,
     client: Option<String>,
     user_agent: Option<String>,
     x: i64,
@@ -193,6 +202,7 @@ pub fn local_entry(
         minute_offset,
         region: -1,
         count_threshold,
+        fill,
         client,
         user_agent,
         local: Some(LocalGridLog { x, y, data_area }),
@@ -235,8 +245,8 @@ pub const CITY_TABS: usize = 4;
 ///
 /// Because the padding is made of tabs, splitting a line on `'\t'` yields
 /// **empty fields** for the padding tabs; the line therefore no longer has a
-/// fixed 13-element index layout.  Consumers must split on tabs and ignore empty
-/// segments (the 13 logical fields are still all present and in order), or use
+/// fixed 14-element index layout.  Consumers must split on tabs and ignore empty
+/// segments (the 14 logical fields are still all present and in order), or use
 /// the column layout for display only.
 pub fn pad_city(city: &str) -> String {
     let length = city.chars().count();
@@ -250,7 +260,7 @@ fn calc_tab_pad_count(length: usize) -> usize {
     CITY_TABS - tab_count
 }
 
-/// Render one entry as the 13-logical-field tab-separated servicelog row.
+/// Render one entry as the 14-logical-field tab-separated servicelog row.
 ///
 /// Field order:
 /// 1. `timestamp` — **UTC wall-clock time `HH:MM:SS.nnn`** (milliseconds);
@@ -266,7 +276,8 @@ fn calc_tab_pad_count(length: usize) -> usize {
 /// 10. `count_threshold`;
 /// 11. `x` — local-grid centre `x`, else `-`;
 /// 12. `y` — local-grid centre `y`, else `-`;
-/// 13. `data_area` — local-grid data area, else `-`.
+/// 13. `data_area` — local-grid data area, else `-`;
+/// 14. `fill` — percentage of filled raster cells (`0..=100`, three decimals).
 ///
 /// The other fields are separated by single tabs; only the `city` field is
 /// tab-padded (see [`CITY_TABS`] / [`pad_city`]).
@@ -330,6 +341,8 @@ pub fn build_row(
         }
         None => row.push_str("\t-\t-\t-"),
     }
+    row.push('\t');
+    row.push_str(&crate::round::py_format_fixed(entry.fill, 3));
     row
 }
 
@@ -735,6 +748,7 @@ mod tests {
             minute_offset: 0,
             region,
             count_threshold: 0,
+            fill: 25.0,
             client: Some("203.0.113.7".into()),
             user_agent: Some("bo-android-190".into()),
             local,
@@ -797,14 +811,14 @@ mod tests {
         // "X" (1 char) stays within the first tab block -> CITY_TABS tabs.
         assert_eq!(
             short,
-            "22:13:20.500\tDE\tX\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-"
+            "22:13:20.500\tDE\tX\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000"
         );
 
         let medium = build_row(&entry(0, None), Some(190), Some("DE"), Some("Berlin"));
         // "Berlin" (6 chars) stays within the first tab block -> CITY_TABS tabs.
         assert_eq!(
             medium,
-            "22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-"
+            "22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000"
         );
 
         let long = build_row(
@@ -816,14 +830,14 @@ mod tests {
         // 17 chars span 2 full tab blocks -> 4 - 2 = 2 tabs.
         assert_eq!(
             long,
-            "22:13:20.500\tDE\tFrankfurt am Main\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-"
+            "22:13:20.500\tDE\tFrankfurt am Main\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000"
         );
 
         // Padding tabs show up as empty segments on a naive split; ignoring
-        // them recovers exactly the 13 logical fields.
+        // them recovers exactly the 14 logical fields.
         for row in [&short, &medium, &long] {
             let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
-            assert_eq!(logical.len(), 13, "row: {row}");
+            assert_eq!(logical.len(), 14, "row: {row}");
         }
     }
 
@@ -836,13 +850,13 @@ mod tests {
         // 27 chars span 3 full tab blocks -> CITY_TABS - 3 = 1 tab.
         assert_eq!(
             row,
-            "22:13:20.500\tRU\tSankt-Peterburg-Nikolaevsk\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-"
+            "22:13:20.500\tRU\tSankt-Peterburg-Nikolaevsk\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000"
         );
         // The name is intact (no truncation).
         assert!(row.contains(long));
         let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
         assert_eq!(logical[2], long);
-        assert_eq!(logical.len(), 13);
+        assert_eq!(logical.len(), 14);
     }
 
     /// `pad_city` drops one tab per full tab block of city text and keeps a
@@ -896,10 +910,10 @@ mod tests {
         // The local x/y/data_area are written after `count_threshold`.
         assert_eq!(
             row,
-            "22:13:20.500\t-\t-\t\t\t\tA\tNone\t0\t60\t10000\t-1\t0\t101\t202\t5"
+            "22:13:20.500\t-\t-\t\t\t\tA\tNone\t0\t60\t10000\t-1\t0\t101\t202\t5\t25.000"
         );
         let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
-        assert_eq!(logical.len(), 13);
+        assert_eq!(logical.len(), 14);
     }
 
     /// A non-Android (or absent) user agent yields platform `-`.
@@ -939,7 +953,7 @@ mod tests {
         assert_eq!(logical[10], "101");
         assert_eq!(logical[11], "202");
         assert_eq!(logical[12], "5");
-        assert_eq!(logical.len(), 13);
+        assert_eq!(logical.len(), 14);
     }
 
     #[test]
@@ -951,7 +965,7 @@ mod tests {
         assert_eq!(logical[7], "2000"); // pre-clamp grid_baselength
         assert_eq!(logical[8], "3"); // region
         assert_eq!(logical[4], "42"); // version
-        assert_eq!(logical.len(), 13);
+        assert_eq!(logical.len(), 14);
     }
 
     #[test]
@@ -1000,7 +1014,7 @@ mod tests {
         let content = std::fs::read_to_string(dir.join("servicelog_2023-11-14")).unwrap();
         assert_eq!(
             content,
-            "22:13:20.500\t-\t-\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\n"
+            "22:13:20.500\t-\t-\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1094,7 +1108,7 @@ mod tests {
         let day2 = std::fs::read_to_string(dir.join("servicelog_2023-11-15")).unwrap();
         assert_eq!(
             day2,
-            "00:00:00.000\t-\t-\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\n"
+            "00:00:00.000\t-\t-\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
