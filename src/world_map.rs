@@ -253,4 +253,70 @@ mod tests {
         assert!(d.ends_with('Z'));
         assert_eq!(d.matches('L').count(), 2);
     }
+
+    /// A malformed asset renders no basemap instead of panicking.
+    #[test]
+    fn parse_land_rings_handles_invalid_json() {
+        assert!(parse_land_rings("not json").is_empty());
+        assert!(parse_land_rings("{}").is_empty(), "no features key");
+        assert!(
+            parse_land_rings(r#"{"features": 42}"#).is_empty(),
+            "features is not an array"
+        );
+    }
+
+    /// Polygon and MultiPolygon exteriors become rings; interior rings, unknown
+    /// geometry types and features without geometry are skipped.
+    #[test]
+    fn parse_land_rings_reads_polygons_and_multipolygons() {
+        let json = r#"{
+          "features": [
+            {"geometry": {"type": "Polygon", "coordinates": [
+               [[0,0],[10,0],[10,10]],
+               [[1,1],[2,2],[3,3]]
+            ]}},
+            {"geometry": {"type": "MultiPolygon", "coordinates": [
+               [[[0,0],[1,0],[1,1]]],
+               [[[5,5],[6,5],[6,6]]]
+            ]}},
+            {"geometry": {"type": "Point", "coordinates": [0,0]}},
+            {"properties": {}}
+          ]
+        }"#;
+        let rings = parse_land_rings(json);
+        // One Polygon exterior + two MultiPolygon exteriors = three rings.
+        assert_eq!(rings.len(), 3, "{rings:?}");
+        for ring in &rings {
+            assert_eq!(ring.first(), ring.last(), "ring closed");
+        }
+    }
+
+    /// Degenerate and malformed rings are dropped rather than emitted.
+    #[test]
+    fn push_ring_drops_degenerate_and_malformed() {
+        let mut rings: Vec<Vec<(f64, f64)>> = Vec::new();
+        // Not an array.
+        push_ring(&mut rings, &serde_json::json!("nope"));
+        // Too few points.
+        push_ring(&mut rings, &serde_json::json!([[0, 0], [1, 1]]));
+        // A non-array point and a point with a missing/non-numeric latitude are
+        // skipped; the three valid points survive and the ring is closed.
+        push_ring(
+            &mut rings,
+            &serde_json::json!([[0, 0], "x", [1, 0], [2, "y"], [3, 3]]),
+        );
+        assert_eq!(rings.len(), 1, "only the three valid points survive");
+        assert_eq!(
+            rings[0],
+            vec![(0.0, 0.0), (1.0, 0.0), (3.0, 3.0), (0.0, 0.0)]
+        );
+
+        // An already-closed ring is not double-closed.
+        let mut closed: Vec<Vec<(f64, f64)>> = Vec::new();
+        push_ring(
+            &mut closed,
+            &serde_json::json!([[0, 0], [1, 0], [1, 1], [0, 0]]),
+        );
+        assert_eq!(closed[0].len(), 4, "no extra closing point");
+    }
 }
