@@ -241,12 +241,12 @@ An empty env value disables it quietly.  When enabled the service logs
 
 ### File format
 
-Rows are appended to `{log_dir}/servicelog_{YYYY-MM-DD}`, 13 logical fields (one
+Rows are appended to `{log_dir}/servicelog_{YYYY-MM-DD}`, 14 logical fields (one
 line per request).  Tabs are shown as `\t` here; the file contains real tab
 characters:
 
 ```text
-22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t3\t0\t-\t-\t-
+22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t3\t0\t-\t-\t-\t3.420
 ```
 
 **City padding (tabs).** The `city` field is padded with **tab characters**, not
@@ -259,8 +259,8 @@ following columns further right.
 
 > **Consequence:** because the padding is made of tabs, splitting a line on
 > `'\t'` yields **empty fields**.  The line therefore no longer has a fixed
-> 13-element index layout.  Consumers must split on tabs and **ignore empty
-> segments** (the 13 logical fields are still all present and in order), or treat
+> 14-element index layout.  Consumers must split on tabs and **ignore empty
+> segments** (the 14 logical fields are still all present and in order), or treat
 > the column positions as display-only.
 
 | # | Logical field | Notes |
@@ -278,6 +278,7 @@ following columns further right.
 | 11 | `x` | local-grid centre `x`, else `-` |
 | 12 | `y` | local-grid centre `y`, else `-` |
 | 13 | `data_area` | local-grid data area, else `-` |
+| 14 | `fill` | percentage of filled raster cells (`filled / (xc * yc) * 100`), three decimals |
 
 The raw client IP is never written.  For the global/region flavours fields
 11–13 are `-`; a local request carries its `x`/`y`/`data_area` values and is
