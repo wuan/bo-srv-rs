@@ -284,24 +284,22 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
          (minute_length &gt; 10): {interactive}</figcaption></figure>\n"
     );
     html.push_str("  </div>\n");
-    // Shade legend: the square ramp runs from one query to the densest tile.
+    // Shade legend: each square's shade is its query count relative to the
+    // map's densest cell (eight equal buckets, fewest -> most).
     let _ = write!(
         html,
         "  <p class=\"legend\">\
          <span><span class=\"swatch\" style=\"background:{}\"></span>water</span>\
          <span><span class=\"swatch\" style=\"background:{}\"></span>land</span>\
-         <span>queries per square:</span>",
+         <span>queries per square (fewest&rarr;most):</span>",
         crate::map::svg::WATER_FILL,
         crate::map::svg::LAND_FILL,
     );
-    for (index, (r, g, b)) in crate::map::svg::SQUARE_RAMP.iter().enumerate() {
+    for (r, g, b) in crate::map::svg::SQUARE_RAMP.iter() {
         let _ = write!(
             html,
             "<span class=\"swatch\" style=\"background:#{r:02x}{g:02x}{b:02x}\"></span>"
         );
-        if index + 1 == crate::map::svg::SQUARE_RAMP.len() {
-            html.push_str("<span>more</span>");
-        }
     }
     html.push_str("</p>\n");
 

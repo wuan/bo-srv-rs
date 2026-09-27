@@ -113,30 +113,28 @@ const GRATICULE_STROKE: &str = "#dde1e5";
 
 /// The `(R, G, B)` colour ramp for the shaded squares, light to dense.
 ///
-/// A square's shade is keyed to its **absolute** query count (see
-/// [`square_colour`]) so the two separate maps are directly comparable and a
-/// tile with a single query is never rendered as a hot spot.
+/// A square's shade is chosen from its count **relative to the map's densest
+/// cell**: the range `1..=max` is split into eight equal buckets, so a map whose
+/// maximum is `80` paints counts `1..=10` in shade 1, `11..=20` in shade 2, ...,
+/// `71..=80` in shade 8.  Cells with a count of `0` are never drawn.
 ///
 /// The eight steps run a sequential yellow -> orange -> red -> dark-red "heat"
 /// progression (ColorBrewer `YlOrRd`-inspired but ending in a deep red rather
 /// than a magenta-pink, and with the pale end kept just saturated enough to stay
 /// distinct over the light basemap).
 pub(crate) const SQUARE_RAMP: [(u8, u8, u8); 8] = [
-    (255, 242, 168), // pale yellow   (1 query)
+    (255, 242, 168), // pale yellow   (lowest bucket)
     (255, 221, 82),  // yellow
     (255, 190, 26),  // amber
     (250, 144, 16),  // orange
     (239, 98, 18),   // dark orange
     (221, 58, 22),   // red-orange
     (191, 26, 22),   // red
-    (143, 13, 18),   // deep red      (>= SQUARE_RAMP_MAX)
+    (143, 13, 18),   // deep red      (the densest cell)
 ];
 
-/// The per-tile query count that saturates the ramp: `1` maps to the palest
-/// shade and `>= SQUARE_RAMP_MAX` to the deepest.  The eight shades split
-/// `1..=SQUARE_RAMP_MAX` roughly geometrically (each step ~1.5x the previous
-/// count) so low counts stay visually distinct over the light basemap.
-const SQUARE_RAMP_MAX: u64 = 32;
+/// The number of shades in [`SQUARE_RAMP`].
+const SQUARE_SHADES: u64 = 8;
 
 /// The SVG `fill-opacity` of the shaded cells.
 ///
@@ -145,26 +143,24 @@ const SQUARE_RAMP_MAX: u64 = 32;
 /// so the land outline still shows through.
 pub(crate) const SQUARE_FILL_OPACITY: &str = "0.7";
 
-/// Pick a ramp colour for an absolute `count`.
+/// Pick a ramp colour for a cell `count` given the map's densest cell `max`.
 ///
-/// The count is split into [`SQUARE_RAMP`]'s eight shades with a roughly
-/// geometric scale (`1`, `2`, `3`, `4-5`, `6-8`, `9-13`, `14-21`, `>=22`) and
-/// capped at [`SQUARE_RAMP_MAX`].  This is deliberately absolute rather than
-/// normalised against the map's maximum: the same tile count reads the same on
-/// both the background and interactive maps, and a lone query on an otherwise
-/// empty map is not painted the densest shade.  A `count` of `0` is never drawn,
-/// but maps to the palest shade defensively.
-fn square_colour(count: u64) -> String {
-    let count = count.min(SQUARE_RAMP_MAX);
-    let bucket = match count {
-        0 | 1 => 0,
-        2 => 1,
-        3 => 2,
-        4..=5 => 3,
-        6..=8 => 4,
-        9..=13 => 5,
-        14..=21 => 6,
-        _ => 7,
+/// `1..=max` is divided into [`SQUARE_SHADES`] **equal** buckets and the shade
+/// index is `ceil(count * 8 / max) - 1`, so all eight shades span the observed
+/// range (e.g. `max=80`: `1..=10` -> shade 1, ..., `71..=80` -> shade 8).  The
+/// densest cell always gets the deepest shade; a `count` of `0` is never drawn.
+///
+/// This makes the shading **relative to the map's own maximum** so the full
+/// ramp is always used across each map, rather than an absolute count scale
+/// that saturates well below the observed maximum.
+fn square_colour(count: u64, max: u64) -> String {
+    debug_assert!(count > 0, "zero-count cells are not drawn");
+    let bucket = if count >= max {
+        SQUARE_RAMP.len() - 1
+    } else {
+        // `ceil(count * 8 / max) - 1`, clamped to the ramp.
+        let scaled = (count * SQUARE_SHADES).div_ceil(max.max(1));
+        (scaled.saturating_sub(1) as usize).min(SQUARE_RAMP.len() - 1)
     };
     let (r, g, b) = SQUARE_RAMP[bucket];
     format!("#{r:02x}{g:02x}{b:02x}")
@@ -181,12 +177,14 @@ fn square_colour(count: u64) -> String {
 /// overlapping queries simply accumulate into the same cells.
 ///
 /// Each non-empty cell becomes a semi-transparent rectangle shaded by its count
-/// (see [`square_colour`]) so the basemap stays visible underneath.  The
-/// south-up raster rows are flipped for the north-up SVG.  `label` names the
-/// group for the SVG `<title>`.
+/// relative to the map's densest cell (see [`square_colour`]) so the basemap
+/// stays visible underneath.  The south-up raster rows are flipped for the
+/// north-up SVG.  `label` names the group for the SVG `<title>`.
 fn raster_layer(raster: &AsciiWorldMap, width: f64, height: f64, label: &str) -> String {
     let cell_w = width / WORLD_COLS as f64;
     let cell_h = height / WORLD_ROWS as f64;
+    // The densest cell anchors the eight shades (1..=max -> eight equal buckets).
+    let max = raster.maximum();
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -204,7 +202,7 @@ fn raster_layer(raster: &AsciiWorldMap, width: f64, height: f64, label: &str) ->
             }
             let x = col as f64 * cell_w;
             let y = north_up_row as f64 * cell_h;
-            let fill = square_colour(count);
+            let fill = square_colour(count, max);
             let _ = writeln!(
                 out,
                 "  <rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{cell_w:.2}\" height=\"{cell_h:.2}\" \
@@ -365,41 +363,78 @@ mod tests {
         assert_eq!(raster_rects(&offline), 4, "{offline}");
     }
 
-    /// The square shade scales with the absolute raster-cell count, and all eight
-    /// ramp shades are reachable.
+    /// The square shade uses eight **equal** buckets spanning `1..=max` (the
+    /// densest cell of the map), so all eight shades are reachable and equidistant.
     #[test]
     fn square_colour_is_an_eight_shade_ramp() {
         // The ramp has eight, perceptually separated shades.
         assert_eq!(SQUARE_RAMP.len(), 8);
-
-        // A lone query is the palest shade; the deepest shade is reached at (and
-        // beyond) SQUARE_RAMP_MAX.
-        assert_eq!(square_colour(1), "#fff2a8");
-        assert_eq!(square_colour(SQUARE_RAMP_MAX), "#8f0d12");
-        assert_eq!(square_colour(SQUARE_RAMP_MAX + 100), "#8f0d12");
-
-        // Zero (only reachable for a defensive empty tile) is the palest shade too.
-        assert_eq!(square_colour(0), "#fff2a8");
-
-        // Every shade in the ramp is produced by some count in 1..=SQUARE_RAMP_MAX,
-        // and the sequence is strictly darkening (no two adjacent counts collapse).
-        let mut shades: Vec<String> = Vec::new();
-        for count in 1..=SQUARE_RAMP_MAX {
-            let colour = square_colour(count);
-            if shades.last() != Some(&colour) {
-                shades.push(colour);
-            }
-        }
-        assert_eq!(
-            shades.len(),
-            8,
-            "all eight shades must be reachable: {shades:?}"
-        );
-        let expected: Vec<String> = SQUARE_RAMP
+        let ramp_hex: Vec<String> = SQUARE_RAMP
             .iter()
             .map(|(r, g, b)| format!("#{r:02x}{g:02x}{b:02x}"))
             .collect();
-        assert_eq!(shades, expected);
+
+        // The densest cell is always the deepest shade; a single-count cell on a
+        // large map is the palest.
+        assert_eq!(square_colour(80, 80), ramp_hex[7]);
+        assert_eq!(square_colour(1, 80), ramp_hex[0]);
+        assert_eq!(square_colour(1, 1_000_000), ramp_hex[0]);
+
+        // max = 80 -> eight equal 10-wide buckets: 1..=10 -> shade 1, ..., 71..=80
+        // -> shade 8.  This is the user-visible contract.
+        let expected = [
+            (1, 0),
+            (5, 0),
+            (10, 0),
+            (11, 1),
+            (20, 1),
+            (21, 2),
+            (30, 2),
+            (31, 3),
+            (40, 3),
+            (41, 4),
+            (50, 4),
+            (51, 5),
+            (60, 5),
+            (61, 6),
+            (70, 6),
+            (71, 7),
+            (75, 7),
+            (80, 7),
+        ];
+        for (count, bucket) in expected {
+            assert_eq!(
+                square_colour(count, 80),
+                ramp_hex[bucket],
+                "count {count} with max 80 -> shade {}",
+                bucket + 1
+            );
+        }
+
+        // With enough distinct counts every shade is reachable on a max-80 map.
+        let reachable: std::collections::BTreeSet<String> =
+            (1..=80).map(|c| square_colour(c, 80)).collect();
+        assert_eq!(
+            reachable.len(),
+            8,
+            "all eight shades reachable: {reachable:?}"
+        );
+    }
+
+    /// A small maximum still spreads its counts across the ramp and always puts the
+    /// densest cell in the deepest shade.
+    #[test]
+    fn square_colour_handles_small_maxima() {
+        let deepest = format!(
+            "#{:02x}{:02x}{:02x}",
+            SQUARE_RAMP[7].0, SQUARE_RAMP[7].1, SQUARE_RAMP[7].2
+        );
+        assert_eq!(square_colour(1, 1), deepest);
+        assert_eq!(square_colour(5, 5), deepest);
+        // The counts 1..=5 on a max-5 map spread over several (not just one) shades.
+        let shades: std::collections::BTreeSet<String> =
+            (1..=5).map(|c| square_colour(c, 5)).collect();
+        assert!(shades.len() >= 3, "small maxima spread: {shades:?}");
     }
 
     /// A `data_area=10` query fills a 2x2 block of the 5-degree raster, so its
