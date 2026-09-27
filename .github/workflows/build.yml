@@ -116,10 +116,24 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-debug-
 
+      # cargo-llvm-cov instruments the dependency tree and compiles it into
+      # `target/llvm-cov-target`, which the `target` cache above does not cover.
+      # Without its own cache every analysis run recompiles all instrumented
+      # dependencies from scratch.
+      - name: Cache cargo build (llvm-cov)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/llvm-cov-target
+          key: ${{ runner.os }}-cargo-build-llvm-cov-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-llvm-cov-
+
       # See the `build` job: rebuild this workspace crate so the cache can
       # never keep an older embedded `assets/world-110m-land.geojson`.
       - name: Drop cached workspace crate
-        run: cargo clean -p blitzortung-srv
+        run: |
+          cargo clean -p blitzortung-srv
+          cargo clean -p blitzortung-srv --target-dir target/llvm-cov-target
 
       # The llvm-tools component backs cargo-llvm-cov's instrumentation.
       - name: Install llvm-tools
@@ -132,9 +146,10 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      # cargo-llvm-cov instruments the normal `target` profile and reuses the
-      # debug cache restored above, unlike `cargo tarpaulin` which drove a
-      # separate compilation.  The PostGIS integration suite is included via
+      # cargo-llvm-cov instruments the dependency tree into its own
+      # `target/llvm-cov-target` directory, which the `llvm-cov` cache restored
+      # above keeps warm, unlike `cargo tarpaulin` which drove a separate
+      # compilation.  The PostGIS integration suite is included via
       # `--features db-integration` so it lands in the Sonar report.
       # `--output-path cobertura.xml` writes the report where
       # sonar-project.properties (`sonar.rust.cobertura.reportPaths`) expects it.
