@@ -20,13 +20,13 @@ The source is noted here purely for provenance.
 ## Processing
 
 The asset is produced from the source above with Douglas-Peucker simplification
-at ~0.5 degrees, quantizing coordinates to 0.1 degrees, and covering the full
+at ~0.1 degrees, quantizing coordinates to 0.02 degrees, and covering the full
 latitude range `[-90, 90]` (Antarctica reaches the south pole).  Rings that cross
 the antimeridian are split so no SVG path draws a horizontal streak across the
 map.
 
-Result: ~126 rings, ~1800 points, ~34 KB — coarse enough to embed but still
-recognizable at 360x180 SVG and the 72x36 ASCII raster.
+Result: ~128 rings, ~4200 points, ~72 KB — detailed enough to embed while still
+self-contained, and recognizable at 360x180 SVG and the 72x36 ASCII raster.
 
 The landmass is **only** an orientation aid; it is not a survey-accurate
 basemap.

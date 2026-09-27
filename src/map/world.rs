@@ -22,17 +22,17 @@
 //! the source is only noted here for provenance.  The `assets/world-110m-land.geojson`
 //! asset was produced from the official GeoJSON release
 //! (`nvkelso/natural-earth-vector`, `geojson/ne_110m_land.geojson`) by applying
-//! Douglas-Peucker simplification at ~0.5 degrees and quantizing the coordinates
-//! to 0.1 degrees; latitudes span the full `[-90, 90]` range (Antarctica reaches
+//! Douglas-Peucker simplification at ~0.1 degrees and quantizing the coordinates
+//! to 0.02 degrees; latitudes span the full `[-90, 90]` range (Antarctica reaches
 //! the south pole) and rings crossing the antimeridian were split so no path
 //! draws a horizontal streak across the map.
 //!
 //! ## Accuracy
 //!
-//! The outlines are intentionally coarse (about 1800 points in total) and are
-//! **only** meant as an orientation aid, not a survey-accurate basemap.  The
-//! local-query overlay uses the same projection, so a marker sits in the right
-//! part of the right continent.
+//! The outlines are fine (about 4200 points in total) and are **only** meant as
+//! an orientation aid, not a survey-accurate basemap.  The local-query overlay
+//! uses the same projection, so a marker sits in the right part of the right
+//! continent.
 
 use std::fmt::Write as _;
 use std::sync::OnceLock;
