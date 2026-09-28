@@ -429,18 +429,6 @@ impl Envelope {
         (self.x_max - self.x_min).abs()
     }
 
-    /// The envelope as a WKB LinearRing, matching
-    /// `shapely.geometry.LinearRing([(xmin,ymin),(xmin,ymax),(xmax,ymax),
-    /// (xmax,ymin)])`.
-    pub fn as_wkb_linear_ring(&self) -> Vec<u8> {
-        crate::wkb::linear_ring(&[
-            [self.x_min, self.y_min],
-            [self.x_min, self.y_max],
-            [self.x_max, self.y_max],
-            [self.x_max, self.y_min],
-        ])
-    }
-
     /// The envelope as a WKB Polygon, matching
     /// `shapely.geometry.Polygon([(xmin,ymin),(xmin,ymax),(xmax,ymax),
     /// (xmax,ymin)])` (`geom.Envelope.env`).
