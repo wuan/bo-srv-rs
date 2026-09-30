@@ -28,6 +28,9 @@ use blitzortung_srv::postgres::PostgresExecutor;
 /// Docker entrypoint runs everything in `/docker-entrypoint-initdb.d`).
 const SCHEMA_SQL: &[u8] = include_bytes!("../schema/strikes.sql");
 
+/// Cluster table schema, applied right after [`SCHEMA_SQL`].
+const CLUSTER_SCHEMA_SQL: &[u8] = include_bytes!("../schema/strike_clusters.sql");
+
 const DEFAULT_IMAGE: &str = "imresamu/postgis:18-3.6";
 const DB_NAME: &str = "blitzortung";
 const DB_USER: &str = "blitzortung";
@@ -54,11 +57,13 @@ impl TestDb {
             .map(|(name, tag)| (name.to_string(), tag.to_string()))
             .unwrap_or((image, "latest".to_string()));
 
+        let mut init_sql = SCHEMA_SQL.to_vec();
+        init_sql.extend_from_slice(CLUSTER_SCHEMA_SQL);
         let container = Postgres::default()
             .with_user(DB_USER)
             .with_password(DB_PASSWORD)
             .with_db_name(DB_NAME)
-            .with_init_sql(SCHEMA_SQL.to_vec())
+            .with_init_sql(init_sql)
             .with_name(name)
             .with_tag(tag)
             .start()
@@ -123,6 +128,13 @@ impl TestDb {
         runtime
             .block_on(executor.execute("TRUNCATE strikes RESTART IDENTITY", &[]))
             .expect("truncate strikes");
+    }
+
+    /// Remove every cluster row and restart the `bigserial` sequence.
+    pub fn truncate_clusters(&self, runtime: &tokio::runtime::Runtime, executor: &dyn QueryExecutor) {
+        runtime
+            .block_on(executor.execute("TRUNCATE strike_clusters RESTART IDENTITY", &[]))
+            .expect("truncate strike_clusters");
     }
 }
 

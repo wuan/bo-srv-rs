@@ -696,6 +696,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn strike_cluster_display() {
+        let ts = Timestamp::new(Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap(), 0);
+        let cluster = StrikeCluster {
+            id: 1234,
+            timestamp: ts,
+            interval_seconds: 600,
+            shape: Some(vec![(11.0, 51.0), (11.1, 51.0), (11.1, 51.1)]),
+            strike_count: 4231,
+            area: Some(0.8),
+        };
+        assert_eq!(
+            cluster.to_string(),
+            "StrikeCluster(1234, 2025-01-01 12:00:00.000000000, 600, \
+             {'type': 'LineString', 'coordinates': [[11, 51], [11.1, 51], [11.1, 51.1]]}, 4231, 0.8)"
+        );
+    }
+
     fn example_grid() -> Grid {
         Grid::new(-5.0, 4.0, -3.0, 2.0, 0.5, 1.25)
     }

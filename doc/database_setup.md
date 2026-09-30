@@ -230,6 +230,14 @@ Observability, currently all off: `shared_preload_libraries =
 - **Done:** `strikes` is now declaratively RANGE-partitioned by `"timestamp"`
   (see [Partitioning the `strikes` table](#partitioning-the-strikes-table)), so
   retention is an O(1) partition `DROP` and autovacuum/analyze run per day.
+- **New:** the `strike_clusters` table and its indexes are ported for the
+  cluster integration (`src/db.rs` `StrikeClusterDb`, the
+  `query::cluster_select_query` builder and the `data::StrikeCluster` model).
+  The canonical definitions live in `tests/schema/strike_clusters.sql`, mirroring
+  the class docstring in the Python `blitzortung/db/table.py` (`StrikeCluster`).
+  A cluster is a buffered convex hull stored as a `GEOGRAPHY(LineString)`;
+  `select` returns the clusters for a timestamp set and can additionally filter
+  by a query geometry (`ST_Intersects` on `geog`).
 
 ## Partitioning the `strikes` table
 

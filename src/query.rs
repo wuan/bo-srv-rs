@@ -737,6 +737,161 @@ pub fn histogram_query(
     q
 }
 
+/// A fully-rendered cluster query (positional `$1..$N` SQL plus parameters in
+/// order), used by [`StrikeClusterDb::select`](crate::db::StrikeClusterDb::select).
+///
+/// The Python `StrikeCluster.select_query` builds an `IN (timestamps...)`
+/// condition whose element count varies at runtime; the generic [`Query`]
+/// builder maps one parameter per `%(name)s`, which cannot express that, so
+/// the timestamp list is expanded into explicit positional placeholders here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClusterQuery {
+    sql: String,
+    parameters: Vec<Param>,
+}
+
+impl ClusterQuery {
+    /// The SQL text with `$1..$N` placeholders for tokio-postgres.
+    pub fn to_postgres(&self) -> &str {
+        &self.sql
+    }
+
+    /// The parameters in `$1..$N` order.
+    pub fn parameters(&self) -> &[Param] {
+        &self.parameters
+    }
+}
+
+/// The timestamps a cluster query selects on
+/// (`query_builder.StrikeCluster.get_timestamps`).
+///
+/// Starting from `end_time`, step back by `interval_offset` while the current
+/// time is at or after `start_time + interval_duration`, yielding newest
+/// first.  `interval_offset` defaults to the interval duration when it is
+/// `None` or non-positive, matching the Python guard.
+pub fn cluster_timestamps(
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
+    interval_duration: chrono::Duration,
+    interval_offset: Option<chrono::Duration>,
+) -> Vec<DateTime<Utc>> {
+    let interval_offset = match interval_offset {
+        Some(offset) if offset.num_seconds() > 0 => offset,
+        _ => interval_duration,
+    };
+    let final_time = start_time + interval_duration;
+    let mut timestamps = Vec::new();
+    let mut current_time = end_time;
+    while current_time >= final_time {
+        timestamps.push(current_time);
+        if interval_offset.num_nanoseconds().unwrap_or(0) == 0 {
+            break;
+        }
+        current_time -= interval_offset;
+    }
+    timestamps
+}
+
+/// `blitzortung.db.query_builder.StrikeCluster.select_query`: select
+/// `id`, `"timestamp"`, the shape geometry and `strike_count` for the
+/// timestamp set belonging to `interval_duration`, optionally restricted to
+/// clusters whose `geog` intersects `area`.
+///
+/// `end_time` is the newest timestamp; earlier timestamps step back by
+/// `interval_offset` (defaulting to `interval_duration`) for `interval_count`
+/// slots.  When `area` is given, the same bounding-box pre-filter and
+/// `ST_Intersects` test used by the strike select is applied to the cluster
+/// geography, so only clusters within the geometry are returned.
+#[allow(clippy::too_many_arguments)]
+pub fn cluster_select_query(
+    timestamp: DateTime<Utc>,
+    interval_duration: chrono::Duration,
+    interval_count: i64,
+    interval_offset: Option<chrono::Duration>,
+    srid: i64,
+    area: Option<&Area>,
+) -> ClusterQuery {
+    let interval_offset = match interval_offset {
+        Some(offset) if offset.num_seconds() > 0 => offset,
+        _ => interval_duration,
+    };
+    let start_time = timestamp - interval_offset * (interval_count as i32 - 1) - interval_duration;
+    let timestamps = cluster_timestamps(
+        start_time,
+        timestamp,
+        interval_duration,
+        Some(interval_offset),
+    );
+
+    let default_srid = srid == DEFAULT_SRID;
+    let (srid_expr, geog) = if default_srid {
+        (DEFAULT_SRID.to_string(), "geog".to_string())
+    } else {
+        let srid_expr = format!("${}", 1);
+        (
+            srid_expr,
+            format!("ST_Transform(geog::geometry, ${})", 1),
+        )
+    };
+
+    let mut sql = String::from("SELECT id, \"timestamp\", ");
+    sql.push_str(&format!(
+        "ST_AsBinary(ST_Transform(geog::geometry, {srid_expr})) as geom, "
+    ));
+    sql.push_str("strike_count FROM strike_clusters WHERE ");
+
+    let mut parameters: Vec<Param> = Vec::new();
+    if !default_srid {
+        parameters.push(Param::Int(srid));
+    }
+
+    // `"timestamp" IN ($n::timestamptz, ...)` with one placeholder per
+    // timestamp.  The explicit cast keeps PostgreSQL from inferring the wrong
+    // type for the placeholder (same rationale as the strike queries).
+    let mut placeholders = Vec::with_capacity(timestamps.len());
+    for ts in &timestamps {
+        parameters.push(Param::Timestamp(*ts));
+        placeholders.push(format!("${}::timestamptz", parameters.len()));
+    }
+    if placeholders.is_empty() {
+        // No timestamps means no cluster can match; keep the SQL valid.
+        sql.push_str("false");
+    } else {
+        sql.push_str(&format!("\"timestamp\" in ({})", placeholders.join(", ")));
+    }
+
+    parameters.push(Param::Int(interval_duration.num_seconds()));
+    sql.push_str(&format!(
+        " AND interval_seconds=${}::smallint",
+        parameters.len()
+    ));
+
+    if let Some(area) = area {
+        // Bounding-box pre-filter (`geog` for the default SRID), then the full
+        // `ST_Intersects` test when the geometry is not its own envelope.
+        parameters.push(Param::Bytea(area.envelope_wkb.clone()));
+        let envelope_param = parameters.len();
+        let envelope = if default_srid {
+            format!("ST_GeomFromWKB(${envelope_param}, {DEFAULT_SRID})")
+        } else {
+            format!("ST_GeomFromWKB(${envelope_param}, $1)")
+        };
+        sql.push_str(&format!(" AND {envelope} && {geog}"));
+        if let Some(geometry) = &area.geometry_wkb {
+            parameters.push(Param::Bytea(geometry.clone()));
+            let geometry_param = parameters.len();
+            let poly = if default_srid {
+                format!("ST_GeomFromWKB(${geometry_param}, {DEFAULT_SRID})")
+            } else {
+                format!("ST_GeomFromWKB(${geometry_param}, $1)")
+            };
+            sql.push_str(&format!(" AND ST_Intersects({poly}, {geog})"));
+        }
+    }
+
+    ClusterQuery { sql, parameters }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1204,5 +1359,114 @@ mod tests {
         assert_eq!(interval.duration_seconds(), 86400);
         let interval = TimeInterval::new(utc(2020, 1, 1, 0, 0, 0), utc(2020, 1, 1, 23, 59, 0));
         assert_eq!(interval.duration_seconds(), 86340);
+    }
+
+    #[test]
+    fn cluster_timestamps_steps_back_by_offset() {
+        let end = utc(2020, 1, 1, 12, 0, 0);
+        let duration = chrono::Duration::minutes(10);
+        let timestamps = cluster_timestamps(
+            end - duration * 5 - duration,
+            end,
+            duration,
+            Some(duration),
+        );
+        assert_eq!(
+            timestamps,
+            vec![
+                utc(2020, 1, 1, 12, 0, 0),
+                utc(2020, 1, 1, 11, 50, 0),
+                utc(2020, 1, 1, 11, 40, 0),
+                utc(2020, 1, 1, 11, 30, 0),
+                utc(2020, 1, 1, 11, 20, 0),
+                utc(2020, 1, 1, 11, 10, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn cluster_timestamps_defaults_offset_to_duration() {
+        let end = utc(2020, 1, 1, 12, 0, 0);
+        let duration = chrono::Duration::minutes(10);
+        // offset None and a non-positive offset both fall back to duration.
+        let none = cluster_timestamps(
+            end - duration * 3,
+            end,
+            duration,
+            None,
+        );
+        let zero = cluster_timestamps(
+            end - duration * 3,
+            end,
+            duration,
+            Some(chrono::Duration::zero()),
+        );
+        assert_eq!(none, zero);
+        assert_eq!(none.len(), 3);
+    }
+
+    #[test]
+    fn cluster_select_query_matches_python_shape() {
+        let end = utc(2020, 1, 1, 12, 0, 0);
+        let duration = chrono::Duration::minutes(10);
+        let query = cluster_select_query(end, duration, 6, Some(duration), 4326, None);
+        assert_eq!(
+            query.to_postgres(),
+            "SELECT id, \"timestamp\", ST_AsBinary(ST_Transform(geog::geometry, 4326)) as geom, \
+             strike_count FROM strike_clusters WHERE \"timestamp\" in \
+             ($1::timestamptz, $2::timestamptz, $3::timestamptz, $4::timestamptz, \
+             $5::timestamptz, $6::timestamptz) \
+             AND interval_seconds=$7::smallint"
+        );
+        assert_eq!(query.parameters().len(), 7);
+        assert!(matches!(query.parameters()[0], Param::Timestamp(_)));
+        assert_eq!(query.parameters()[6], Param::Int(600));
+    }
+
+    #[test]
+    fn cluster_select_query_non_default_srid_uses_srid_param() {
+        let end = utc(2020, 1, 1, 12, 0, 0);
+        let duration = chrono::Duration::minutes(10);
+        let query = cluster_select_query(end, duration, 1, None, 3857, None);
+        assert!(query
+            .to_postgres()
+            .contains("ST_AsBinary(ST_Transform(geog::geometry, $1)) as geom"));
+        assert!(query.to_postgres().contains("\"timestamp\" in ($2::timestamptz)"));
+        assert_eq!(query.parameters()[0], Param::Int(3857));
+    }
+
+    #[test]
+    fn cluster_select_query_with_area_adds_geometry_filters() {
+        let end = utc(2020, 1, 1, 12, 0, 0);
+        let duration = chrono::Duration::minutes(10);
+        let area = Area::from_polygon(&[vec![
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 2.0],
+            [0.0, 0.0],
+        ]])
+        .unwrap();
+        let query = cluster_select_query(end, duration, 1, None, 4326, Some(&area));
+        let sql = query.to_postgres();
+        assert!(sql.contains("ST_GeomFromWKB($3, 4326) && geog"));
+        assert!(sql.contains("ST_Intersects(ST_GeomFromWKB($4, 4326), geog)"));
+        let bytea = query
+            .parameters()
+            .iter()
+            .filter(|p| matches!(p, Param::Bytea(_)))
+            .count();
+        assert_eq!(bytea, 2);
+    }
+
+    #[test]
+    fn cluster_select_query_area_matching_envelope_skips_intersects() {
+        let end = utc(2020, 1, 1, 12, 0, 0);
+        let duration = chrono::Duration::minutes(10);
+        let area = Area::from_envelope(&Envelope::new(10.0, 12.0, 50.0, 52.0));
+        let query = cluster_select_query(end, duration, 1, None, 4326, Some(&area));
+        let sql = query.to_postgres();
+        assert!(sql.contains("&& geog"));
+        assert!(!sql.contains("ST_Intersects"));
     }
 }
