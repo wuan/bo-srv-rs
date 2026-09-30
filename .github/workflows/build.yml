@@ -230,6 +230,7 @@ jobs:
           name: bo-srv-rs
           path: |
             target/release/bo-webservice
+            target/release/bo-cluster
             target/release/bo-db
             target/release/bo-import
             target/release/bo-update
