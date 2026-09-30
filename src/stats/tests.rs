@@ -386,7 +386,8 @@ fn html_report_uses_column_pairs_beyond_ten_entries() {
     };
     let html = render_html("2023-11-14", &stats);
 
-    // 12 countries -> two column pairs and all 12 labels are present.
+    // 12 countries -> two column pairs and all 12 labels are present; the
+    // table spreads over the full report width.
     let countries = html
         .split("<h2>Top countries</h2>")
         .nth(1)
@@ -394,6 +395,8 @@ fn html_report_uses_column_pairs_beyond_ten_entries() {
         .split("</table>")
         .next()
         .unwrap();
+    assert!(countries.contains("<table class=\"wide\">"), "{countries}");
+    assert!(html.contains("table.wide { max-width: none; }"), "{html}");
     assert_eq!(
         countries.matches("<th class=\"num\">requests</th>").count(),
         2,
@@ -434,6 +437,8 @@ fn html_report_uses_column_pairs_beyond_ten_entries() {
         1,
         "{cities}"
     );
+    // A single pair keeps the narrow table.
+    assert!(!cities.contains("class=\"wide\""), "{cities}");
 }
 
 /// A long list gets one label/count column pair per chunk of ten, so

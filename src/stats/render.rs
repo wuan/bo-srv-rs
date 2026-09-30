@@ -170,9 +170,15 @@ fn top_table(title: &str, entries: &[TopEntry]) -> String {
     }
 
     // One label/count column pair per chunk of up to `COLUMN_PAIR_LIMIT`
-    // entries (a single pair for the ordinary top-10 lists).
+    // entries (a single pair for the ordinary top-10 lists).  More than one
+    // pair spreads the table over the full report width.
     let chunks: Vec<&[TopEntry]> = entries.chunks(COLUMN_PAIR_LIMIT).collect();
-    table.push_str("  <table>\n    <thead><tr>");
+    let class = if chunks.len() > 1 {
+        " class=\"wide\""
+    } else {
+        ""
+    };
+    let _ = write!(table, "  <table{class}>\n    <thead><tr>");
     for _ in &chunks {
         let _ = write!(
             table,
@@ -265,6 +271,7 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
          \x20   .maps figure { flex: 1 1 26rem; margin: 0; }\n\
          \x20   .maps figcaption { font-size: .85rem; color: #5f707d; margin: .4rem 0 0; }\n\
          \x20   table { border-collapse: collapse; width: 100%; max-width: 34rem; }\n\
+         \x20   table.wide { max-width: none; }\n\
          \x20   th, td { text-align: left; padding: .3rem .6rem; border-bottom: 1px solid #e7eaee; }\n\
          \x20   th { color: #5f707d; font-weight: 600; font-size: .8rem; }\n\
          \x20   td.num { text-align: right; font-variant-numeric: tabular-nums; width: 6rem; }\n\
