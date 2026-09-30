@@ -135,21 +135,71 @@ pub(crate) fn escape_html(value: &str) -> String {
     out
 }
 
-/// Render a "top N" list as HTML table rows (`<tr><td>label</td><td>count</td>`).
-fn top_table_rows(entries: &[TopEntry]) -> String {
+/// The number of entries a single label/count column pair holds before the
+/// top-list table switches to multiple side-by-side column pairs.
+const COLUMN_PAIR_LIMIT: usize = 10;
+
+/// The two `<td>` cells (label and count) of one top entry.
+fn top_entry_cells(entry: &TopEntry) -> String {
+    format!(
+        "<td>{}</td><td class=\"num\">{}</td>",
+        escape_html(&entry.label),
+        entry.count
+    )
+}
+
+/// Render a "top N" list as a complete HTML `<table>`.
+///
+/// Up to [`COLUMN_PAIR_LIMIT`] entries use a single label/count column pair
+/// (the layout for the ordinary top-10 lists).  With more than that the table
+/// switches to **side-by-side column pairs** — one label/count pair per chunk
+/// of [`COLUMN_PAIR_LIMIT`] entries — so each pair holds up to ten entries
+/// (`--top 40` yields four pairs).
+fn top_table(title: &str, entries: &[TopEntry]) -> String {
+    let mut table = String::new();
     if entries.is_empty() {
-        return "      <tr><td colspan=\"2\" class=\"empty\">(none)</td></tr>\n".to_string();
+        let _ = write!(
+            table,
+            "  <table>\n    <thead><tr><th>{}</th>\
+             <th class=\"num\">requests</th></tr></thead>\n    <tbody>\n\
+             \x20     <tr><td colspan=\"2\" class=\"empty\">(none)</td></tr>\n\
+             \x20   </tbody>\n  </table>\n",
+            escape_html(title)
+        );
+        return table;
     }
-    let mut rows = String::new();
-    for entry in entries {
-        let _ = writeln!(
-            rows,
-            "      <tr><td>{}</td><td class=\"num\">{}</td></tr>",
-            escape_html(&entry.label),
-            entry.count
+
+    // One label/count column pair per chunk of up to `COLUMN_PAIR_LIMIT`
+    // entries (a single pair for the ordinary top-10 lists).  More than one
+    // pair spreads the table over the full report width.
+    let chunks: Vec<&[TopEntry]> = entries.chunks(COLUMN_PAIR_LIMIT).collect();
+    let class = if chunks.len() > 1 {
+        " class=\"wide\""
+    } else {
+        ""
+    };
+    let _ = write!(table, "  <table{class}>\n    <thead><tr>");
+    for _ in &chunks {
+        let _ = write!(
+            table,
+            "<th>{}</th><th class=\"num\">requests</th>",
+            escape_html(title)
         );
     }
-    rows
+    table.push_str("</tr></thead>\n    <tbody>\n");
+    let rows = chunks.iter().map(|chunk| chunk.len()).max().unwrap_or(0);
+    for i in 0..rows {
+        table.push_str("      <tr>");
+        for chunk in &chunks {
+            match chunk.get(i) {
+                Some(entry) => table.push_str(&top_entry_cells(entry)),
+                None => table.push_str("<td></td><td></td>"),
+            }
+        }
+        table.push_str("</tr>\n");
+    }
+    table.push_str("    </tbody>\n  </table>\n");
+    table
 }
 
 /// Render the `data_area` distribution as HTML table rows with a scaled bar.
@@ -221,6 +271,7 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
          \x20   .maps figure { flex: 1 1 26rem; margin: 0; }\n\
          \x20   .maps figcaption { font-size: .85rem; color: #5f707d; margin: .4rem 0 0; }\n\
          \x20   table { border-collapse: collapse; width: 100%; max-width: 34rem; }\n\
+         \x20   table.wide { max-width: none; }\n\
          \x20   th, td { text-align: left; padding: .3rem .6rem; border-bottom: 1px solid #e7eaee; }\n\
          \x20   th { color: #5f707d; font-weight: 600; font-size: .8rem; }\n\
          \x20   td.num { text-align: right; font-variant-numeric: tabular-nums; width: 6rem; }\n\
@@ -281,19 +332,14 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
     );
     html.push_str("  </div>\n");
 
-    // Top lists.
+    // Top lists.  With more than ten entries (countries, cities or client
+    // versions) the table switches to two side-by-side column pairs.
     for (title, entries) in [
         ("Top countries", &stats.countries),
         ("Top cities", &stats.cities),
         ("Top client versions", &stats.versions),
     ] {
-        let _ = write!(
-            html,
-            "  <h2>{title}</h2>\n  <table>\n    <thead><tr><th>{}</th>\
-             <th class=\"num\">requests</th></tr></thead>\n    <tbody>\n{}    </tbody>\n  </table>\n",
-            escape(title),
-            top_table_rows(entries)
-        );
+        let _ = write!(html, "  <h2>{title}</h2>\n{}", top_table(title, entries));
     }
 
     // data_area distribution.
