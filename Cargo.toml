@@ -24,6 +24,12 @@ path = "src/bin/bo-import.rs"
 name = "bo-update"
 path = "src/bin/bo-update.rs"
 
+# Strike cluster detection (port of the `blitzortung.clustering` library);
+# read-only query tool, no schema changes.
+[[bin]]
+name = "bo-cluster"
+path = "src/bin/bo-cluster.rs"
+
 [[bin]]
 name = "bo-import-websocket"
 path = "src/bin/bo-import-websocket.rs"
@@ -76,6 +82,19 @@ deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 # lookup (replaces the Python `geoip2` reader).  Lookups are best-effort: a
 # missing or unreadable database, or an address that is not present, yields `-`.
 maxminddb = "0.32"
+
+# Strike clustering (port of `blitzortung.clustering`): pure-Rust replacement for
+# the Python `scipy`/`shapely` geometry stack.  `ConvexHull`, `Buffer`
+# (round-join 0.02 deg buffer, replacing shapely) and `Simplify`
+# (Douglas-Peucker, replacing shapely's `simplify(preserve_topology=False)`) all
+# come from `geo`; the hierarchical single-linkage agglomeration is implemented
+# directly in `src/clustering/`, so no native `fastcluster`/`scipy` dependency is
+# needed.
+geo = "0.33"
+
+# Geodesic polygon area (WGS84) for `StrikeCluster.area`, replacing the Python
+# `geographiclib.PolygonArea`.  Pure Rust, no native dependency.
+geographiclib-rs = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

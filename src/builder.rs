@@ -8,7 +8,7 @@
 //! * [`Strike::from_json`] parses the JSON feed (websocket / `last_strikes.php`)
 //!   with `lon`/`lat`/`time`(ns)/`alt`/`mds`/`region`.
 
-use crate::data::{Strike as DataStrike, Timestamp};
+use crate::data::{Strike as DataStrike, StrikeCluster as DataStrikeCluster, Timestamp};
 use crate::round::py_round;
 
 /// Wrap a [`BuilderError`] for parse failures.
@@ -231,6 +231,76 @@ impl Strike {
     }
 }
 
+/// Builder for [`DataStrikeCluster`] (port of
+/// `blitzortung.builder.strike_cluster.StrikeCluster`).
+///
+/// The Python builder accumulates `cluster_id` (-1 default), `timestamp`
+/// (None), `interval_seconds` (0), `shape` (None) and `strike_count` (0), then
+/// [`build`](StrikeCluster::build) computes the geodesic area from the shape.
+#[derive(Debug, Clone, Default)]
+pub struct StrikeCluster {
+    cluster_id: i64,
+    timestamp: Option<Timestamp>,
+    interval_seconds: i64,
+    shape: Option<Vec<(f64, f64)>>,
+    strike_count: i64,
+}
+
+impl StrikeCluster {
+    /// `StrikeCluster.__init__`: id `-1`, all other fields unset/zero.
+    pub fn new() -> Self {
+        StrikeCluster {
+            cluster_id: -1,
+            timestamp: None,
+            interval_seconds: 0,
+            shape: None,
+            strike_count: 0,
+        }
+    }
+
+    pub fn with_id(&mut self, cluster_id: i64) -> &mut Self {
+        self.cluster_id = cluster_id;
+        self
+    }
+
+    pub fn with_timestamp(&mut self, timestamp: Timestamp) -> &mut Self {
+        self.timestamp = Some(timestamp);
+        self
+    }
+
+    pub fn with_interval_seconds(&mut self, interval_seconds: i64) -> &mut Self {
+        self.interval_seconds = interval_seconds;
+        self
+    }
+
+    pub fn with_shape(&mut self, shape: Vec<(f64, f64)>) -> &mut Self {
+        self.shape = Some(shape);
+        self
+    }
+
+    pub fn with_strike_count(&mut self, strike_count: i64) -> &mut Self {
+        self.strike_count = strike_count;
+        self
+    }
+
+    /// `StrikeCluster.build`: compute the WGS84 geodesic area in km² (rounded to
+    /// one decimal) from the shape, or `None` when there is no shape.
+    pub fn build(&self) -> DataStrikeCluster {
+        let area = self
+            .shape
+            .as_ref()
+            .and_then(|shape| crate::clustering::geometry::polygon_area_km2(shape));
+        DataStrikeCluster {
+            id: self.cluster_id,
+            timestamp: self.timestamp.unwrap_or(Timestamp::NAT),
+            interval_seconds: self.interval_seconds,
+            shape: self.shape.clone(),
+            strike_count: self.strike_count,
+            area,
+        }
+    }
+}
+
 fn parse_f64(value: &str) -> Result<f64, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -287,6 +357,7 @@ fn find_stations(line: &str) -> Option<(i64, i64, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
     use serde_json::json;
 
     #[test]
@@ -398,6 +469,38 @@ mod tests {
     fn build_without_timestamp_errors() {
         let err = Strike::new().build().unwrap_err();
         assert!(err.to_string().contains("Timestamp not set"));
+    }
+
+    #[test]
+    fn strike_cluster_builder_computes_area() {
+        let ring = vec![
+            (11.0355, 51.0073),
+            (11.0095, 50.9824),
+            (10.9874, 50.9845),
+            (10.9803, 51.0037),
+            (11.0044, 51.0625),
+            (11.0276, 51.0685),
+        ];
+        let cluster = StrikeCluster::new()
+            .with_timestamp(Timestamp::new(
+                Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap(),
+                0,
+            ))
+            .with_interval_seconds(600)
+            .with_shape(ring)
+            .with_strike_count(3)
+            .build();
+        assert_eq!(cluster.id, -1);
+        assert_eq!(cluster.interval_seconds, 600);
+        assert_eq!(cluster.strike_count, 3);
+        assert_eq!(cluster.area, Some(38.2));
+    }
+
+    #[test]
+    fn strike_cluster_builder_without_shape_has_no_area() {
+        let cluster = StrikeCluster::new().build();
+        assert_eq!(cluster.area, None);
+        assert!(cluster.shape.is_none());
     }
 
     #[test]
