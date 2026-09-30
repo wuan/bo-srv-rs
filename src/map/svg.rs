@@ -148,7 +148,7 @@ pub(crate) const SQUARE_FILL_OPACITY: &str = "0.7";
 /// Deliberately small and constant: every cell uses the same size no matter how
 /// many digits its count has, so the labels stay visually uniform.  It becomes
 /// readable when the SVG is zoomed in.
-const CELL_LABEL_FONT: f64 = 3.5;
+const CELL_LABEL_FONT: f64 = 3.0;
 
 /// Pick a ramp colour for a cell `count` given the map's densest cell `max`.
 ///
