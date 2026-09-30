@@ -400,7 +400,10 @@ statistics aggregated onto a **single 72x36 raster of 5-degree cells** drawn on
 top.  Every local query increments the cells its `data_area` footprint covers
 (a `data_area=10` query fills a `2x2` block, `15` a `3x3`, ...), and each cell is
 rendered as a **semi-transparent rectangle shaded by its query count** (so the
-basemap stays visible and denser cells read darker).  Use `--output report.html`
+basemap stays visible and denser cells read darker), with the cell's **total
+query count printed at its centre** in a small, uniform size that becomes
+readable as the SVG is zoomed in (hovering a cell still shows the same count).
+Use `--output report.html`
 to write the document to a file (otherwise it goes to stdout, as with the other
 formats).
 

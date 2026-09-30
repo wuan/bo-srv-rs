@@ -143,6 +143,13 @@ const SQUARE_SHADES: u64 = 8;
 /// so the land outline still shows through.
 pub(crate) const SQUARE_FILL_OPACITY: &str = "0.7";
 
+/// The font size (SVG user units) of a cell's total-count label.
+///
+/// Deliberately small and constant: every cell uses the same size no matter how
+/// many digits its count has, so the labels stay visually uniform.  It becomes
+/// readable when the SVG is zoomed in.
+const CELL_LABEL_FONT: f64 = 3.0;
+
 /// Pick a ramp colour for a cell `count` given the map's densest cell `max`.
 ///
 /// `1..=max` is divided into [`SQUARE_SHADES`] **equal** buckets and the shade
@@ -207,6 +214,22 @@ fn raster_layer(raster: &AsciiWorldMap, width: f64, height: f64, label: &str) ->
                 out,
                 "  <rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{cell_w:.2}\" height=\"{cell_h:.2}\" \
                  fill=\"{fill}\"><title>{label}: {count} queries</title></rect>",
+            );
+            // The cell's total count sits centred on top of the shade, always at
+            // the same small size.  The white halo (via `paint-order`) keeps it
+            // legible on both the pale and deep ends of the ramp;
+            // `pointer-events="none"` lets the hover tooltip on the rectangle
+            // below still fire through the text.
+            let _ = writeln!(
+                out,
+                "  <text class=\"cell-count\" x=\"{:.2}\" y=\"{:.2}\" \
+                 text-anchor=\"middle\" font-family=\"system-ui, sans-serif\" \
+                 font-size=\"{CELL_LABEL_FONT}\" fill=\"#24313b\" fill-opacity=\"1\" \
+                 stroke=\"#ffffff\" stroke-width=\"{:.2}\" paint-order=\"stroke\" \
+                 stroke-linejoin=\"round\" pointer-events=\"none\">{count}</text>",
+                x + cell_w / 2.0,
+                y + cell_h / 2.0 + CELL_LABEL_FONT * 0.35,
+                CELL_LABEL_FONT * 0.22,
             );
         }
     }
@@ -557,6 +580,55 @@ mod tests {
         // The rendered map draws one rectangle per non-empty cell.
         let svg = render_world_map_svg(&[make(1, 1, 10)], "test", 960, 480);
         assert_eq!(raster_rects(&svg), 4, "{svg}");
+    }
+
+    /// Every non-empty cell carries its total count as a centred text label, so
+    /// the totals are visible on the map once it is zoomed in.
+    #[test]
+    fn raster_layer_labels_each_cell_with_its_count() {
+        let make = |x, y| LocalQuery {
+            x,
+            y,
+            data_area: 5,
+            grid_baselength: 5000,
+            minute_length: 10,
+        };
+        // Two queries on the same cell -> one cell labelled 2.
+        let svg = render_world_map_svg(&[make(1, 1), make(1, 1)], "test", 960, 480);
+        assert_eq!(svg.matches("class=\"cell-count\"").count(), 1, "{svg}");
+        assert!(
+            svg.contains("class=\"cell-count\"") && svg.contains(">2</text>"),
+            "{svg}"
+        );
+        // One label per raster rectangle, never more.
+        let svg = render_world_map_svg(&[make(1, 1), make(5, 5), make(5, 5)], "test", 960, 480);
+        assert_eq!(
+            svg.matches("class=\"cell-count\"").count(),
+            raster_rects(&svg),
+            "{svg}"
+        );
+    }
+
+    /// Cell labels are small and use the same font size for every count.
+    #[test]
+    fn cell_labels_share_one_small_font_size() {
+        let make = |x, y| LocalQuery {
+            x,
+            y,
+            data_area: 5,
+            grid_baselength: 5000,
+            minute_length: 10,
+        };
+        // A one-digit and a four-digit count on different cells.
+        let svg = render_world_map_svg(
+            &[make(1, 1), make(5, 5), make(5, 5), make(5, 5), make(5, 5)],
+            "test",
+            960,
+            480,
+        );
+        let size = format!("font-size=\"{CELL_LABEL_FONT}\"");
+        assert_eq!(svg.matches(&size).count(), 2, "{svg}");
+        assert!(CELL_LABEL_FONT <= 6.0, "small: {CELL_LABEL_FONT}");
     }
 
     /// An empty report still renders empty world maps without panicking.
