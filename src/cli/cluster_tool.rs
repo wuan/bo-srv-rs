@@ -322,9 +322,10 @@ pub async fn run(
     options: &ClusterOptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Validate the timezone before touching the database, like `bo-db`.
-    if parse_timezone(&options.db.tz).is_none() {
-        crate::cli::exit_with(&format!("parse error in timezone \"{}\"", options.db.tz), 1);
-    }
+    let tz = match parse_timezone(&options.db.tz) {
+        Some(tz) => tz,
+        None => crate::cli::exit_with(&format!("parse error in timezone \"{}\"", options.db.tz), 1),
+    };
 
     let now = chrono::Utc::now();
     let (start, end) = match resolve_cluster_interval(&options.db, options.minutes, now) {
@@ -349,8 +350,8 @@ pub async fn run(
     };
     eprintln!(
         "built {count} clusters from {} to {} in {elapsed:.3} seconds",
-        start.format(DATE_FORMAT),
-        end.format(DATE_FORMAT),
+        start.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S"),
+        end.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S"),
     );
     Ok(())
 }
