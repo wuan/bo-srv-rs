@@ -4,7 +4,7 @@
 //! Everything goes through the [`QueryExecutor`] trait so the tools can be
 //! tested with [`crate::mock::MockExecutor`] without a database.
 
-use crate::data::{GridData, GridElement, Strike, Timestamp};
+use crate::data::{GridData, GridElement, Strike, StrikeCluster, Timestamp};
 use crate::executor::{Param, QueryExecutor, Row};
 use crate::geom::Grid;
 use crate::query::{self, Area, SelectColumns, SelectOrder, TimeInterval};
@@ -385,6 +385,139 @@ impl<'a> StrikeDb<'a> {
     }
 }
 
+/// Table name used by the Python `db.StrikeCluster` (`StrikeCluster.TABLE_NAME`).
+pub const STRIKE_CLUSTER_TABLE_NAME: &str = "strike_clusters";
+
+/// Strike cluster table access object (port of
+/// `blitzortung.db.table.StrikeCluster`).
+///
+/// A cluster is stored with a `geog GEOGRAPHY(LineString)` shape; `insert`
+/// writes the shape with `ST_GeomFromWKB`, `get_latest_time` reads the newest
+/// timestamp for an interval length, and `select` returns the clusters for a
+/// timestamp set (optionally restricted to a geometry).
+pub struct StrikeClusterDb<'a> {
+    executor: &'a dyn QueryExecutor,
+    srid: i64,
+}
+
+impl<'a> StrikeClusterDb<'a> {
+    /// Create a cluster table access object for the given SRID (default 4326).
+    pub fn new(executor: &'a dyn QueryExecutor, srid: i64) -> Self {
+        StrikeClusterDb { executor, srid }
+    }
+
+    /// `StrikeCluster.insert`: insert one cluster, encoding `shape` as WKB and
+    /// letting PostGIS build the geography via `ST_GeomFromWKB`.
+    pub async fn insert(&self, cluster: &StrikeCluster) -> Result<(), DbError> {
+        let sql = "INSERT INTO strike_clusters \
+                   (\"timestamp\", interval_seconds, geog, strike_count) \
+                   VALUES ($1::timestamptz, $2::smallint, \
+                   ST_GeomFromWKB($3::bytea, $4::integer), $5::integer)";
+        let shape = cluster
+            .shape
+            .as_ref()
+            .map(|points| crate::wkb::linestring(points))
+            .ok_or_else(|| DbError::Column("shape".to_string()))?;
+        let timestamp = cluster
+            .timestamp
+            .datetime
+            .ok_or_else(|| DbError::Column("timestamp".to_string()))?;
+        let params = vec![
+            Param::Timestamp(timestamp),
+            Param::Int(cluster.interval_seconds),
+            Param::Bytea(shape),
+            Param::Int(self.srid),
+            Param::Int(cluster.strike_count),
+        ];
+        self.executor.execute(sql, &params).await?;
+        Ok(())
+    }
+
+    /// `StrikeCluster.get_latest_time`: the newest `"timestamp"` for an
+    /// interval length, or `None` when no cluster matches.
+    pub async fn get_latest_time(
+        &self,
+        interval_seconds: i64,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, DbError> {
+        let sql = "SELECT \"timestamp\" FROM strike_clusters \
+                   WHERE interval_seconds=$1::smallint \
+                   ORDER BY \"timestamp\" DESC LIMIT 1";
+        let rows = self
+            .executor
+            .query(sql, &[Param::Int(interval_seconds)])
+            .await?;
+        match rows.first() {
+            None => Ok(None),
+            Some(row) => Ok(Some(
+                row.get_timestamp(0)
+                    .ok_or_else(|| DbError::Column("timestamp".to_string()))?,
+            )),
+        }
+    }
+
+    /// `StrikeCluster.select`: the clusters belonging to `interval_duration`,
+    /// optionally restricted to those intersecting `area`.
+    ///
+    /// `timestamp` is the newest interval; earlier intervals are stepped back
+    /// by `interval_offset` (defaulting to `interval_duration`) for
+    /// `interval_count` slots.  When `area` is given only clusters within the
+    /// geometry are returned (the Python `select` has no geometry argument;
+    /// this is a superset used by callers that query a map view).
+    pub async fn select(
+        &self,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        interval_duration: chrono::Duration,
+        interval_count: i64,
+        interval_offset: Option<chrono::Duration>,
+        area: Option<&Area>,
+    ) -> Result<Vec<StrikeCluster>, DbError> {
+        let query = query::cluster_select_query(
+            timestamp,
+            interval_duration,
+            interval_count,
+            interval_offset,
+            self.srid,
+            area,
+        );
+        let rows = self
+            .executor
+            .query(query.to_postgres(), query.parameters())
+            .await?;
+        let interval_seconds = interval_duration.num_seconds();
+        rows.iter()
+            .map(|row| self.map_cluster(row, interval_seconds))
+            .collect()
+    }
+
+    fn map_cluster(&self, row: &Row, interval_seconds: i64) -> Result<StrikeCluster, DbError> {
+        let id = row
+            .get_i64(0)
+            .ok_or_else(|| DbError::Column("id".to_string()))?;
+        let timestamp = match row.get_timestamp(1) {
+            Some(datetime) => Timestamp::new(datetime, 0),
+            None => Timestamp::NAT,
+        };
+        let shape = match row.get(2) {
+            Some(crate::executor::Value::Bytea(bytes)) => crate::wkb::decode_linestring(bytes),
+            _ => None,
+        };
+        let strike_count = row
+            .get_i64(3)
+            .ok_or_else(|| DbError::Column("strike_count".to_string()))?;
+        let area = shape
+            .as_deref()
+            .and_then(crate::clustering::geometry::polygon_area_km2);
+        Ok(StrikeCluster {
+            id,
+            timestamp,
+            interval_seconds,
+            shape,
+            strike_count,
+            area,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -590,5 +723,132 @@ mod tests {
         // rx=0, ry=2 => y_index = 2 - 2 = 0
         assert_eq!(data.get(0, 0).unwrap().count, 5);
         assert_eq!(data.get(0, 1), None);
+    }
+
+    fn cluster(shape: Vec<(f64, f64)>) -> StrikeCluster {
+        StrikeCluster {
+            id: 7,
+            timestamp: Timestamp::new(ts(2025, 1, 1, 12, 0, 0), 0),
+            interval_seconds: 600,
+            shape: Some(shape),
+            strike_count: 4231,
+            area: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cluster_insert_encodes_shape_as_linestring_wkb() {
+        let mock = MockExecutor::new();
+        let db = StrikeClusterDb::new(&mock, 4326);
+        db.insert(&cluster(vec![(11.0, 51.0), (11.1, 51.0), (11.1, 51.1)]))
+            .await
+            .unwrap();
+        let executions = mock.executions();
+        assert_eq!(executions.len(), 1);
+        let (sql, params) = &executions[0];
+        assert!(sql
+            .contains("ST_GeomFromWKB($3::bytea, $4::integer)"));
+        assert!(sql.starts_with("INSERT INTO strike_clusters"));
+        assert!(matches!(params[0], Param::Timestamp(_)));
+        assert_eq!(params[1], Param::Int(600));
+        match &params[2] {
+            Param::Bytea(wkb) => {
+                assert_eq!(u32::from_le_bytes(wkb[1..5].try_into().unwrap()), 2);
+            }
+            other => panic!("expected WKB bytea, got {other:?}"),
+        }
+        assert_eq!(params[3], Param::Int(4326));
+        assert_eq!(params[4], Param::Int(4231));
+    }
+
+    #[tokio::test]
+    async fn cluster_insert_without_shape_errors() {
+        let mock = MockExecutor::new();
+        let db = StrikeClusterDb::new(&mock, 4326);
+        let mut c = cluster(vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]);
+        c.shape = None;
+        assert!(db.insert(&c).await.is_err());
+        assert_eq!(mock.execution_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cluster_get_latest_time_reads_row() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows(
+            "ORDER BY \"timestamp\" DESC",
+            vec![Row::new(vec![Value::Timestamp(ts(
+                2025, 1, 1, 12, 0, 0,
+            ))])],
+        );
+        let db = StrikeClusterDb::new(&mock, 4326);
+        let latest = db.get_latest_time(600).await.unwrap().unwrap();
+        assert_eq!(latest, ts(2025, 1, 1, 12, 0, 0));
+        let (sql, params) = &mock.calls()[0];
+        assert!(sql.contains("interval_seconds=$1"));
+        assert_eq!(params[0], Param::Int(600));
+    }
+
+    #[tokio::test]
+    async fn cluster_get_latest_time_no_row_is_none() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows("ORDER BY", vec![]);
+        let db = StrikeClusterDb::new(&mock, 4326);
+        assert!(db.get_latest_time(600).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cluster_select_maps_rows() {
+        let mut mock = MockExecutor::new();
+        let shape = crate::wkb::linestring(&[(11.0, 51.0), (11.1, 51.0), (11.1, 51.1)]);
+        mock.add_rows(
+            "FROM strike_clusters",
+            vec![Row::new(vec![
+                Value::Int(7),
+                Value::Timestamp(ts(2025, 1, 1, 12, 0, 0)),
+                Value::Bytea(shape),
+                Value::Int(4231),
+            ])],
+        );
+        let db = StrikeClusterDb::new(&mock, 4326);
+        let clusters = db
+            .select(
+                ts(2025, 1, 1, 12, 0, 0),
+                chrono::Duration::minutes(10),
+                1,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].id, 7);
+        assert_eq!(clusters[0].interval_seconds, 600);
+        assert_eq!(clusters[0].strike_count, 4231);
+        assert_eq!(
+            clusters[0].shape,
+            Some(vec![(11.0, 51.0), (11.1, 51.0), (11.1, 51.1)])
+        );
+        assert!(clusters[0].area.is_some());
+    }
+
+    #[tokio::test]
+    async fn cluster_select_with_area_adds_geometry_conditions() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows("FROM strike_clusters", vec![]);
+        let db = StrikeClusterDb::new(&mock, 4326);
+        let area = crate::query::Area::from_envelope(&crate::geom::Envelope::new(
+            10.0, 12.0, 50.0, 52.0,
+        ));
+        db.select(
+            ts(2025, 1, 1, 12, 0, 0),
+            chrono::Duration::minutes(10),
+            1,
+            None,
+            Some(&area),
+        )
+        .await
+        .unwrap();
+        let (sql, _) = &mock.calls()[0];
+        assert!(sql.contains("&& geog"));
     }
 }

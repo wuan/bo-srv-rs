@@ -22,12 +22,12 @@ mod support;
 use std::collections::{BTreeSet, HashSet};
 
 use blitzortung_srv::config::Config;
-use blitzortung_srv::data::{GridData, Strike, Timestamp};
-use blitzortung_srv::db::{HashableStrikeKey, StrikeDb};
+use blitzortung_srv::data::{GridData, Strike, StrikeCluster, Timestamp};
+use blitzortung_srv::db::{HashableStrikeKey, StrikeClusterDb, StrikeDb};
 use blitzortung_srv::executor::{QueryExecutor, Value};
 use blitzortung_srv::geom::Grid;
 use blitzortung_srv::postgres::PostgresExecutor;
-use blitzortung_srv::query::{self, TimeInterval};
+use blitzortung_srv::query::{self, Area, TimeInterval};
 use blitzortung_srv::service::build_histogram;
 
 /// Serializes every test and gives each a clean table.
@@ -729,5 +729,162 @@ fn prepared_statements_are_reused_per_connection() {
             1,
             "the second run must reuse the prepared statement"
         );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Strike clusters (`strike_clusters` table)
+// ---------------------------------------------------------------------------
+
+/// Cluster tests share the `strike_clusters` table and assert exact counts, so
+/// they serialize and truncate it like [`TestContext`] does for `strikes`.
+struct ClusterTestContext {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    runtime: tokio::runtime::Runtime,
+    executor: blitzortung_srv::postgres::PostgresExecutor,
+}
+
+impl ClusterTestContext {
+    fn new() -> Self {
+        let guard = support::serial();
+        let (runtime, executor) = support::test_db().runtime_and_executor();
+        support::test_db().truncate_clusters(&runtime, &executor);
+        ClusterTestContext {
+            _guard: guard,
+            runtime,
+            executor,
+        }
+    }
+}
+
+/// A cluster with a small closed ring near (11, 51), at `timestamp`.
+fn cluster_at(timestamp: chrono::DateTime<chrono::Utc>, x: f64, y: f64) -> StrikeCluster {
+    StrikeCluster {
+        id: -1,
+        timestamp: Timestamp::new(timestamp, 0),
+        interval_seconds: 600,
+        shape: Some(vec![
+            (x, y),
+            (x + 0.1, y),
+            (x + 0.1, y + 0.1),
+            (x, y + 0.1),
+            (x, y),
+        ]),
+        strike_count: 42,
+        area: None,
+    }
+}
+
+/// `StrikeCluster.insert` + `select` round-trip: the shape comes back as its
+/// ring coordinates and the strike count / interval are preserved.
+#[test]
+fn cluster_insert_then_select_round_trips() {
+    let ctx = ClusterTestContext::new();
+    let end = chrono::Utc::now();
+    ctx.runtime.block_on(async {
+        let db = StrikeClusterDb::new(&ctx.executor, 4326);
+        db.insert(&cluster_at(end, 11.0, 51.0))
+            .await
+            .expect("cluster insert must succeed");
+
+        let clusters = db
+            .select(end, chrono::Duration::minutes(10), 1, None, None)
+            .await
+            .expect("cluster select must succeed");
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].id, 1); // RESTART IDENTITY after truncate
+        assert_eq!(clusters[0].interval_seconds, 600);
+        assert_eq!(clusters[0].strike_count, 42);
+        let shape = clusters[0].shape.as_ref().expect("shape present");
+        assert_eq!(shape.len(), 5);
+        assert!((shape[0].0 - 11.0).abs() < 1e-9);
+        assert!((shape[0].1 - 51.0).abs() < 1e-9);
+        assert!(clusters[0].area.is_some());
+    });
+}
+
+/// `get_latest_time` returns the newest cluster timestamp for the interval
+/// length and nothing for an unknown interval.
+#[test]
+fn cluster_get_latest_time() {
+    let ctx = ClusterTestContext::new();
+    let end = chrono::Utc::now();
+    ctx.runtime.block_on(async {
+        let db = StrikeClusterDb::new(&ctx.executor, 4326);
+        db.insert(&cluster_at(end - chrono::Duration::minutes(10), 11.0, 51.0))
+            .await
+            .unwrap();
+        db.insert(&cluster_at(end, 11.5, 51.5)).await.unwrap();
+
+        let latest = db
+            .get_latest_time(600)
+            .await
+            .expect("get_latest_time must succeed")
+            .expect("clusters present");
+        assert_eq!(latest.timestamp_millis(), end.timestamp_millis());
+        assert!(db.get_latest_time(60).await.unwrap().is_none());
+    });
+}
+
+/// The timestamp set covers `interval_count` intervals stepped back by the
+/// offset, so an older cluster is still selected.
+#[test]
+fn cluster_select_covers_multiple_intervals() {
+    let ctx = ClusterTestContext::new();
+    let end = chrono::Utc::now();
+    let ten_minutes = chrono::Duration::minutes(10);
+    ctx.runtime.block_on(async {
+        let db = StrikeClusterDb::new(&ctx.executor, 4326);
+        db.insert(&cluster_at(end - ten_minutes, 11.0, 51.0))
+            .await
+            .unwrap();
+        db.insert(&cluster_at(end, 11.5, 51.5)).await.unwrap();
+
+        // Only the newest interval.
+        let one = db
+            .select(end, ten_minutes, 1, None, None)
+            .await
+            .unwrap();
+        assert_eq!(one.len(), 1);
+
+        // Both intervals.
+        let two = db
+            .select(end, ten_minutes, 2, None, None)
+            .await
+            .unwrap();
+        assert_eq!(two.len(), 2);
+    });
+}
+
+/// A geometry filter returns only the clusters whose shape intersects the
+/// area.
+#[test]
+fn cluster_select_filters_by_geometry() {
+    let ctx = ClusterTestContext::new();
+    let end = chrono::Utc::now();
+    ctx.runtime.block_on(async {
+        let db = StrikeClusterDb::new(&ctx.executor, 4326);
+        db.insert(&cluster_at(end, 11.0, 51.0)).await.unwrap();
+        db.insert(&cluster_at(end, 11.0, 51.0)).await.unwrap();
+
+        // An envelope around only the first cluster.
+        let area = Area::from_envelope(&blitzortung_srv::geom::Envelope::new(
+            10.0, 12.0, 50.0, 52.0,
+        ));
+        let clusters = db
+            .select(end, chrono::Duration::minutes(10), 1, None, Some(&area))
+            .await
+            .expect("cluster select with geometry must succeed");
+        assert_eq!(clusters.len(), 2, "both clusters are within the area");
+
+        // An envelope far away excludes everything.
+        let empty_area = Area::from_envelope(&blitzortung_srv::geom::Envelope::new(
+            -10.0, -5.0, -5.0, 0.0,
+        ));
+        let none = db
+            .select(end, chrono::Duration::minutes(10), 1, None, Some(&empty_area))
+            .await
+            .unwrap();
+        assert!(none.is_empty());
     });
 }
