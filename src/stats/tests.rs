@@ -436,6 +436,47 @@ fn html_report_uses_column_pairs_beyond_ten_entries() {
     );
 }
 
+/// A long list gets one label/count column pair per chunk of ten, so
+/// `--top 40` yields four pairs (ten entries each) rather than a second pair
+/// with thirty entries.
+#[test]
+fn html_report_uses_one_column_pair_per_ten_entries() {
+    let stats = ServiceLogStats {
+        total_requests: 40,
+        countries: (0..40)
+            .map(|i| TopEntry {
+                label: format!("C{i}"),
+                count: (40 - i) as u64,
+            })
+            .collect(),
+        ..ServiceLogStats::default()
+    };
+    let html = render_html("2023-11-14", &stats);
+    let countries = html
+        .split("<h2>Top countries</h2>")
+        .nth(1)
+        .unwrap()
+        .split("</table>")
+        .next()
+        .unwrap();
+    assert_eq!(
+        countries.matches("<th class=\"num\">requests</th>").count(),
+        4,
+        "{countries}"
+    );
+    assert_eq!(countries.matches("<tr>").count(), 1 + 10, "{countries}");
+    // The first row holds the first entry of every chunk (C0, C10, C20, C30).
+    assert!(
+        countries.contains(
+            "<td>C0</td><td class=\"num\">40</td>\
+             <td>C10</td><td class=\"num\">30</td>\
+             <td>C20</td><td class=\"num\">20</td>\
+             <td>C30</td><td class=\"num\">10</td>"
+        ),
+        "{countries}"
+    );
+}
+
 /// `escape_html` covers the five metacharacters.
 #[test]
 fn escape_html_covers_metacharacters() {

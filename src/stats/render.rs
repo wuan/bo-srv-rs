@@ -136,7 +136,7 @@ pub(crate) fn escape_html(value: &str) -> String {
 }
 
 /// The number of entries a single label/count column pair holds before the
-/// top-list table switches to two side-by-side column pairs.
+/// top-list table switches to multiple side-by-side column pairs.
 const COLUMN_PAIR_LIMIT: usize = 10;
 
 /// The two `<td>` cells (label and count) of one top entry.
@@ -152,47 +152,45 @@ fn top_entry_cells(entry: &TopEntry) -> String {
 ///
 /// Up to [`COLUMN_PAIR_LIMIT`] entries use a single label/count column pair
 /// (the layout for the ordinary top-10 lists).  With more than that the table
-/// switches to **two side-by-side column pairs**: the first ten entries in the
-/// left pair, the next ten in the right, so each pair holds up to ten entries.
+/// switches to **side-by-side column pairs** — one label/count pair per chunk
+/// of [`COLUMN_PAIR_LIMIT`] entries — so each pair holds up to ten entries
+/// (`--top 40` yields four pairs).
 fn top_table(title: &str, entries: &[TopEntry]) -> String {
     let mut table = String::new();
-    if entries.len() <= COLUMN_PAIR_LIMIT {
+    if entries.is_empty() {
         let _ = write!(
             table,
             "  <table>\n    <thead><tr><th>{}</th>\
-             <th class=\"num\">requests</th></tr></thead>\n    <tbody>\n",
+             <th class=\"num\">requests</th></tr></thead>\n    <tbody>\n\
+             \x20     <tr><td colspan=\"2\" class=\"empty\">(none)</td></tr>\n\
+             \x20   </tbody>\n  </table>\n",
             escape_html(title)
         );
-        if entries.is_empty() {
-            table.push_str("      <tr><td colspan=\"2\" class=\"empty\">(none)</td></tr>\n");
-        } else {
-            for entry in entries {
-                let _ = writeln!(table, "      <tr>{}</tr>", top_entry_cells(entry));
-            }
-        }
-        table.push_str("    </tbody>\n  </table>\n");
         return table;
     }
 
-    let (left, right) = entries.split_at(COLUMN_PAIR_LIMIT);
-    let _ = write!(
-        table,
-        "  <table>\n    <thead><tr><th>{}</th>\
-         <th class=\"num\">requests</th>\
-         <th>{}</th><th class=\"num\">requests</th></tr></thead>\n    <tbody>\n",
-        escape_html(title),
-        escape_html(title)
-    );
-    for i in 0..left.len().max(right.len()) {
-        let left_cells = left
-            .get(i)
-            .map(top_entry_cells)
-            .unwrap_or_else(|| "<td></td><td></td>".to_string());
-        let right_cells = right
-            .get(i)
-            .map(top_entry_cells)
-            .unwrap_or_else(|| "<td></td><td></td>".to_string());
-        let _ = writeln!(table, "      <tr>{left_cells}{right_cells}</tr>");
+    // One label/count column pair per chunk of up to `COLUMN_PAIR_LIMIT`
+    // entries (a single pair for the ordinary top-10 lists).
+    let chunks: Vec<&[TopEntry]> = entries.chunks(COLUMN_PAIR_LIMIT).collect();
+    table.push_str("  <table>\n    <thead><tr>");
+    for _ in &chunks {
+        let _ = write!(
+            table,
+            "<th>{}</th><th class=\"num\">requests</th>",
+            escape_html(title)
+        );
+    }
+    table.push_str("</tr></thead>\n    <tbody>\n");
+    let rows = chunks.iter().map(|chunk| chunk.len()).max().unwrap_or(0);
+    for i in 0..rows {
+        table.push_str("      <tr>");
+        for chunk in &chunks {
+            match chunk.get(i) {
+                Some(entry) => table.push_str(&top_entry_cells(entry)),
+                None => table.push_str("<td></td><td></td>"),
+            }
+        }
+        table.push_str("</tr>\n");
     }
     table.push_str("    </tbody>\n  </table>\n");
     table
