@@ -6,11 +6,12 @@
 //! exercised against the database.  It is read-only: it selects strikes from the
 //! `strikes` table and never touches the schema.
 
+use chrono::Timelike;
 use clap::Parser;
 use serde::Serialize;
 
-use crate::cli::db_tool::{resolve_area, resolve_interval_with_lookback, DbOptions};
-use crate::cli::{parse_timezone, DATE_FORMAT};
+use crate::cli::db_tool::{resolve_area, DbOptions};
+use crate::cli::{parse_local_time, parse_timezone, DATE_FORMAT};
 use crate::clustering::Clustering;
 use crate::data::StrikeCluster;
 use crate::db::StrikeDb;
@@ -18,16 +19,28 @@ use crate::executor::QueryExecutor;
 use crate::query::TimeInterval;
 use crate::util::Timer;
 
-/// Default lookback for the start time: the original cluster tool ran detection
-/// for the last ten minutes (a cluster interval is typically short).
+/// Default length of the detection window when `--minutes` is not given: the
+/// original cluster tool ran detection for the last ten minutes (a cluster
+/// interval is typically short).
 pub const DEFAULT_INTERVAL_MINUTES: i64 = 10;
 
 /// `bo-cluster` command-line options.
 ///
-/// The time options mirror `bo-db` (`--startdate`/`--starttime`/`--enddate`/
-/// `--endtime` with the same `%Y%m%d`/`%H%M[%S]` parsing), except that the start
-/// time defaults to the last ten minutes instead of the last hour.  Plus
-/// `--region`, the WKT `--area` filter and the output switch `--json`.
+/// The window is defined by its *end* and its length in minutes:
+///
+/// * The end defaults to the **last minute start** — `now` truncated to the
+///   minute (seconds and subseconds zeroed) in the selected `--tz`; it is *not*
+///   `now - 1min` like `bo-db`.
+/// * `--minutes N` (default [`DEFAULT_INTERVAL_MINUTES`]) sets the length, so
+///   `start = end - N minutes`.
+/// * `--enddate`/`--endtime` override the end using the same `%Y%m%d`/`%H%M[%S]`
+///   parsing as `bo-db` (an explicit end marks the interval end; the end time
+///   adds one minute, or one second when seconds are given).
+/// * `--startdate`/`--starttime` are an alternative to `--minutes` and pin the
+///   interval start; giving both an explicit start and `--minutes` is rejected.
+///
+/// Plus `--region`, the WKT `--area` filter, `--tz`/`--srid` and the output
+/// switch `--json`.
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "bo-cluster",
@@ -35,11 +48,11 @@ pub const DEFAULT_INTERVAL_MINUTES: i64 = 10;
     version
 )]
 pub struct ClusterArgs {
-    /// start date for data retrieval
+    /// start date for data retrieval (alternative to --minutes)
     #[arg(long, default_value = "default")]
     pub startdate: String,
 
-    /// start time for data retrieval
+    /// start time for data retrieval (alternative to --minutes)
     #[arg(long, default_value = "default")]
     pub starttime: String,
 
@@ -50,6 +63,10 @@ pub struct ClusterArgs {
     /// end time for data retrieval
     #[arg(long, default_value = "default")]
     pub endtime: String,
+
+    /// length of the detection window in minutes (start = end - minutes)
+    #[arg(long)]
+    pub minutes: Option<i64>,
 
     /// region id to restrict the strikes to
     #[arg(long)]
@@ -84,6 +101,9 @@ pub struct ClusterArgs {
 #[derive(Debug, Clone)]
 pub struct ClusterOptions {
     pub db: DbOptions,
+    /// Explicit `--minutes` length, or `None` to fall back to
+    /// [`DEFAULT_INTERVAL_MINUTES`] (or to an explicit start).
+    pub minutes: Option<i64>,
     pub region: Option<i64>,
     pub json: bool,
     pub verbose: bool,
@@ -113,12 +133,105 @@ impl ClusterOptions {
         };
         ClusterOptions {
             db,
+            minutes: args.minutes,
             region: args.region,
             json: args.json,
             verbose: args.verbose,
             debug: args.debug,
         }
     }
+}
+
+/// True when the user pinned the interval start via `--startdate`/`--starttime`.
+fn has_explicit_start(options: &DbOptions) -> bool {
+    options.startdate != "default" || options.starttime != "default"
+}
+
+/// True when the user pinned the interval end via `--enddate`/`--endtime`.
+fn has_explicit_end(options: &DbOptions) -> bool {
+    options.enddate != "default" || options.endtime != "default"
+}
+
+/// Resolve the `bo-cluster` time interval from the parsed options.
+///
+/// Precedence (see the `ClusterArgs` docs for the full rules):
+///
+/// 1. **Explicit start** (`--startdate`/`--starttime`) and `--minutes` are
+///    mutually exclusive; supplying both is an error (`Err`).
+/// 2. An **explicit end** (`--enddate`/`--endtime`) overrides the default end
+///    using `bo-db`'s parsing (the end time adds one minute, or one second when
+///    seconds are given), so the given value marks the *end* of the interval.
+/// 3. The default end is the **last minute start**: `now` truncated to the
+///    minute (seconds and subseconds zeroed).
+/// 4. With an explicit start and no `--minutes`, `start` is that start and no
+///    lookback is applied.
+/// 5. Otherwise `minutes` is `--minutes` or [`DEFAULT_INTERVAL_MINUTES`] and
+///    `start = end - minutes`.
+///
+/// `now` is injected as a parameter so the resolution can be unit-tested.
+pub fn resolve_cluster_interval(
+    options: &DbOptions,
+    minutes: Option<i64>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>), String> {
+    let explicit_start = has_explicit_start(options);
+    if explicit_start && minutes.is_some() {
+        return Err(
+            "--startdate/--starttime and --minutes are mutually exclusive: give the window \
+             length with --minutes, or pin the start with --startdate/--starttime"
+                .to_string(),
+        );
+    }
+
+    let tz = parse_timezone(&options.tz)
+        .ok_or_else(|| format!("parse error in timezone \"{}\"", options.tz))?;
+
+    // Default end: the last minute start (`now` truncated to the minute, in UTC;
+    // formatted in the selected zone below).
+    let default_end = now
+        .with_second(0)
+        .and_then(|value| value.with_nanosecond(0))
+        .expect("truncating seconds/nanoseconds to zero is always valid");
+
+    let end = if has_explicit_end(options) {
+        let enddate = if options.enddate == "default" {
+            default_end
+                .with_timezone(&tz)
+                .format(DATE_FORMAT)
+                .to_string()
+        } else {
+            options.enddate.clone()
+        };
+        let endtime = if options.endtime == "default" {
+            default_end.with_timezone(&tz).format("%H%M").to_string()
+        } else {
+            options.endtime.clone()
+        };
+        parse_local_time(&enddate, &endtime, tz, true)
+            .ok_or_else(|| format!("parse error in endtime: '{enddate} {endtime}'"))?
+    } else {
+        default_end
+    };
+
+    let start = if explicit_start {
+        let startdate = if options.startdate == "default" {
+            end.with_timezone(&tz).format(DATE_FORMAT).to_string()
+        } else {
+            options.startdate.clone()
+        };
+        let starttime = if options.starttime == "default" {
+            end.with_timezone(&tz).format("%H%M").to_string()
+        } else {
+            options.starttime.clone()
+        };
+        parse_local_time(&startdate, &starttime, tz, false)
+            .ok_or_else(|| format!("parse error in starttime: '{startdate} {starttime}'"))?
+    } else {
+        let minutes = minutes.unwrap_or(DEFAULT_INTERVAL_MINUTES);
+        end - chrono::Duration::minutes(minutes)
+    };
+
+    Ok((start, end))
 }
 
 /// The JSON shape emitted by `--json` (one object per cluster).
@@ -209,16 +322,16 @@ pub async fn run(
     options: &ClusterOptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Validate the timezone before touching the database, like `bo-db`.
-    if parse_timezone(&options.db.tz).is_none() {
-        crate::cli::exit_with(&format!("parse error in timezone \"{}\"", options.db.tz), 1);
-    }
+    let tz = match parse_timezone(&options.db.tz) {
+        Some(tz) => tz,
+        None => crate::cli::exit_with(&format!("parse error in timezone \"{}\"", options.db.tz), 1),
+    };
 
     let now = chrono::Utc::now();
-    let (start, end) = resolve_interval_with_lookback(
-        &options.db,
-        now,
-        chrono::Duration::minutes(DEFAULT_INTERVAL_MINUTES),
-    );
+    let (start, end) = match resolve_cluster_interval(&options.db, options.minutes, now) {
+        Ok(interval) => interval,
+        Err(error) => crate::cli::exit_with(&error, 1),
+    };
     let interval = TimeInterval::new(start, end);
 
     let mut timer = Timer::new();
@@ -237,8 +350,8 @@ pub async fn run(
     };
     eprintln!(
         "built {count} clusters from {} to {} in {elapsed:.3} seconds",
-        start.format(DATE_FORMAT),
-        end.format(DATE_FORMAT),
+        start.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S"),
+        end.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S"),
     );
     Ok(())
 }
@@ -256,6 +369,7 @@ mod tests {
             starttime: "default".into(),
             enddate: "default".into(),
             endtime: "default".into(),
+            minutes: None,
             region: None,
             area: None,
             tz: "UTC".into(),
@@ -282,30 +396,103 @@ mod tests {
     }
 
     #[test]
-    fn default_interval_is_ten_minutes() {
-        let now = Utc.with_ymd_and_hms(2025, 1, 1, 12, 30, 0).unwrap();
-        let (start, end) = resolve_interval_with_lookback(
-            &options().db,
-            now,
-            chrono::Duration::minutes(DEFAULT_INTERVAL_MINUTES),
-        );
-        // start = now - 10min, end = now - 1min (default end is implicit)
-        assert_eq!(start, Utc.with_ymd_and_hms(2025, 1, 1, 12, 20, 0).unwrap());
-        assert_eq!(end, Utc.with_ymd_and_hms(2025, 1, 1, 12, 29, 0).unwrap());
+    fn minutes_option_is_parsed_and_defaults_to_none() {
+        let args = ClusterArgs::try_parse_from(["bo-cluster"]).expect("parse");
+        assert_eq!(args.minutes, None);
+        let args = ClusterArgs::try_parse_from(["bo-cluster", "--minutes", "5"]).expect("parse");
+        assert_eq!(args.minutes, Some(5));
     }
 
     #[test]
-    fn explicit_start_overrides_the_ten_minute_default() {
+    fn default_end_is_last_minute_start() {
+        // The clock is injected: 12:34:56 must resolve to the 12:34:00 minute.
+        let opts = options();
+        let now = Utc.with_ymd_and_hms(2025, 1, 1, 12, 34, 56).unwrap();
+        let (start, end) = resolve_cluster_interval(&opts.db, opts.minutes, now).unwrap();
+        assert_eq!(end, Utc.with_ymd_and_hms(2025, 1, 1, 12, 34, 0).unwrap());
+        // start = end - 10min (the default --minutes).
+        assert_eq!(start, Utc.with_ymd_and_hms(2025, 1, 1, 12, 24, 0).unwrap());
+    }
+
+    #[test]
+    fn default_end_truncates_subseconds() {
+        let opts = options();
+        let now = Utc
+            .with_ymd_and_hms(2025, 1, 1, 12, 34, 56)
+            .unwrap()
+            .with_nanosecond(123_456_789)
+            .unwrap();
+        let (_, end) = resolve_cluster_interval(&opts.db, opts.minutes, now).unwrap();
+        assert_eq!(end, Utc.with_ymd_and_hms(2025, 1, 1, 12, 34, 0).unwrap());
+        assert_eq!(end.nanosecond(), 0);
+    }
+
+    #[test]
+    fn explicit_minutes_sets_the_window_length() {
+        let mut opts = options();
+        opts.minutes = Some(5);
+        let now = Utc.with_ymd_and_hms(2025, 1, 1, 12, 34, 56).unwrap();
+        let (start, end) = resolve_cluster_interval(&opts.db, opts.minutes, now).unwrap();
+        assert_eq!(end, Utc.with_ymd_and_hms(2025, 1, 1, 12, 34, 0).unwrap());
+        assert_eq!(start, Utc.with_ymd_and_hms(2025, 1, 1, 12, 29, 0).unwrap());
+    }
+
+    #[test]
+    fn explicit_end_overrides_the_default_and_resets_the_start() {
+        let mut opts = options();
+        opts.db.enddate = "20250101".into();
+        opts.db.endtime = "1000".into();
+        let now = Utc.with_ymd_and_hms(2025, 1, 1, 12, 34, 56).unwrap();
+        let (start, end) = resolve_cluster_interval(&opts.db, opts.minutes, now).unwrap();
+        // `bo-db` end semantics: an explicit HHMM end time adds one minute.
+        assert_eq!(end, Utc.with_ymd_and_hms(2025, 1, 1, 10, 1, 0).unwrap());
+        // start = end - 10min.
+        assert_eq!(start, Utc.with_ymd_and_hms(2025, 1, 1, 9, 51, 0).unwrap());
+    }
+
+    #[test]
+    fn explicit_end_with_seconds_marks_the_interval_end() {
+        let mut opts = options();
+        opts.db.enddate = "20250101".into();
+        opts.db.endtime = "100030".into();
+        let now = Utc.with_ymd_and_hms(2025, 1, 1, 12, 34, 56).unwrap();
+        let (start, end) = resolve_cluster_interval(&opts.db, opts.minutes, now).unwrap();
+        // `bo-db` end semantics: HHMMSS adds one second.
+        assert_eq!(end, Utc.with_ymd_and_hms(2025, 1, 1, 10, 0, 31).unwrap());
+        assert_eq!(start, Utc.with_ymd_and_hms(2025, 1, 1, 9, 50, 31).unwrap());
+    }
+
+    #[test]
+    fn explicit_start_is_used_when_minutes_is_absent() {
         let mut opts = options();
         opts.db.startdate = "20250101".into();
         opts.db.starttime = "1000".into();
-        let now = Utc.with_ymd_and_hms(2025, 1, 1, 12, 30, 0).unwrap();
-        let (start, _) = resolve_interval_with_lookback(
-            &opts.db,
-            now,
-            chrono::Duration::minutes(DEFAULT_INTERVAL_MINUTES),
-        );
+        let now = Utc.with_ymd_and_hms(2025, 1, 1, 12, 34, 56).unwrap();
+        let (start, end) = resolve_cluster_interval(&opts.db, opts.minutes, now).unwrap();
         assert_eq!(start, Utc.with_ymd_and_hms(2025, 1, 1, 10, 0, 0).unwrap());
+        // The end default (last minute start) is still applied.
+        assert_eq!(end, Utc.with_ymd_and_hms(2025, 1, 1, 12, 34, 0).unwrap());
+    }
+
+    #[test]
+    fn explicit_start_and_minutes_are_mutually_exclusive() {
+        let mut opts = options();
+        opts.minutes = Some(5);
+        opts.db.startdate = "20250101".into();
+        let now = Utc.with_ymd_and_hms(2025, 1, 1, 12, 34, 56).unwrap();
+        let error = resolve_cluster_interval(&opts.db, opts.minutes, now).unwrap_err();
+        assert!(error.contains("mutually exclusive"), "error: {error}");
+    }
+
+    #[test]
+    fn default_end_respects_the_selected_timezone() {
+        // In Europe/Berlin the default end is the last minute start as well.
+        let mut opts = options();
+        opts.db.tz = "Europe/Berlin".into();
+        let now = Utc.with_ymd_and_hms(2025, 1, 1, 12, 34, 56).unwrap();
+        let (start, end) = resolve_cluster_interval(&opts.db, opts.minutes, now).unwrap();
+        assert_eq!(end, Utc.with_ymd_and_hms(2025, 1, 1, 12, 34, 0).unwrap());
+        assert_eq!(start, Utc.with_ymd_and_hms(2025, 1, 1, 12, 24, 0).unwrap());
     }
 
     fn strike_row(id: i64, x: f64, y: f64) -> Row {
