@@ -21,6 +21,7 @@ mod support;
 
 use std::collections::{BTreeSet, HashSet};
 
+use blitzortung_srv::cli::cluster_tool;
 use blitzortung_srv::config::Config;
 use blitzortung_srv::data::{GridData, Strike, StrikeCluster, Timestamp};
 use blitzortung_srv::db::{HashableStrikeKey, StrikeClusterDb, StrikeDb};
@@ -29,6 +30,7 @@ use blitzortung_srv::geom::Grid;
 use blitzortung_srv::postgres::PostgresExecutor;
 use blitzortung_srv::query::{self, Area, TimeInterval};
 use blitzortung_srv::service::build_histogram;
+use clap::Parser;
 
 /// Serializes every test and gives each a clean table.
 ///
@@ -841,17 +843,11 @@ fn cluster_select_covers_multiple_intervals() {
         db.insert(&cluster_at(end, 11.5, 51.5)).await.unwrap();
 
         // Only the newest interval.
-        let one = db
-            .select(end, ten_minutes, 1, None, None)
-            .await
-            .unwrap();
+        let one = db.select(end, ten_minutes, 1, None, None).await.unwrap();
         assert_eq!(one.len(), 1);
 
         // Both intervals.
-        let two = db
-            .select(end, ten_minutes, 2, None, None)
-            .await
-            .unwrap();
+        let two = db.select(end, ten_minutes, 2, None, None).await.unwrap();
         assert_eq!(two.len(), 2);
     });
 }
@@ -882,9 +878,52 @@ fn cluster_select_filters_by_geometry() {
             -10.0, -5.0, -5.0, 0.0,
         ));
         let none = db
-            .select(end, chrono::Duration::minutes(10), 1, None, Some(&empty_area))
+            .select(
+                end,
+                chrono::Duration::minutes(10),
+                1,
+                None,
+                Some(&empty_area),
+            )
             .await
             .unwrap();
         assert!(none.is_empty());
+    });
+}
+
+/// `bo-cluster --insert`: persist detected clusters via
+/// `cluster_tool::insert_clusters`, then read them back with
+/// `StrikeClusterDb::select`; a re-run of the same window inserts nothing.
+#[test]
+fn cluster_tool_insert_persists_and_is_idempotent() {
+    let ctx = ClusterTestContext::new();
+    // A timestamp with sub-microsecond digits, so the `timestamptz` round-trip
+    // truncates it and the guard is actually exercised (the CI regression).
+    let end = chrono::Utc::now() + chrono::Duration::nanoseconds(500);
+    let interval = TimeInterval::new(end - chrono::Duration::minutes(10), end);
+    ctx.runtime.block_on(async {
+        let args =
+            cluster_tool::ClusterArgs::try_parse_from(["bo-cluster", "--insert"]).expect("parse");
+        let options = cluster_tool::ClusterOptions::from_args(&args);
+        let clusters = vec![cluster_at(end, 11.0, 51.0)];
+
+        let inserted = cluster_tool::insert_clusters(&ctx.executor, &options, &interval, &clusters)
+            .await
+            .expect("insert must succeed");
+        assert_eq!(inserted, 1);
+
+        let db = StrikeClusterDb::new(&ctx.executor, 4326);
+        let stored = db
+            .select(end, chrono::Duration::minutes(10), 1, None, None)
+            .await
+            .expect("select must succeed");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].strike_count, 42);
+
+        // Re-running the same window inserts nothing (idempotent guard).
+        let again = cluster_tool::insert_clusters(&ctx.executor, &options, &interval, &clusters)
+            .await
+            .expect("re-insert must succeed");
+        assert_eq!(again, 0, "the same interval must not be inserted twice");
     });
 }

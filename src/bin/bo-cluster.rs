@@ -1,11 +1,12 @@
 //! `bo-cluster` — detect strike clusters over a time interval and print them
-//! as text or JSON (read-only; port of the `blitzortung.clustering` library,
-//! last full version at bo-python commit `8ba0117`).
+//! as text or JSON, optionally persisting them (port of the
+//! `blitzortung.clustering` library, last full version at bo-python commit
+//! `8ba0117`).
 //!
 //! ```text
 //! bo-cluster [--minutes N] [--startdate YYYYMMDD] [--starttime HHMM[SS]]
 //!            [--enddate ...] [--endtime ...] [--region N] [--area WKT]
-//!            [--tz TZ] [--srid N] [--json]
+//!            [--tz TZ] [--srid N] [--json] [--insert]
 //! ```
 //!
 //! The interval is defined by its end and its length:
@@ -20,6 +21,14 @@
 //!   end; the end time adds one minute, or one second when seconds are given).
 //! * `--startdate`/`--starttime` are an alternative to `--minutes` that pins the
 //!   interval start; combining an explicit start with `--minutes` is rejected.
+//!
+//! The tool is read-only unless `--insert` is given.  With `--insert` the
+//! detected clusters are written to the `strike_clusters` table after the usual
+//! output is printed; only clusters whose timestamp is strictly newer than the
+//! latest already stored for that `interval_seconds` are inserted, so re-running
+//! the same window is a no-op instead of creating duplicates.  The window length
+//! is stored in a `SMALLINT` and must therefore not exceed 32767 seconds, or the
+//! run fails with a clear error.
 //!
 //! Example: at 12:34:56 UTC the default end is 12:34:00 and, with the default
 //! `--minutes 10`, the window is 12:24:00..12:34:00.
