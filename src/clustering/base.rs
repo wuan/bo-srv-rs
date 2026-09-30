@@ -44,10 +44,17 @@ pub struct Merge {
 /// * a new cluster is labelled `event_count + merge_index`.
 ///
 /// For single linkage the dendrogram is exactly the sorted set of minimum
-/// spanning tree edges (this is what `fastcluster`'s single-linkage routine
-/// uses).  Building the MST with Prim's algorithm is `O(n^2)` time and `O(n)`
-/// memory, so a dense ten-minute window with tens of thousands of strikes stays
-/// tractable — the previous direct `O(n^4)` scan did not.
+/// spanning tree edges.  This is precisely what `fastcluster` does: when
+/// `base.py` calls `fastcluster.linkage(distances)` with a *condensed
+/// distance vector*, fastcluster dispatches to `MST_linkage_core`, Rohlf's
+/// minimum-spanning-tree routine (`src/fastcluster.cpp`).  Building the MST
+/// with Prim's algorithm is `O(n^2)` time and `O(n)` memory, so a dense
+/// ten-minute window with tens of thousands of strikes stays tractable — the
+/// previous direct `O(n^4)` scan did not.
+///
+/// The merge *distances* (and hence the connected components) are canonical for
+/// any MST; the merge *order* among equal distances follows `MST_linkage_core`
+/// (lowest index first), which the tie-break tests below pin down.
 pub fn single_linkage(points: &[(f64, f64)]) -> Vec<Merge> {
     let n = points.len();
     if n < 2 {
@@ -386,6 +393,47 @@ mod tests {
         assert_eq!(merges[3].cluster_b, 7);
         assert!((merges[3].distance - 78.489_535_360_848_28).abs() < 1e-9);
         assert_eq!(merges[3].size, 5);
+    }
+
+    #[test]
+    fn single_linkage_matches_fastcluster_with_ties() {
+        // `fastcluster.linkage` (the `MST_linkage_core`/Rohlf MST routine used
+        // when it is given a condensed distance vector, as in `base.py`)
+        // breaks distance ties by the lowest index.  These fixtures were
+        // verified against fastcluster 1.3.x with this port's great-circle
+        // `pdist`:
+        //
+        // identical coordinates (the common real-world tie: several strikes at
+        // the same rounded position)
+        let merges = single_linkage(&[(11.0, 51.0); 4]);
+        assert_eq!(
+            merges
+                .iter()
+                .map(|m| (m.cluster_a, m.cluster_b, m.distance, m.size))
+                .collect::<Vec<_>>(),
+            vec![(0, 1, 0.0, 2), (2, 4, 0.0, 3), (3, 5, 0.0, 4),]
+        );
+
+        // a 3x3 grid with many equal and near-equal distances
+        let grid: Vec<(f64, f64)> = (0..3)
+            .flat_map(|i| (0..3).map(move |j| (11.0 + i as f64 * 0.001, 51.0 + j as f64 * 0.001)))
+            .collect();
+        let merges = single_linkage(&grid);
+        let expected: Vec<(usize, usize, f64, usize)> = vec![
+            (2, 5, 0.069_974_423_123, 2),
+            (8, 9, 0.069_974_423_123, 3),
+            (1, 4, 0.069_975_931_255, 2),
+            (7, 11, 0.069_975_931_255, 3),
+            (0, 3, 0.069_977_439_365, 2),
+            (6, 13, 0.069_977_439_365, 3),
+            (12, 14, 0.111_191_647_221, 6),
+            (10, 15, 0.111_191_647_223, 9),
+        ];
+        assert_eq!(merges.len(), expected.len());
+        for (merge, (a, b, distance, size)) in merges.iter().zip(expected) {
+            assert_eq!((merge.cluster_a, merge.cluster_b, merge.size), (a, b, size));
+            assert!((merge.distance - distance).abs() < 1e-9, "{merge:?}");
+        }
     }
 
     #[test]
