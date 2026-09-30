@@ -3,14 +3,26 @@
 //! last full version at bo-python commit `8ba0117`).
 //!
 //! ```text
-//! bo-cluster [--startdate YYYYMMDD] [--starttime HHMM[SS]] [--enddate ...]
-//!            [--endtime ...] [--region N] [--area WKT] [--tz TZ] [--srid N]
-//!            [--json]
+//! bo-cluster [--minutes N] [--startdate YYYYMMDD] [--starttime HHMM[SS]]
+//!            [--enddate ...] [--endtime ...] [--region N] [--area WKT]
+//!            [--tz TZ] [--srid N] [--json]
 //! ```
 //!
-//! The start time defaults to the last ten minutes (end: now minus one minute)
-//! in the selected time zone, matching the original cluster tool; the
-//! `%Y%m%d`/`%H%M[%S]` parsing is otherwise the same as `bo-db`.
+//! The interval is defined by its end and its length:
+//!
+//! * The end defaults to the **last minute start** — `now` truncated to the
+//!   minute (seconds and subseconds zeroed) in the selected `--tz`; it is *not*
+//!   `now minus one minute`, unlike `bo-db`.
+//! * `--minutes N` (default 10) sets the window length, so
+//!   `start = end - N minutes`.
+//! * `--enddate`/`--endtime` override the end with the same
+//!   `%Y%m%d`/`%H%M[%S]` parsing as `bo-db` (the given value marks the interval
+//!   end; the end time adds one minute, or one second when seconds are given).
+//! * `--startdate`/`--starttime` are an alternative to `--minutes` that pins the
+//!   interval start; combining an explicit start with `--minutes` is rejected.
+//!
+//! Example: at 12:34:56 UTC the default end is 12:34:00 and, with the default
+//! `--minutes 10`, the window is 12:24:00..12:34:00.
 //! `-v`/`--verbose` and `-d`/`--debug` control logging (and `RUST_LOG` still
 //! overrides).
 
