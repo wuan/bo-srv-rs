@@ -143,20 +143,12 @@ const SQUARE_SHADES: u64 = 8;
 /// so the land outline still shows through.
 pub(crate) const SQUARE_FILL_OPACITY: &str = "0.7";
 
-/// Pick the label and font size (in SVG user units) for a cell's total count.
+/// The font size (SVG user units) of a cell's total-count label.
 ///
-/// The text is sized to fit inside a `cell_w x cell_h` cell: the estimate
-/// assumes roughly `0.6 em` per digit (a little generous for the system
-/// sans-serif) and is capped by the cell height, so short counts fill the cell
-/// while long counts shrink.  A small floor keeps an extreme count from
-/// collapsing to nothing.  Because the size is relative to the cell, the label
-/// stays proportional to the map and becomes readable as the SVG is zoomed.
-fn cell_label(count: u64, cell_w: f64, cell_h: f64) -> (String, f64) {
-    let text = count.to_string();
-    let by_height = cell_h * 0.6;
-    let by_width = cell_w / (text.len() as f64 * 0.6);
-    (text, by_height.min(by_width).max(2.0))
-}
+/// Deliberately small and constant: every cell uses the same size no matter how
+/// many digits its count has, so the labels stay visually uniform.  It becomes
+/// readable when the SVG is zoomed in.
+const CELL_LABEL_FONT: f64 = 5.0;
 
 /// Pick a ramp colour for a cell `count` given the map's densest cell `max`.
 ///
@@ -223,21 +215,21 @@ fn raster_layer(raster: &AsciiWorldMap, width: f64, height: f64, label: &str) ->
                 "  <rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{cell_w:.2}\" height=\"{cell_h:.2}\" \
                  fill=\"{fill}\"><title>{label}: {count} queries</title></rect>",
             );
-            // The cell's total count sits centred on top of the shade.  The
-            // white halo (via `paint-order`) keeps it legible on both the pale
-            // and deep ends of the ramp; `pointer-events="none"` lets the hover
-            // tooltip on the rectangle below still fire through the text.
-            let (text, font) = cell_label(count, cell_w, cell_h);
+            // The cell's total count sits centred on top of the shade, always at
+            // the same small size.  The white halo (via `paint-order`) keeps it
+            // legible on both the pale and deep ends of the ramp;
+            // `pointer-events="none"` lets the hover tooltip on the rectangle
+            // below still fire through the text.
             let _ = writeln!(
                 out,
                 "  <text class=\"cell-count\" x=\"{:.2}\" y=\"{:.2}\" \
                  text-anchor=\"middle\" font-family=\"system-ui, sans-serif\" \
-                 font-size=\"{font:.2}\" fill=\"#24313b\" fill-opacity=\"1\" \
+                 font-size=\"{CELL_LABEL_FONT}\" fill=\"#24313b\" fill-opacity=\"1\" \
                  stroke=\"#ffffff\" stroke-width=\"{:.2}\" paint-order=\"stroke\" \
-                 stroke-linejoin=\"round\" pointer-events=\"none\">{text}</text>",
+                 stroke-linejoin=\"round\" pointer-events=\"none\">{count}</text>",
                 x + cell_w / 2.0,
-                y + cell_h / 2.0 + font * 0.35,
-                font * 0.22,
+                y + cell_h / 2.0 + CELL_LABEL_FONT * 0.35,
+                CELL_LABEL_FONT * 0.22,
             );
         }
     }
@@ -617,17 +609,26 @@ mod tests {
         );
     }
 
-    /// A cell label is sized to fit its cell and never collapses to nothing.
+    /// Cell labels are small and use the same font size for every count.
     #[test]
-    fn cell_label_sizes_to_fit() {
-        // A one-digit count on a 13x13 cell is capped by the cell height.
-        let (text, font) = cell_label(1, 13.0, 13.0);
-        assert_eq!(text, "1");
-        assert!((font - 7.8).abs() < 1e-9, "{font}");
-        // A longer count shrinks so it still fits the cell width.
-        let (_, font) = cell_label(123_456, 13.0, 13.0);
-        assert!(font < 4.0, "{font}");
-        assert!(font >= 2.0, "floored: {font}");
+    fn cell_labels_share_one_small_font_size() {
+        let make = |x, y| LocalQuery {
+            x,
+            y,
+            data_area: 5,
+            grid_baselength: 5000,
+            minute_length: 10,
+        };
+        // A one-digit and a four-digit count on different cells.
+        let svg = render_world_map_svg(
+            &[make(1, 1), make(5, 5), make(5, 5), make(5, 5), make(5, 5)],
+            "test",
+            960,
+            480,
+        );
+        let size = format!("font-size=\"{CELL_LABEL_FONT}\"");
+        assert_eq!(svg.matches(&size).count(), 2, "{svg}");
+        assert!(CELL_LABEL_FONT <= 6.0, "small: {CELL_LABEL_FONT}");
     }
 
     /// An empty report still renders empty world maps without panicking.
