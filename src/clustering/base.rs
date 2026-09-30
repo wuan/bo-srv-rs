@@ -18,7 +18,6 @@ use chrono::DateTime;
 use chrono::Utc;
 
 use crate::clustering::geometry::{buffer_ring, convex_hull_ring, simplify_ring};
-use crate::clustering::pdist::pdist;
 use crate::data::{Strike, StrikeCluster, Timestamp};
 use crate::query::TimeInterval;
 
@@ -44,68 +43,115 @@ pub struct Merge {
 ///   lexicographically smallest `(cluster_a, cluster_b)`;
 /// * a new cluster is labelled `event_count + merge_index`.
 ///
-/// The naive `O(n^3)` worst case is fine for the strike volumes the CLI tool
-/// clusters; the Python code used `fastcluster` for speed only, not semantics.
+/// For single linkage the dendrogram is exactly the sorted set of minimum
+/// spanning tree edges (this is what `fastcluster`'s single-linkage routine
+/// uses).  Building the MST with Prim's algorithm is `O(n^2)` time and `O(n)`
+/// memory, so a dense ten-minute window with tens of thousands of strikes stays
+/// tractable — the previous direct `O(n^4)` scan did not.
 pub fn single_linkage(points: &[(f64, f64)]) -> Vec<Merge> {
     let n = points.len();
     if n < 2 {
         return Vec::new();
     }
-    let distances = pdist(points);
-    // `distances[(i, j)]` index for `i < j` in lower-triangular row-major order.
-    let index = |i: usize, j: usize| -> usize {
-        debug_assert!(i < j);
-        i * (2 * n - i - 1) / 2 + (j - i - 1)
-    };
 
-    let mut active: Vec<usize> = (0..n).collect();
-    let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
-    let mut merges = Vec::with_capacity(n - 1);
-    let mut next_label = n;
+    // Prim's MST on the complete great-circle graph.  `key[v]` is the cheapest
+    // known edge from the tree to `v`; `parent[v]` is its other endpoint.
+    let mut in_tree = vec![false; n];
+    let mut key = vec![f64::INFINITY; n];
+    let mut parent = vec![usize::MAX; n];
+    key[0] = 0.0;
+    let mut edges: Vec<(f64, usize, usize)> = Vec::with_capacity(n - 1);
 
-    while active.len() > 1 {
-        let mut best: Option<(f64, usize, usize)> = None;
-        for a in 0..active.len() {
-            for b in (a + 1)..active.len() {
-                let cluster_a = active[a];
-                let cluster_b = active[b];
-                let mut pair_distance = f64::INFINITY;
-                for &i in &members[cluster_a] {
-                    for &j in &members[cluster_b] {
-                        let (lo, hi) = if i < j { (i, j) } else { (j, i) };
-                        pair_distance = pair_distance.min(distances[index(lo, hi)]);
-                    }
-                }
-                let key = (pair_distance, cluster_a, cluster_b);
-                let replace = match best {
-                    None => true,
-                    Some((best_distance, best_a, best_b)) => key < (best_distance, best_a, best_b),
-                };
-                if replace {
-                    best = Some(key);
+    for _ in 0..n {
+        // The unvisited vertex with the smallest connecting edge.  Ties pick the
+        // lowest index, matching the deterministic order the reference needs.
+        let mut u = usize::MAX;
+        for v in 0..n {
+            if !in_tree[v] && (u == usize::MAX || key[v] < key[u]) {
+                u = v;
+            }
+        }
+        in_tree[u] = true;
+        if parent[u] != usize::MAX {
+            let (a, b) = if parent[u] < u {
+                (parent[u], u)
+            } else {
+                (u, parent[u])
+            };
+            edges.push((key[u], a, b));
+        }
+        for v in 0..n {
+            if !in_tree[v] {
+                let d = crate::clustering::pdist::distance(
+                    points[u].0,
+                    points[u].1,
+                    points[v].0,
+                    points[v].1,
+                );
+                if d < key[v] {
+                    key[v] = d;
+                    parent[v] = u;
                 }
             }
         }
+    }
 
-        let (distance, cluster_a, cluster_b) = best.expect("active has at least two clusters");
-        let (lo, hi) = if cluster_a < cluster_b {
-            (cluster_a, cluster_b)
-        } else {
-            (cluster_b, cluster_a)
-        };
-        let mut merged = members[cluster_a].clone();
-        merged.extend(members[cluster_b].iter().copied());
-        let size = merged.len();
+    // Merge the MST edges in ascending order via union-find, relabelling merged
+    // components with `n, n + 1, ...` in merge order (SciPy's linkage labels).
+    edges.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+
+    let mut union_find: Vec<usize> = (0..2 * n).collect();
+    let mut cluster_id: Vec<usize> = (0..2 * n).collect();
+    let mut size: Vec<usize> = vec![1; 2 * n];
+    let mut merges = Vec::with_capacity(n - 1);
+    let mut next_label = n;
+
+    fn find(union_find: &mut [usize], x: usize) -> usize {
+        let mut root = x;
+        while union_find[root] != root {
+            root = union_find[root];
+        }
+        // Path compression.
+        let mut current = x;
+        while union_find[current] != root {
+            let next = union_find[current];
+            union_find[current] = root;
+            current = next;
+        }
+        root
+    }
+
+    for (distance, i, j) in edges {
+        let mut root_i = find(&mut union_find, i);
+        let mut root_j = find(&mut union_find, j);
+        if root_i == root_j {
+            continue;
+        }
+        let mut a = cluster_id[root_i];
+        let mut b = cluster_id[root_j];
+        if a > b {
+            std::mem::swap(&mut a, &mut b);
+        }
+        let merged_size = size[root_i] + size[root_j];
         merges.push(Merge {
-            cluster_a: lo,
-            cluster_b: hi,
+            cluster_a: a,
+            cluster_b: b,
             distance,
-            size,
+            size: merged_size,
         });
-
-        members.push(merged);
-        active.retain(|&c| c != cluster_a && c != cluster_b);
-        active.push(next_label);
+        // Union by attaching the larger root under the smaller-indexed one so
+        // the surviving root is deterministic.
+        if root_i > root_j {
+            std::mem::swap(&mut root_i, &mut root_j);
+        }
+        union_find[root_j] = root_i;
+        size[root_i] = merged_size;
+        cluster_id[root_i] = next_label;
         next_label += 1;
     }
 
@@ -434,5 +480,39 @@ mod tests {
         // so each triple stays a (size 3) cluster.
         assert_eq!(clusters.len(), 2);
         assert!(clusters.iter().all(|cluster| cluster.strike_count == 3));
+    }
+}
+
+#[cfg(test)]
+mod perf {
+    use super::*;
+
+    /// Regression guard against the original `O(n^4)` direct scan, which made
+    /// `bo-cluster` spin at 100% CPU for a dense ten-minute window.  With the
+    /// MST-based single linkage this must finish well under a second per few
+    /// thousand strikes.
+    #[test]
+    fn large_input_completes_quickly() {
+        // Dense 10-minute-window style input: many strikes in a small area.
+        let n = 5000;
+        let mut pts = Vec::with_capacity(n);
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        for _ in 0..n {
+            pts.push((11.0 + next() * 0.5, 49.0 + next() * 0.5));
+        }
+        let started = std::time::Instant::now();
+        let merges = single_linkage(&pts);
+        let elapsed = started.elapsed();
+        assert_eq!(merges.len(), n - 1);
+        eprintln!("single_linkage n={n} took {elapsed:?}");
+        // Generous bound so a slow CI machine does not flake, but far below the
+        // old behaviour (which never completed).
+        assert!(elapsed.as_secs() < 30, "too slow: {elapsed:?}");
     }
 }

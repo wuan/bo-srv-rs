@@ -5,17 +5,23 @@
 //! bo-db [--startdate YYYYMMDD] [--starttime HHMM[SS]] [--enddate ...]
 //!       [--endtime ...] [--area WKT] [--useenv] [--tz TZ] [--srid N]
 //!       [--precision N] [--grid F | --x-grid F --y-grid F] [--map]
+//!       [-v] [-d]
 //! ```
 //!
 //! Times default to the last hour (end: now minus one minute) in the selected
-//! time zone.
+//! time zone.  `-v`/`--verbose` and `-d`/`--debug` control logging (and
+//! `RUST_LOG` still overrides).
 
-use blitzortung_srv::cli::{connect_postgres, db_tool, describe_error, exit_with, parse_timezone};
+use blitzortung_srv::cli::{
+    connect_postgres, db_tool, describe_error, exit_with, init_logging, parse_timezone,
+};
 use blitzortung_srv::config::Config;
 
 fn main() {
     let args = <db_tool::DbArgs as clap::Parser>::parse();
     let db_options = db_tool::DbOptions::from_args(&args);
+
+    init_logging(db_options.verbose, db_options.debug);
 
     // Validate the time zone before touching the database, like
     // `cli/db.py.main`.

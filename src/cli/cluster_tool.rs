@@ -70,6 +70,14 @@ pub struct ClusterArgs {
     /// print the clusters as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// enable verbose (info level) logging
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
+
+    /// enable debug logging
+    #[arg(short = 'd', long)]
+    pub debug: bool,
 }
 
 /// Resolved `bo-cluster` options.
@@ -78,6 +86,8 @@ pub struct ClusterOptions {
     pub db: DbOptions,
     pub region: Option<i64>,
     pub json: bool,
+    pub verbose: bool,
+    pub debug: bool,
 }
 
 impl ClusterOptions {
@@ -98,11 +108,15 @@ impl ClusterOptions {
             xgrid: None,
             ygrid: None,
             map: false,
+            verbose: args.verbose,
+            debug: args.debug,
         };
         ClusterOptions {
             db,
             region: args.region,
             json: args.json,
+            verbose: args.verbose,
+            debug: args.debug,
         }
     }
 }
@@ -166,8 +180,16 @@ pub async fn fetch_clusters(
     let db = StrikeDb::new(executor, options.db.srid);
     let area = resolve_area(&options.db);
     let strikes = db.select(interval, area.as_ref(), options.region).await?;
+    log::debug!("selected {} strikes for clustering", strikes.len());
 
+    let mut timer = Timer::new();
     let clusters = Clustering::new().build_clusters(&strikes, interval);
+    let cluster_time = timer.lap();
+    log::info!(
+        "built {} clusters from {} strikes in {cluster_time:.3} seconds",
+        clusters.len(),
+        strikes.len()
+    );
 
     if options.json {
         let json: Vec<ClusterJson> = clusters.iter().map(ClusterJson::from).collect();
@@ -239,7 +261,24 @@ mod tests {
             tz: "UTC".into(),
             srid: 4326,
             json: false,
+            verbose: false,
+            debug: false,
         })
+    }
+
+    #[test]
+    fn verbose_and_debug_flags_are_parsed() {
+        let args =
+            ClusterArgs::try_parse_from(["bo-cluster", "-v", "-d", "--json"]).expect("parse");
+        assert!(args.verbose);
+        assert!(args.debug);
+        assert!(args.json);
+        let options = ClusterOptions::from_args(&args);
+        assert!(options.verbose);
+        assert!(options.debug);
+        // The `-v`/`-d` flags are forwarded to the shared `bo-db` options too.
+        assert!(options.db.verbose);
+        assert!(options.db.debug);
     }
 
     #[test]

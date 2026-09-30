@@ -11,15 +11,19 @@
 //! The start time defaults to the last ten minutes (end: now minus one minute)
 //! in the selected time zone, matching the original cluster tool; the
 //! `%Y%m%d`/`%H%M[%S]` parsing is otherwise the same as `bo-db`.
+//! `-v`/`--verbose` and `-d`/`--debug` control logging (and `RUST_LOG` still
+//! overrides).
 
 use blitzortung_srv::cli::{
-    cluster_tool, connect_postgres, describe_error, exit_with, parse_timezone,
+    cluster_tool, connect_postgres, describe_error, exit_with, init_logging, parse_timezone,
 };
 use blitzortung_srv::config::Config;
 
 fn main() {
     let args = <cluster_tool::ClusterArgs as clap::Parser>::parse();
     let options = cluster_tool::ClusterOptions::from_args(&args);
+
+    init_logging(options.verbose, options.debug);
 
     // Validate the time zone before touching the database, like `bo-db`.
     if parse_timezone(&options.db.tz).is_none() {

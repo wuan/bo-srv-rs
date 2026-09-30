@@ -76,6 +76,14 @@ pub struct DbArgs {
     /// show ascii map instead of numerical grid
     #[arg(long)]
     pub map: bool,
+
+    /// enable verbose (info level) logging
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
+
+    /// enable debug logging
+    #[arg(short = 'd', long)]
+    pub debug: bool,
 }
 
 /// Resolved `bo-db` options.
@@ -94,6 +102,8 @@ pub struct DbOptions {
     pub xgrid: Option<f64>,
     pub ygrid: Option<f64>,
     pub map: bool,
+    pub verbose: bool,
+    pub debug: bool,
 }
 
 impl DbOptions {
@@ -113,6 +123,8 @@ impl DbOptions {
             xgrid: None,
             ygrid: None,
             map: false,
+            verbose: false,
+            debug: false,
         }
     }
 
@@ -132,6 +144,8 @@ impl DbOptions {
             xgrid: args.x_grid,
             ygrid: args.y_grid,
             map: args.map,
+            verbose: args.verbose,
+            debug: args.debug,
         }
     }
 }
