@@ -3,8 +3,9 @@
 //!
 //! The Python reference (`blitzortung.clustering`) is a library only; this tool
 //! wires it to the existing `bo-db` query plumbing so the algorithm can be
-//! exercised against the database.  It is read-only: it selects strikes from the
-//! `strikes` table and never touches the schema.
+//! exercised against the database.  It is read-only by default (it selects
+//! strikes from the `strikes` table and prints the clusters); with `--insert` it
+//! additionally persists the detected clusters to `strike_clusters`.
 
 use chrono::Timelike;
 use clap::Parser;
@@ -14,7 +15,7 @@ use crate::cli::db_tool::{resolve_area, DbOptions};
 use crate::cli::{parse_local_time, parse_timezone, DATE_FORMAT};
 use crate::clustering::Clustering;
 use crate::data::StrikeCluster;
-use crate::db::StrikeDb;
+use crate::db::{StrikeClusterDb, StrikeDb};
 use crate::executor::QueryExecutor;
 use crate::query::TimeInterval;
 use crate::util::Timer;
@@ -44,7 +45,7 @@ pub const DEFAULT_INTERVAL_MINUTES: i64 = 10;
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "bo-cluster",
-    about = "Detect strike clusters over a time interval (read-only)",
+    about = "Detect strike clusters over a time interval and print/persist them",
     version
 )]
 pub struct ClusterArgs {
@@ -88,6 +89,10 @@ pub struct ClusterArgs {
     #[arg(long)]
     pub json: bool,
 
+    /// persist the detected clusters to the `strike_clusters` table
+    #[arg(long)]
+    pub insert: bool,
+
     /// enable verbose (info level) logging
     #[arg(short = 'v', long)]
     pub verbose: bool,
@@ -106,6 +111,9 @@ pub struct ClusterOptions {
     pub minutes: Option<i64>,
     pub region: Option<i64>,
     pub json: bool,
+    /// Persist detected clusters to `strike_clusters` (see
+    /// [`insert_clusters`] for the idempotency rule).
+    pub insert: bool,
     pub verbose: bool,
     pub debug: bool,
 }
@@ -136,6 +144,7 @@ impl ClusterOptions {
             minutes: args.minutes,
             region: args.region,
             json: args.json,
+            insert: args.insert,
             verbose: args.verbose,
             debug: args.debug,
         }
@@ -284,12 +293,12 @@ pub fn render_text(cluster: &StrikeCluster) -> String {
     )
 }
 
-/// Select the strikes for `interval`, cluster them and render the output.
-pub async fn fetch_clusters(
+/// Select the strikes for `interval` and build the clusters.
+pub async fn collect_clusters(
     executor: &dyn QueryExecutor,
     options: &ClusterOptions,
     interval: &TimeInterval,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<StrikeCluster>, Box<dyn std::error::Error + Send + Sync>> {
     let db = StrikeDb::new(executor, options.db.srid);
     let area = resolve_area(&options.db);
     let strikes = db.select(interval, area.as_ref(), options.region).await?;
@@ -303,10 +312,17 @@ pub async fn fetch_clusters(
         clusters.len(),
         strikes.len()
     );
+    Ok(clusters)
+}
 
-    if options.json {
+/// Render `clusters` as JSON (`--json`) or one text line each.
+pub fn render_clusters(
+    clusters: &[StrikeCluster],
+    json: bool,
+) -> Result<String, serde_json::Error> {
+    if json {
         let json: Vec<ClusterJson> = clusters.iter().map(ClusterJson::from).collect();
-        Ok(serde_json::to_string(&json)?)
+        serde_json::to_string(&json)
     } else {
         Ok(clusters
             .iter()
@@ -314,6 +330,70 @@ pub async fn fetch_clusters(
             .collect::<Vec<_>>()
             .join("\n"))
     }
+}
+
+/// Select the strikes for `interval`, cluster them and render the output.
+pub async fn fetch_clusters(
+    executor: &dyn QueryExecutor,
+    options: &ClusterOptions,
+    interval: &TimeInterval,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let clusters = collect_clusters(executor, options, interval).await?;
+    Ok(render_clusters(&clusters, options.json)?)
+}
+
+/// The largest `interval_seconds` value the `SMALLINT` column can hold.
+pub const MAX_INTERVAL_SECONDS: i64 = i16::MAX as i64;
+
+/// Persist `clusters` to `strike_clusters`, skipping ones that are already
+/// stored for this interval length.
+///
+/// Idempotency follows the Python `get_latest_time` continuation approach: the
+/// newest stored `"timestamp"` for `interval_seconds` is read once, and only
+/// clusters whose timestamp is **strictly newer** than that are inserted.  A
+/// re-run of the same window therefore inserts nothing instead of creating
+/// duplicates.  Returns the number of clusters actually inserted.
+///
+/// `interval_seconds` is stored in a `SMALLINT` column, so an interval larger
+/// than [`MAX_INTERVAL_SECONDS`] (32767 s) is rejected rather than truncated.
+pub async fn insert_clusters(
+    executor: &dyn QueryExecutor,
+    options: &ClusterOptions,
+    interval: &TimeInterval,
+    clusters: &[StrikeCluster],
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let interval_seconds = interval.duration_seconds();
+    if interval_seconds > MAX_INTERVAL_SECONDS {
+        return Err(format!(
+            "interval of {interval_seconds} seconds exceeds the strike_clusters SMALLINT limit \
+             of {MAX_INTERVAL_SECONDS} seconds; shorten the window with --minutes"
+        )
+        .into());
+    }
+
+    let db = StrikeClusterDb::new(executor, options.db.srid);
+    let latest = db.get_latest_time(interval_seconds).await?;
+    log::debug!(
+        "latest stored cluster for interval_seconds={interval_seconds}: {}",
+        match latest {
+            Some(value) => value.to_rfc3339(),
+            None => "none".to_string(),
+        }
+    );
+
+    let mut inserted = 0usize;
+    for cluster in clusters {
+        let timestamp = cluster
+            .timestamp
+            .datetime
+            .ok_or_else(|| "cluster has no timestamp".to_string())?;
+        if latest.is_some_and(|value| timestamp <= value) {
+            continue;
+        }
+        db.insert(cluster).await?;
+        inserted += 1;
+    }
+    Ok(inserted)
 }
 
 /// Entry point for the `bo-cluster` binary, given a connected executor.
@@ -335,24 +415,43 @@ pub async fn run(
     let interval = TimeInterval::new(start, end);
 
     let mut timer = Timer::new();
-    let output = fetch_clusters(executor, options, &interval).await?;
+    let clusters = collect_clusters(executor, options, &interval).await?;
+    let output = render_clusters(&clusters, options.json)?;
     let elapsed = timer.lap();
 
     if !output.is_empty() {
         println!("{output}");
     }
-    let count = if options.json {
-        serde_json::from_str::<Vec<serde_json::Value>>(&output)
-            .map(|values| values.len())
-            .unwrap_or(0)
+
+    // `--insert` persists the clusters after the (unchanged) output is printed.
+    let inserted = if options.insert {
+        match insert_clusters(executor, options, &interval, &clusters).await {
+            Ok(inserted) => inserted,
+            Err(error) => {
+                return Err(format!("failed to insert clusters: {error}").into());
+            }
+        }
     } else {
-        output.lines().filter(|line| !line.is_empty()).count()
+        0
     };
+
+    let count = clusters.len();
     eprintln!(
         "built {count} clusters from {} to {} in {elapsed:.3} seconds",
         start.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S"),
         end.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S"),
     );
+    if options.insert {
+        if inserted == 0 {
+            eprintln!(
+                "inserted 0 clusters: no newer interval than the latest stored \
+                 interval_seconds={} (already up to date)",
+                interval.duration_seconds()
+            );
+        } else {
+            eprintln!("inserted {inserted} clusters into strike_clusters");
+        }
+    }
     Ok(())
 }
 
@@ -375,6 +474,7 @@ mod tests {
             tz: "UTC".into(),
             srid: 4326,
             json: false,
+            insert: false,
             verbose: false,
             debug: false,
         })
@@ -571,5 +671,129 @@ mod tests {
         );
         let output = fetch_clusters(&mock, &options(), &interval).await.unwrap();
         assert!(output.is_empty());
+    }
+
+    // -- `--insert` ---------------------------------------------------------
+
+    fn cluster_at(timestamp: chrono::DateTime<Utc>) -> crate::data::StrikeCluster {
+        crate::data::StrikeCluster {
+            id: -1,
+            timestamp: crate::data::Timestamp::new(timestamp, 0),
+            interval_seconds: 600,
+            shape: Some(vec![
+                (11.0, 51.0),
+                (11.1, 51.0),
+                (11.1, 51.1),
+                (11.0, 51.1),
+                (11.0, 51.0),
+            ]),
+            strike_count: 3,
+            area: None,
+        }
+    }
+
+    fn minute_interval() -> TimeInterval {
+        TimeInterval::new(
+            Utc.with_ymd_and_hms(2025, 1, 1, 11, 50, 0).unwrap(),
+            Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap(),
+        )
+    }
+
+    #[test]
+    fn insert_flag_is_parsed() {
+        let args = ClusterArgs::try_parse_from(["bo-cluster", "--insert"]).expect("parse");
+        assert!(args.insert);
+        assert!(ClusterOptions::from_args(&args).insert);
+        let args = ClusterArgs::try_parse_from(["bo-cluster"]).expect("parse");
+        assert!(!ClusterOptions::from_args(&args).insert);
+    }
+
+    #[tokio::test]
+    async fn insert_clusters_writes_each_cluster() {
+        let mut mock = MockExecutor::new();
+        // No stored cluster yet for interval_seconds=600.
+        mock.add_rows("FROM strike_clusters", vec![]);
+        let mut opts = options();
+        opts.insert = true;
+        let interval = minute_interval();
+        let end = Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
+        let clusters = vec![
+            cluster_at(end - chrono::Duration::minutes(2)),
+            cluster_at(end),
+        ];
+
+        let inserted = insert_clusters(&mock, &opts, &interval, &clusters)
+            .await
+            .unwrap();
+        assert_eq!(inserted, 2);
+        let executions = mock.executions();
+        assert_eq!(executions.len(), 2, "one INSERT per cluster");
+        for (sql, params) in &executions {
+            assert!(sql.contains("INSERT INTO strike_clusters"), "sql: {sql}");
+            assert_eq!(params[1], crate::executor::Param::Int(600));
+            assert_eq!(params[4], crate::executor::Param::Int(3));
+        }
+        // The guard read the latest stored timestamp for this interval length.
+        assert!(mock.calls()[0].0.contains("FROM strike_clusters"));
+    }
+
+    #[tokio::test]
+    async fn insert_clusters_skips_when_not_newer() {
+        let mut mock = MockExecutor::new();
+        let end = Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
+        // Latest stored cluster is exactly the cluster we would insert.
+        mock.add_rows(
+            "FROM strike_clusters",
+            vec![Row::new(vec![Value::Timestamp(end)])],
+        );
+        let opts = options();
+        let clusters = vec![cluster_at(end)];
+
+        let inserted = insert_clusters(&mock, &opts, &minute_interval(), &clusters)
+            .await
+            .unwrap();
+        assert_eq!(inserted, 0, "nothing newer than the stored timestamp");
+        assert!(
+            mock.executions().is_empty(),
+            "no INSERT when the guard skips"
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_clusters_inserts_newer_than_latest() {
+        let mut mock = MockExecutor::new();
+        let end = Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
+        // Latest stored is older than the cluster's timestamp.
+        mock.add_rows(
+            "FROM strike_clusters",
+            vec![Row::new(vec![Value::Timestamp(
+                end - chrono::Duration::minutes(10),
+            )])],
+        );
+        let opts = options();
+        let clusters = vec![cluster_at(end)];
+
+        let inserted = insert_clusters(&mock, &opts, &minute_interval(), &clusters)
+            .await
+            .unwrap();
+        assert_eq!(inserted, 1);
+        assert_eq!(mock.execution_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn insert_clusters_rejects_interval_over_smallint() {
+        let mock = MockExecutor::new();
+        let opts = options();
+        // 40000s window: > i16::MAX, must error before touching the database.
+        let interval = TimeInterval::new(
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2025, 1, 1, 11, 6, 40).unwrap(),
+        );
+        let error = insert_clusters(&mock, &opts, &interval, &[cluster_at(interval.end)])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("SMALLINT"), "error: {error}");
+        assert_eq!(mock.call_count(), 0, "no query must be issued");
+        assert_eq!(mock.execution_count(), 0, "no insert must be issued");
     }
 }
