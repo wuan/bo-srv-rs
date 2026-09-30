@@ -386,7 +386,11 @@ ASCII world maps alone.
 
 `--format html` (see issue #28) produces a **standalone static HTML report**: a
 self-contained document (inline stylesheet, no external resources) with the
-summary cards, the top lists and the `data_area` distribution as tables, plus
+summary cards, the top lists and the `data_area` distribution as tables.  Each
+top list (countries, cities and client versions) renders as a single
+label/count column pair for up to ten entries; with `--top N` above ten it
+switches to two side-by-side column pairs of up to ten entries each, so the
+report stays compact.  The document also carries
 **two SVG world maps** — one for the background/offline queries and one for the
 interactive queries.  Each map is an equirectangular projection of a light-gray
 landmass basemap (very light gray water, light gray land) — enough to give the

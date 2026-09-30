@@ -365,6 +365,77 @@ fn html_report_escapes_labels() {
     );
 }
 
+/// More than ten top entries switch the table to two label/count column pairs;
+/// ten or fewer keep the single pair.
+#[test]
+fn html_report_uses_column_pairs_beyond_ten_entries() {
+    let entries = |n: usize| -> Vec<TopEntry> {
+        (0..n)
+            .map(|i| TopEntry {
+                label: format!("C{i}"),
+                count: (n - i) as u64,
+            })
+            .collect()
+    };
+    let stats = ServiceLogStats {
+        total_requests: 12,
+        countries: entries(12),
+        cities: entries(4),
+        versions: entries(11),
+        ..ServiceLogStats::default()
+    };
+    let html = render_html("2023-11-14", &stats);
+
+    // 12 countries -> two column pairs and all 12 labels are present.
+    let countries = html
+        .split("<h2>Top countries</h2>")
+        .nth(1)
+        .unwrap()
+        .split("</table>")
+        .next()
+        .unwrap();
+    assert_eq!(
+        countries.matches("<th class=\"num\">requests</th>").count(),
+        2,
+        "{countries}"
+    );
+    for i in 0..12 {
+        assert!(countries.contains(&format!("<td>C{i}</td>")), "{countries}");
+    }
+    // The first ten entries are in the left pair, the last two in the right.
+    assert!(
+        countries
+            .contains("<td>C0</td><td class=\"num\">12</td><td>C10</td><td class=\"num\">2</td>"),
+        "{countries}"
+    );
+
+    // 11 versions -> also two column pairs; 4 cities -> a single pair.
+    let versions = html
+        .split("<h2>Top client versions</h2>")
+        .nth(1)
+        .unwrap()
+        .split("</table>")
+        .next()
+        .unwrap();
+    assert_eq!(
+        versions.matches("<th class=\"num\">requests</th>").count(),
+        2,
+        "{versions}"
+    );
+    let cities = html
+        .split("<h2>Top cities</h2>")
+        .nth(1)
+        .unwrap()
+        .split("</table>")
+        .next()
+        .unwrap();
+    assert_eq!(
+        cities.matches("<th class=\"num\">requests</th>").count(),
+        1,
+        "{cities}"
+    );
+}
+
 /// `escape_html` covers the five metacharacters.
 #[test]
 fn escape_html_covers_metacharacters() {

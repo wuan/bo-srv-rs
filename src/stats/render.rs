@@ -135,21 +135,67 @@ pub(crate) fn escape_html(value: &str) -> String {
     out
 }
 
-/// Render a "top N" list as HTML table rows (`<tr><td>label</td><td>count</td>`).
-fn top_table_rows(entries: &[TopEntry]) -> String {
-    if entries.is_empty() {
-        return "      <tr><td colspan=\"2\" class=\"empty\">(none)</td></tr>\n".to_string();
-    }
-    let mut rows = String::new();
-    for entry in entries {
-        let _ = writeln!(
-            rows,
-            "      <tr><td>{}</td><td class=\"num\">{}</td></tr>",
-            escape_html(&entry.label),
-            entry.count
+/// The number of entries a single label/count column pair holds before the
+/// top-list table switches to two side-by-side column pairs.
+const COLUMN_PAIR_LIMIT: usize = 10;
+
+/// The two `<td>` cells (label and count) of one top entry.
+fn top_entry_cells(entry: &TopEntry) -> String {
+    format!(
+        "<td>{}</td><td class=\"num\">{}</td>",
+        escape_html(&entry.label),
+        entry.count
+    )
+}
+
+/// Render a "top N" list as a complete HTML `<table>`.
+///
+/// Up to [`COLUMN_PAIR_LIMIT`] entries use a single label/count column pair
+/// (the layout for the ordinary top-10 lists).  With more than that the table
+/// switches to **two side-by-side column pairs**: the first ten entries in the
+/// left pair, the next ten in the right, so each pair holds up to ten entries.
+fn top_table(title: &str, entries: &[TopEntry]) -> String {
+    let mut table = String::new();
+    if entries.len() <= COLUMN_PAIR_LIMIT {
+        let _ = write!(
+            table,
+            "  <table>\n    <thead><tr><th>{}</th>\
+             <th class=\"num\">requests</th></tr></thead>\n    <tbody>\n",
+            escape_html(title)
         );
+        if entries.is_empty() {
+            table.push_str("      <tr><td colspan=\"2\" class=\"empty\">(none)</td></tr>\n");
+        } else {
+            for entry in entries {
+                let _ = writeln!(table, "      <tr>{}</tr>", top_entry_cells(entry));
+            }
+        }
+        table.push_str("    </tbody>\n  </table>\n");
+        return table;
     }
-    rows
+
+    let (left, right) = entries.split_at(COLUMN_PAIR_LIMIT);
+    let _ = write!(
+        table,
+        "  <table>\n    <thead><tr><th>{}</th>\
+         <th class=\"num\">requests</th>\
+         <th>{}</th><th class=\"num\">requests</th></tr></thead>\n    <tbody>\n",
+        escape_html(title),
+        escape_html(title)
+    );
+    for i in 0..left.len().max(right.len()) {
+        let left_cells = left
+            .get(i)
+            .map(top_entry_cells)
+            .unwrap_or_else(|| "<td></td><td></td>".to_string());
+        let right_cells = right
+            .get(i)
+            .map(top_entry_cells)
+            .unwrap_or_else(|| "<td></td><td></td>".to_string());
+        let _ = writeln!(table, "      <tr>{left_cells}{right_cells}</tr>");
+    }
+    table.push_str("    </tbody>\n  </table>\n");
+    table
 }
 
 /// Render the `data_area` distribution as HTML table rows with a scaled bar.
@@ -281,19 +327,14 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
     );
     html.push_str("  </div>\n");
 
-    // Top lists.
+    // Top lists.  With more than ten entries (countries, cities or client
+    // versions) the table switches to two side-by-side column pairs.
     for (title, entries) in [
         ("Top countries", &stats.countries),
         ("Top cities", &stats.cities),
         ("Top client versions", &stats.versions),
     ] {
-        let _ = write!(
-            html,
-            "  <h2>{title}</h2>\n  <table>\n    <thead><tr><th>{}</th>\
-             <th class=\"num\">requests</th></tr></thead>\n    <tbody>\n{}    </tbody>\n  </table>\n",
-            escape(title),
-            top_table_rows(entries)
-        );
+        let _ = write!(html, "  <h2>{title}</h2>\n{}", top_table(title, entries));
     }
 
     // data_area distribution.
