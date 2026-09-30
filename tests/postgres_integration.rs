@@ -897,7 +897,9 @@ fn cluster_select_filters_by_geometry() {
 #[test]
 fn cluster_tool_insert_persists_and_is_idempotent() {
     let ctx = ClusterTestContext::new();
-    let end = chrono::Utc::now();
+    // A timestamp with sub-microsecond digits, so the `timestamptz` round-trip
+    // truncates it and the guard is actually exercised (the CI regression).
+    let end = chrono::Utc::now() + chrono::Duration::nanoseconds(500);
     let interval = TimeInterval::new(end - chrono::Duration::minutes(10), end);
     ctx.runtime.block_on(async {
         let args =

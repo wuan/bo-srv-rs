@@ -387,13 +387,31 @@ pub async fn insert_clusters(
             .timestamp
             .datetime
             .ok_or_else(|| "cluster has no timestamp".to_string())?;
-        if latest.is_some_and(|value| timestamp <= value) {
+        // `strike_clusters."timestamp"` is a `timestamptz`, whose resolution is
+        // microseconds: a cluster timestamp with sub-microsecond digits comes
+        // back from `get_latest_time` truncated (or rounded) to microseconds, so
+        // comparing the raw nanosecond value would treat an already-stored
+        // interval as newer and re-insert it.  Compare at microsecond precision
+        // (floored, matching the truncation `timestamptz` performs) so a re-run
+        // of the same interval is skipped.
+        if latest.is_some_and(|value| floor_to_micros(timestamp) <= value) {
             continue;
         }
         db.insert(cluster).await?;
         inserted += 1;
     }
     Ok(inserted)
+}
+
+/// Truncate a timestamp to whole microseconds (the `timestamptz` resolution).
+///
+/// `strike_clusters."timestamp"` is stored as `timestamptz`, which keeps
+/// microsecond precision; comparing an in-memory nanosecond timestamp against a
+/// stored one must therefore ignore the sub-microsecond remainder.
+fn floor_to_micros(timestamp: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    let micros = timestamp.timestamp_micros();
+    chrono::DateTime::from_timestamp_micros(micros)
+        .expect("timestamp_micros is always representable")
 }
 
 /// Entry point for the `bo-cluster` binary, given a connected executor.
@@ -756,6 +774,56 @@ mod tests {
         assert!(
             mock.executions().is_empty(),
             "no INSERT when the guard skips"
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_clusters_skips_within_same_microsecond() {
+        // Regression for the CI PostGIS failure: `timestamptz` keeps only
+        // microseconds, so a cluster timestamp with a sub-microsecond remainder
+        // (e.g. `Utc::now()`) reads back truncated.  The guard must still treat
+        // it as "already stored" and not re-insert the same interval.
+        let mut mock = MockExecutor::new();
+        let end = Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
+        // 500 ns past the whole microsecond: `timestamptz` truncates this back
+        // to `end`, so a raw nanosecond comparison sees it as "newer".
+        let cluster_time = end + chrono::Duration::nanoseconds(500);
+        assert_eq!(cluster_time.nanosecond() % 1000, 500);
+        // What Postgres would have stored: the same instant floored to micros.
+        let stored = end;
+        mock.add_rows(
+            "FROM strike_clusters",
+            vec![Row::new(vec![Value::Timestamp(stored)])],
+        );
+        let opts = options();
+        let clusters = vec![cluster_at(cluster_time)];
+
+        let inserted = insert_clusters(&mock, &opts, &minute_interval(), &clusters)
+            .await
+            .unwrap();
+        assert_eq!(
+            inserted, 0,
+            "sub-microsecond remainder must not defeat the guard"
+        );
+        assert!(mock.executions().is_empty());
+    }
+
+    #[test]
+    fn floor_to_micros_truncates_submicrosecond_digits() {
+        let value = Utc
+            .with_ymd_and_hms(2025, 1, 1, 12, 0, 0)
+            .unwrap()
+            .with_nanosecond(123_456_789)
+            .unwrap();
+        let floored = floor_to_micros(value);
+        assert_eq!(floored.nanosecond() % 1000, 0, "no sub-microsecond digits");
+        // 123_456_789 ns truncates to 123_456 us = .123456 s.
+        assert_eq!(
+            floored,
+            Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0)
+                .unwrap()
+                .with_nanosecond(123_456_000)
+                .unwrap()
         );
     }
 
