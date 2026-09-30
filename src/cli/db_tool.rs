@@ -76,6 +76,14 @@ pub struct DbArgs {
     /// show ascii map instead of numerical grid
     #[arg(long)]
     pub map: bool,
+
+    /// enable verbose (info level) logging
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
+
+    /// enable debug logging
+    #[arg(short = 'd', long)]
+    pub debug: bool,
 }
 
 /// Resolved `bo-db` options.
@@ -94,6 +102,8 @@ pub struct DbOptions {
     pub xgrid: Option<f64>,
     pub ygrid: Option<f64>,
     pub map: bool,
+    pub verbose: bool,
+    pub debug: bool,
 }
 
 impl DbOptions {
@@ -113,6 +123,8 @@ impl DbOptions {
             xgrid: None,
             ygrid: None,
             map: false,
+            verbose: false,
+            debug: false,
         }
     }
 
@@ -132,6 +144,8 @@ impl DbOptions {
             xgrid: args.x_grid,
             ygrid: args.y_grid,
             map: args.map,
+            verbose: args.verbose,
+            debug: args.debug,
         }
     }
 }
@@ -171,12 +185,25 @@ pub fn resolve_interval(
     options: &DbOptions,
     now: chrono::DateTime<Utc>,
 ) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    resolve_interval_with_lookback(options, now, Duration::hours(1))
+}
+
+/// Resolve the time interval with a configurable default lookback for the start
+/// time (`bo-db` uses one hour; `bo-cluster` defaults to the last ten minutes).
+///
+/// The parsing, time zone handling and implicit end time are identical to
+/// [`resolve_interval`]; only the default `start_time` differs.
+pub fn resolve_interval_with_lookback(
+    options: &DbOptions,
+    now: chrono::DateTime<Utc>,
+    default_lookback: Duration,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
     let tz = match parse_timezone(&options.tz) {
         Some(tz) => tz,
         None => exit_with(&format!("parse error in timezone \"{}\"", options.tz), 1),
     };
 
-    let start_time = now - Duration::hours(1);
+    let start_time = now - default_lookback;
     let end_time = now - Duration::minutes(1);
 
     let startdate = if options.startdate == "default" {

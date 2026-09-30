@@ -7,6 +7,7 @@
 //! by all four tools: time-zone handling, logging setup, `sys.exit`-style
 //! helpers, the PostgreSQL connection helper and an inter-process file lock.
 
+pub mod cluster_tool;
 pub mod db_tool;
 pub mod import_tool;
 pub mod import_websocket_tool;

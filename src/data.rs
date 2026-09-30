@@ -370,6 +370,53 @@ impl Strike {
     }
 }
 
+/// A detected strike cluster (port of `blitzortung.data.StrikeCluster`).
+///
+/// `shape` is the cluster's outer boundary as a closed list of `(lon, lat)`
+/// coordinate pairs (the rounded exterior ring), or `None` when no shape could
+/// be built.  `area` is the geodesic polygon area in km² rounded to one decimal
+/// (the Python `PolygonArea(...).Compute(False, True)[2] / 1e6`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrikeCluster {
+    /// Cluster id; `-1` until a database assigns one (Python default).
+    pub id: i64,
+    pub timestamp: Timestamp,
+    pub interval_seconds: i64,
+    pub shape: Option<Vec<(f64, f64)>>,
+    pub strike_count: i64,
+    pub area: Option<f64>,
+}
+
+impl std::fmt::Display for StrikeCluster {
+    /// `data.StrikeCluster.__str__`:
+    /// `StrikeCluster(id, timestamp, interval, <shape>, strike_count, area)`.
+    ///
+    /// The Python shape rendering is the GeoJSON-like `mapping(shape)`; here the
+    /// ring is rendered as its coordinate list.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let shape = match &self.shape {
+            Some(ring) => format!(
+                "{{'type': 'LineString', 'coordinates': [{}]}}",
+                ring.iter()
+                    .map(|(x, y)| format!("[{x}, {y}]"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None => "None".to_string(),
+        };
+        write!(
+            f,
+            "StrikeCluster({}, {}, {}, {}, {}, {:.1})",
+            self.id,
+            self.timestamp.event_string(),
+            self.interval_seconds,
+            shape,
+            self.strike_count,
+            self.area.unwrap_or(0.0),
+        )
+    }
+}
+
 /// One grid cell (port of `blitzortung.geom.GridElement`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GridElement {

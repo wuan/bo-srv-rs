@@ -25,6 +25,7 @@
 pub mod builder;
 pub mod cache;
 pub mod cli;
+pub mod clustering;
 pub mod config;
 pub mod data;
 pub mod dataimport;
