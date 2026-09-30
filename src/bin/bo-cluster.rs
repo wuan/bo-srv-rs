@@ -8,8 +8,9 @@
 //!            [--json]
 //! ```
 //!
-//! Times default to the last hour (end: now minus one minute) in the selected
-//! time zone, exactly like `bo-db`.
+//! The start time defaults to the last ten minutes (end: now minus one minute)
+//! in the selected time zone, matching the original cluster tool; the
+//! `%Y%m%d`/`%H%M[%S]` parsing is otherwise the same as `bo-db`.
 
 use blitzortung_srv::cli::{
     cluster_tool, connect_postgres, describe_error, exit_with, parse_timezone,

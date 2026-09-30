@@ -9,7 +9,7 @@
 use clap::Parser;
 use serde::Serialize;
 
-use crate::cli::db_tool::{resolve_area, resolve_interval, DbOptions};
+use crate::cli::db_tool::{resolve_area, resolve_interval_with_lookback, DbOptions};
 use crate::cli::{parse_timezone, DATE_FORMAT};
 use crate::clustering::Clustering;
 use crate::data::StrikeCluster;
@@ -18,10 +18,15 @@ use crate::executor::QueryExecutor;
 use crate::query::TimeInterval;
 use crate::util::Timer;
 
+/// Default lookback for the start time: the original cluster tool ran detection
+/// for the last ten minutes (a cluster interval is typically short).
+pub const DEFAULT_INTERVAL_MINUTES: i64 = 10;
+
 /// `bo-cluster` command-line options.
 ///
 /// The time options mirror `bo-db` (`--startdate`/`--starttime`/`--enddate`/
-/// `--endtime` with the same defaults and `%Y%m%d`/`%H%M[%S]` parsing), plus
+/// `--endtime` with the same `%Y%m%d`/`%H%M[%S]` parsing), except that the start
+/// time defaults to the last ten minutes instead of the last hour.  Plus
 /// `--region`, the WKT `--area` filter and the output switch `--json`.
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -187,7 +192,11 @@ pub async fn run(
     }
 
     let now = chrono::Utc::now();
-    let (start, end) = resolve_interval(&options.db, now);
+    let (start, end) = resolve_interval_with_lookback(
+        &options.db,
+        now,
+        chrono::Duration::minutes(DEFAULT_INTERVAL_MINUTES),
+    );
     let interval = TimeInterval::new(start, end);
 
     let mut timer = Timer::new();
@@ -231,6 +240,33 @@ mod tests {
             srid: 4326,
             json: false,
         })
+    }
+
+    #[test]
+    fn default_interval_is_ten_minutes() {
+        let now = Utc.with_ymd_and_hms(2025, 1, 1, 12, 30, 0).unwrap();
+        let (start, end) = resolve_interval_with_lookback(
+            &options().db,
+            now,
+            chrono::Duration::minutes(DEFAULT_INTERVAL_MINUTES),
+        );
+        // start = now - 10min, end = now - 1min (default end is implicit)
+        assert_eq!(start, Utc.with_ymd_and_hms(2025, 1, 1, 12, 20, 0).unwrap());
+        assert_eq!(end, Utc.with_ymd_and_hms(2025, 1, 1, 12, 29, 0).unwrap());
+    }
+
+    #[test]
+    fn explicit_start_overrides_the_ten_minute_default() {
+        let mut opts = options();
+        opts.db.startdate = "20250101".into();
+        opts.db.starttime = "1000".into();
+        let now = Utc.with_ymd_and_hms(2025, 1, 1, 12, 30, 0).unwrap();
+        let (start, _) = resolve_interval_with_lookback(
+            &opts.db,
+            now,
+            chrono::Duration::minutes(DEFAULT_INTERVAL_MINUTES),
+        );
+        assert_eq!(start, Utc.with_ymd_and_hms(2025, 1, 1, 10, 0, 0).unwrap());
     }
 
     fn strike_row(id: i64, x: f64, y: f64) -> Row {

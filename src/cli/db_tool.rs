@@ -171,12 +171,25 @@ pub fn resolve_interval(
     options: &DbOptions,
     now: chrono::DateTime<Utc>,
 ) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    resolve_interval_with_lookback(options, now, Duration::hours(1))
+}
+
+/// Resolve the time interval with a configurable default lookback for the start
+/// time (`bo-db` uses one hour; `bo-cluster` defaults to the last ten minutes).
+///
+/// The parsing, time zone handling and implicit end time are identical to
+/// [`resolve_interval`]; only the default `start_time` differs.
+pub fn resolve_interval_with_lookback(
+    options: &DbOptions,
+    now: chrono::DateTime<Utc>,
+    default_lookback: Duration,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
     let tz = match parse_timezone(&options.tz) {
         Some(tz) => tz,
         None => exit_with(&format!("parse error in timezone \"{}\"", options.tz), 1),
     };
 
-    let start_time = now - Duration::hours(1);
+    let start_time = now - default_lookback;
     let end_time = now - Duration::minutes(1);
 
     let startdate = if options.startdate == "default" {
