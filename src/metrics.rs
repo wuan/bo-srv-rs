@@ -17,6 +17,13 @@ pub mod name {
     pub const STRIKES_GRID_QUERY: &str = "strikes_grid_query";
     pub const GLOBAL_STRIKES_GRID: &str = "global_strikes_grid";
     pub const LOCAL_STRIKES_GRID: &str = "local_strikes_grid";
+    /// Cluster-query metrics (the JSON-RPC cluster methods).  There is no
+    /// Python counterpart: clustering was library-only, so these mirror the
+    /// `strikes_grid` layout under a `clusters` namespace.
+    pub const CLUSTERS: &str = "clusters";
+    pub const CLUSTERS_QUERY: &str = "clusters_query";
+    pub const GLOBAL_CLUSTERS: &str = "global_clusters";
+    pub const LOCAL_CLUSTERS: &str = "local_clusters";
     pub const HISTOGRAM: &str = "histogram";
     pub const DB: &str = "db";
 
@@ -120,6 +127,52 @@ pub trait Metrics: Send + Sync {
             self.incr(&metric_name(&[name::STRIKES_GRID, name::BG_COUNT]), 1);
             self.incr(&metric_name(&[name::LOCAL_STRIKES_GRID, name::BG_COUNT]), 1);
         }
+    }
+
+    /// `get_global_clusters`: count one global cluster request
+    /// (`clusters.total_count`, `global_clusters.total_count`) and gauge its
+    /// cache-hit ratio.  Mirrors [`Metrics::for_global_strikes`].
+    fn for_global_clusters(&self, minute_length: i64, cache_ratio: f64) {
+        self.incr(&metric_name(&[name::CLUSTERS, name::TOTAL_COUNT]), 1);
+        self.incr(&metric_name(&[name::GLOBAL_CLUSTERS, name::TOTAL_COUNT]), 1);
+        self.gauge_f64(
+            &metric_name(&[name::GLOBAL_CLUSTERS, name::CACHE_HITS]),
+            cache_ratio,
+        );
+        if minute_length == 10 {
+            self.incr(&metric_name(&[name::CLUSTERS, name::BG_COUNT]), 1);
+            self.incr(&metric_name(&[name::GLOBAL_CLUSTERS, name::BG_COUNT]), 1);
+        }
+    }
+
+    /// `get_local_clusters`: count one local cluster request with its
+    /// `data_area` (`clusters.total_count`, `local_clusters.total_count`,
+    /// `local_clusters.data_area.<area>`) and gauge its cache-hit ratio.
+    /// Mirrors [`Metrics::for_local_strikes`].
+    fn for_local_clusters(&self, minute_length: i64, data_area: i64, cache_ratio: f64) {
+        self.incr(&metric_name(&[name::CLUSTERS, name::TOTAL_COUNT]), 1);
+        self.incr(&metric_name(&[name::LOCAL_CLUSTERS, name::TOTAL_COUNT]), 1);
+        self.incr(
+            &metric_name(&[
+                name::LOCAL_CLUSTERS,
+                name::DATA_AREA,
+                &data_area.to_string(),
+            ]),
+            1,
+        );
+        self.gauge_f64(
+            &metric_name(&[name::LOCAL_CLUSTERS, name::CACHE_HITS]),
+            cache_ratio,
+        );
+        if minute_length == 10 {
+            self.incr(&metric_name(&[name::CLUSTERS, name::BG_COUNT]), 1);
+            self.incr(&metric_name(&[name::LOCAL_CLUSTERS, name::BG_COUNT]), 1);
+        }
+    }
+
+    /// Count one cluster database query (`clusters_query.count`).
+    fn for_clusters_query(&self) {
+        self.incr(&metric_name(&[name::CLUSTERS_QUERY, name::COUNT]), 1);
     }
 
     /// `StatsDMetrics.for_histogram(cache_ratio, cache_size)`.
@@ -249,6 +302,18 @@ impl Metrics for std::sync::Arc<dyn Metrics> {
 
     fn for_local_strikes(&self, minute_length: i64, data_area: i64, cache_ratio: f64) {
         (**self).for_local_strikes(minute_length, data_area, cache_ratio);
+    }
+
+    fn for_global_clusters(&self, minute_length: i64, cache_ratio: f64) {
+        (**self).for_global_clusters(minute_length, cache_ratio);
+    }
+
+    fn for_local_clusters(&self, minute_length: i64, data_area: i64, cache_ratio: f64) {
+        (**self).for_local_clusters(minute_length, data_area, cache_ratio);
+    }
+
+    fn for_clusters_query(&self) {
+        (**self).for_clusters_query();
     }
 
     fn for_histogram(&self, cache_ratio: f64, cache_size: usize) {
@@ -441,6 +506,9 @@ mod tests {
         metrics.for_strikes(60, 1, 0.5);
         metrics.for_global_strikes(60, 0.25);
         metrics.for_local_strikes(60, 5, 0.0);
+        metrics.for_global_clusters(60, 0.25);
+        metrics.for_local_clusters(60, 5, 0.0);
+        metrics.for_clusters_query();
         metrics.for_histogram(0.0, 0);
         metrics.for_db_pool_wait(0.01);
         metrics.for_grid_total(name::STRIKES_GRID, 0.01);
@@ -548,6 +616,29 @@ mod tests {
             vec![
                 "strikes_grid.total:17|ms".to_string(),
                 "global_strikes_grid.total:1|ms".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn for_clusters_report_total_and_local_global_split() {
+        let metrics = RecordingMetrics::new();
+        metrics.for_global_clusters(60, 0.5);
+        metrics.for_local_clusters(10, 5, 0.25);
+        metrics.for_clusters_query();
+        assert_eq!(
+            metrics.lines(),
+            vec![
+                "clusters.total_count:1|c".to_string(),
+                "global_clusters.total_count:1|c".to_string(),
+                "global_clusters.cache_hits:0.5|g".to_string(),
+                "clusters.total_count:1|c".to_string(),
+                "local_clusters.total_count:1|c".to_string(),
+                "local_clusters.data_area.5:1|c".to_string(),
+                "local_clusters.cache_hits:0.25|g".to_string(),
+                "clusters.bg_count:1|c".to_string(),
+                "local_clusters.bg_count:1|c".to_string(),
+                "clusters_query.count:1|c".to_string(),
             ]
         );
     }

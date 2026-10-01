@@ -305,6 +305,10 @@ pub struct ServiceCache {
     global_strikes_history_grid: ObjectCache,
     local_strikes_grid: ObjectCache,
     local_strikes_history_grid: ObjectCache,
+    global_clusters: ObjectCache,
+    global_clusters_history: ObjectCache,
+    local_clusters: ObjectCache,
+    local_clusters_history: ObjectCache,
     /// Shared histogram cache (long TTL, uncapped).
     pub histogram: ObjectCache,
 }
@@ -337,6 +341,18 @@ impl ServiceCache {
                 Some(Self::LOCAL_CACHE_SIZE_HISTORY),
                 cleanup_period,
             ),
+            global_clusters: ObjectCache::new(Self::TTL_SHORT, None, cleanup_period),
+            global_clusters_history: ObjectCache::new(Self::TTL_LONG, None, cleanup_period),
+            local_clusters: ObjectCache::new(
+                Self::TTL_SHORT,
+                Some(Self::LOCAL_CACHE_SIZE_CURRENT),
+                cleanup_period,
+            ),
+            local_clusters_history: ObjectCache::new(
+                Self::TTL_LONG,
+                Some(Self::LOCAL_CACHE_SIZE_HISTORY),
+                cleanup_period,
+            ),
             histogram: ObjectCache::new(Self::TTL_LONG, None, cleanup_period),
         }
     }
@@ -364,6 +380,24 @@ impl ServiceCache {
             &self.local_strikes_grid
         } else {
             &self.local_strikes_history_grid
+        }
+    }
+
+    /// Current-minute cache for cluster queries with offset 0, history
+    /// otherwise; mirrors [`ServiceCache::local_strikes`].
+    pub fn global_clusters(&self, minute_offset: i64) -> &ObjectCache {
+        if minute_offset == 0 {
+            &self.global_clusters
+        } else {
+            &self.global_clusters_history
+        }
+    }
+
+    pub fn local_clusters(&self, minute_offset: i64) -> &ObjectCache {
+        if minute_offset == 0 {
+            &self.local_clusters
+        } else {
+            &self.local_clusters_history
         }
     }
 }

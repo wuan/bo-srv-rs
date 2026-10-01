@@ -16,10 +16,12 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Map, Value};
 
 use crate::cache::ServiceCache;
+use crate::data::StrikeCluster;
+use crate::db::StrikeClusterDb;
 use crate::executor::{QueryExecutor, Row};
-use crate::geom::{Grid, GridFactory, LocalGrid};
+use crate::geom::{Envelope, Grid, GridFactory, LocalGrid};
 use crate::metrics::Metrics;
-use crate::query::{global_grid_query, grid_query, histogram_query, TimeInterval};
+use crate::query::{global_grid_query, grid_query, histogram_query, Area, TimeInterval};
 use crate::service_log::{epoch_microseconds, UsageLogSender};
 
 pub const SRID: i64 = 4326;
@@ -384,6 +386,106 @@ impl<M: Metrics> Service<M> {
         Ok(response)
     }
 
+    /// `get_global_clusters` producer (cached inside `global_clusters`).
+    ///
+    /// Whole world: no area filter.  The interval end is the newest slot; the
+    /// `interval_count - 1` earlier slots step back by `minute_length`.
+    async fn get_global_clusters(
+        &self,
+        minute_length: i64,
+        minute_offset: i64,
+        interval_count: i64,
+    ) -> Result<Value, ServiceError> {
+        let started = std::time::Instant::now();
+        let time_interval = create_time_interval(minute_length, minute_offset);
+        let clusters = self
+            .select_clusters(&time_interval, interval_count, None)
+            .await?;
+        let response = Self::build_clusters_response(&clusters, &time_interval);
+        // Mirror the grid producers: record the total time once the response
+        // is fully built (a cache miss only).
+        self.metrics.for_grid_total(
+            crate::metrics::name::GLOBAL_CLUSTERS,
+            started.elapsed().as_secs_f64(),
+        );
+        Ok(response)
+    }
+
+    /// `get_local_clusters` producer (cached inside `local_clusters`).
+    ///
+    /// The area filter is the `LocalGrid { data_area, x, y }` neighbourhood
+    /// envelope, matching the local grid endpoint's footprint (no grid
+    /// baseline is involved).
+    async fn get_local_clusters(
+        &self,
+        x: i64,
+        y: i64,
+        minute_length: i64,
+        minute_offset: i64,
+        data_area: i64,
+        interval_count: i64,
+    ) -> Result<Value, ServiceError> {
+        let started = std::time::Instant::now();
+        let local_grid = LocalGrid { data_area, x, y };
+        let area = local_grid_area(&local_grid);
+        let time_interval = create_time_interval(minute_length, minute_offset);
+        let clusters = self
+            .select_clusters(&time_interval, interval_count, Some(&area))
+            .await?;
+        let response = Self::build_clusters_response(&clusters, &time_interval);
+        // Local cluster queries share the `clusters` metric name, like the
+        // local grid shares `strikes_grid`.
+        self.metrics.for_grid_total(
+            crate::metrics::name::CLUSTERS,
+            started.elapsed().as_secs_f64(),
+        );
+        Ok(response)
+    }
+
+    /// Run [`StrikeClusterDb::select`] for the resolved interval and return the
+    /// stored clusters.
+    ///
+    /// Interval mapping: `select`'s `timestamp` is the interval **end**;
+    /// `interval_duration` is `minute_length` minutes (the value stored in the
+    /// `interval_seconds` column); `interval_count` selects the number of slots
+    /// and `interval_offset` defaults to `interval_duration`, so earlier slots
+    /// step back by `minute_length` minutes each (see
+    /// [`crate::query::cluster_select_query`]).
+    async fn select_clusters(
+        &self,
+        time_interval: &TimeInterval,
+        interval_count: i64,
+        area: Option<&Area>,
+    ) -> Result<Vec<StrikeCluster>, ServiceError> {
+        self.metrics.for_clusters_query();
+        let db = StrikeClusterDb::new(self.executor.as_ref(), SRID);
+        db.select(
+            time_interval.end,
+            Duration::seconds(time_interval.duration_seconds()),
+            interval_count,
+            None,
+            area,
+        )
+        .await
+        .map_err(|e| ServiceError::Database(e.to_string()))
+    }
+
+    /// Shape the cluster response
+    /// (`{"t": <end>, "dt": <interval seconds>, "clusters": [...]}`).
+    ///
+    /// `t`/`dt` follow the same conventions as the grid response; each cluster
+    /// is `{id, timestamp, interval_seconds, strike_count, area, shape}` with
+    /// `shape` a list of `[lon, lat]` pairs (empty when the stored shape is
+    /// missing).
+    fn build_clusters_response(clusters: &[StrikeCluster], time_interval: &TimeInterval) -> Value {
+        let items: Vec<Value> = clusters.iter().map(cluster_to_json).collect();
+        let mut response = Map::new();
+        response.insert("t".into(), json!(strftime_yyyymmddthms(time_interval.end)));
+        response.insert("dt".into(), json!(time_interval.duration_seconds()));
+        response.insert("clusters".into(), Value::Array(items));
+        Value::Object(response)
+    }
+
     /// Run a grid query together with its histogram and return both results.
     ///
     /// The two queries are independent, so they are joined before the caller
@@ -519,6 +621,30 @@ impl<M: Metrics> Service<M> {
         grid_base_length: i64,
         min_grid_base_length: i64,
     ) -> Option<String> {
+        if let Some(reason) = self.forbidden_client_reason(request, client, user_agent_version) {
+            return Some(reason);
+        }
+        if grid_base_length < min_grid_base_length {
+            Some(format!(
+                "grid_base_length {grid_base_length} below minimum {min_grid_base_length}"
+            ))
+        } else if !VALID_GRID_BASE_LENGTHS.contains(&grid_base_length) {
+            Some(format!("invalid grid_base_length {grid_base_length}"))
+        } else {
+            None
+        }
+    }
+
+    /// The client-side half of [`Service::forbidden_reason`]: blocked IP,
+    /// invalid user agent, bad content type or non-empty referer.  Shared by
+    /// the grid endpoints (which add the `grid_base_length` rules) and the
+    /// cluster endpoints (which have no grid baseline).
+    fn forbidden_client_reason(
+        &self,
+        request: &Request,
+        client: Option<&str>,
+        user_agent_version: i64,
+    ) -> Option<String> {
         let content_type = request.content_type.as_deref();
         let referer = request.referer.as_deref();
         if client.is_some_and(|client| self.forbidden_ips.contains(client)) {
@@ -532,12 +658,6 @@ impl<M: Metrics> Service<M> {
             Some(format!("bad content type {content_type:?}"))
         } else if referer.is_some_and(|referer| !referer.is_empty()) {
             Some(format!("referer {referer:?}"))
-        } else if grid_base_length < min_grid_base_length {
-            Some(format!(
-                "grid_base_length {grid_base_length} below minimum {min_grid_base_length}"
-            ))
-        } else if !VALID_GRID_BASE_LENGTHS.contains(&grid_base_length) {
-            Some(format!("invalid grid_base_length {grid_base_length}"))
         } else {
             None
         }
@@ -869,6 +989,144 @@ impl<M: Metrics> Service<M> {
         );
         Ok(response)
     }
+
+    /// `jsonrpc_get_global_clusters`.
+    ///
+    /// Validation mirrors the grid handlers (`__to_int` coercion then
+    /// `is_forbidden`) minus the region and `grid_base_length` rules, which do
+    /// not apply to clusters.
+    pub async fn jsonrpc_get_global_clusters(
+        &self,
+        request: &mut Request,
+        minute_length: &Value,
+        minute_offset: &Value,
+        interval_count: &Value,
+    ) -> Result<Value, ServiceError> {
+        let (Some(minute_length), Some(minute_offset), Some(interval_count)) = (
+            to_int(minute_length),
+            to_int(minute_offset),
+            to_int(interval_count),
+        ) else {
+            return Ok(json!({}));
+        };
+
+        let client = request.request_client();
+        let user_agent_version = request.user_agent_version();
+        if let Some(reason) =
+            self.forbidden_client_reason(request, client.as_deref(), user_agent_version)
+        {
+            request.blocked_reason = Some(reason);
+            return Ok(json!({}));
+        }
+
+        let (minute_length, minute_offset) = self
+            .minute_constraints
+            .enforce(minute_length, minute_offset);
+        let interval_count = i64::max(1, interval_count);
+
+        let cache_key = format!(
+            "get_global_clusters|minute_length={minute_length}|minute_offset={minute_offset}|\
+             interval_count={interval_count}"
+        );
+        let response = self
+            .cache
+            .global_clusters(minute_offset)
+            .get_result(&cache_key, || async {
+                self.get_global_clusters(minute_length, minute_offset, interval_count)
+                    .await
+                    .map_err(cache_error)
+            })
+            .await
+            .map_err(service_error)?;
+        let _ = request.fix_bad_accept_header();
+
+        self.metrics.for_global_clusters(
+            minute_length,
+            self.cache.global_clusters(minute_offset).get_ratio(),
+        );
+        Ok(response)
+    }
+
+    /// `jsonrpc_get_local_clusters`.
+    ///
+    /// Validation mirrors the grid handlers (`__to_int` coercion then
+    /// `is_forbidden`) minus the region and `grid_base_length` rules; the local
+    /// `data_area` is clamped with `round(max(5, ..))`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn jsonrpc_get_local_clusters(
+        &self,
+        request: &mut Request,
+        x: &Value,
+        y: &Value,
+        minute_length: &Value,
+        minute_offset: &Value,
+        data_area: &Value,
+        interval_count: &Value,
+    ) -> Result<Value, ServiceError> {
+        let (
+            Some(x),
+            Some(y),
+            Some(minute_length),
+            Some(minute_offset),
+            Some(data_area),
+            Some(interval_count),
+        ) = (
+            to_int(x),
+            to_int(y),
+            to_int(minute_length),
+            to_int(minute_offset),
+            to_int(data_area),
+            to_int(interval_count),
+        )
+        else {
+            return Ok(json!({}));
+        };
+
+        let client = request.request_client();
+        let user_agent_version = request.user_agent_version();
+        if let Some(reason) =
+            self.forbidden_client_reason(request, client.as_deref(), user_agent_version)
+        {
+            request.blocked_reason = Some(reason);
+            return Ok(json!({}));
+        }
+
+        let (minute_length, minute_offset) = self
+            .minute_constraints
+            .enforce(minute_length, minute_offset);
+        let data_area = round_max_5(data_area);
+        let interval_count = i64::max(1, interval_count);
+
+        let cache_key = format!(
+            "get_local_clusters|x={x}|y={y}|minute_length={minute_length}|\
+             minute_offset={minute_offset}|data_area={data_area}|interval_count={interval_count}"
+        );
+        let response = self
+            .cache
+            .local_clusters(minute_offset)
+            .get_result(&cache_key, || async {
+                self.get_local_clusters(
+                    x,
+                    y,
+                    minute_length,
+                    minute_offset,
+                    data_area,
+                    interval_count,
+                )
+                .await
+                .map_err(cache_error)
+            })
+            .await
+            .map_err(service_error)?;
+        let _ = request.fix_bad_accept_header();
+
+        self.metrics.for_local_clusters(
+            minute_length,
+            data_area,
+            self.cache.local_clusters(minute_offset).get_ratio(),
+        );
+        Ok(response)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -963,6 +1221,42 @@ pub fn create_time_interval_at(
 /// Format `%Y%m%dT%H:%M:%S` (UTC).
 fn strftime_yyyymmddthms(ts: DateTime<Utc>) -> String {
     ts.format("%Y%m%dT%H:%M:%S").to_string()
+}
+
+/// The `LocalGrid { data_area, x, y }` neighbourhood envelope as a
+/// [`query::Area`] geometry filter for the local cluster query.
+///
+/// The bounds are the local grid factory's own footprint (reference point,
+/// `data_area * 3` degrees, plus the longitude extension), so the filter covers
+/// exactly the tiles the local grid endpoint is responsible for.
+fn local_grid_area(local_grid: &LocalGrid) -> Area {
+    let factory = local_grid.grid_factory();
+    Area::from_envelope(&Envelope::new(
+        factory.min_lon,
+        factory.max_lon,
+        factory.min_lat,
+        factory.max_lat,
+    ))
+}
+
+/// Shape one stored cluster: `{id, timestamp, interval_seconds, strike_count,
+/// area, shape}` with `shape` as `[lon, lat]` pairs.
+fn cluster_to_json(cluster: &StrikeCluster) -> Value {
+    let shape: Vec<Value> = cluster
+        .shape
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|(lon, lat)| json!([lon, lat]))
+        .collect();
+    json!({
+        "id": cluster.id,
+        "timestamp": cluster.timestamp.event_string(),
+        "interval_seconds": cluster.interval_seconds,
+        "strike_count": cluster.strike_count,
+        "area": cluster.area,
+        "shape": shape,
+    })
 }
 
 /// `histogram.HistogramQuery.build_result`: bin the per-interval counts.
@@ -1916,5 +2210,157 @@ mod tests {
             )
             .await;
         assert_eq!(response.unwrap(), json!({}));
+    }
+
+    // -- cluster methods ----------------------------------------------------
+
+    /// A stored-cluster row (`id, timestamp, geom, strike_count`) as
+    /// `StrikeClusterDb::select` reads it. `shape` is a tiny closed ring.
+    fn cluster_row(id: i64, end: DateTime<Utc>) -> Row {
+        let ring = vec![
+            (11.0, 51.0),
+            (11.1, 51.0),
+            (11.1, 51.1),
+            (11.0, 51.1),
+            (11.0, 51.0),
+        ];
+        Row::new(vec![
+            DBValue::Int(id),
+            DBValue::Timestamp(end),
+            DBValue::Bytea(crate::wkb::linestring(&ring)),
+            DBValue::Int(7),
+        ])
+    }
+
+    #[tokio::test]
+    async fn jsonrpc_get_global_clusters_shapes_response_without_area() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows(
+            "FROM strike_clusters",
+            vec![cluster_row(42, ts(1_700_000_000))],
+        );
+        let mock = Arc::new(mock);
+        let metrics = crate::metrics::RecordingMetrics::new();
+        let service: Service<crate::metrics::RecordingMetrics> =
+            Service::with_parts(mock.clone(), ServiceCache::new(), metrics, HashSet::new());
+        let mut req = req_with("5.6.7.8");
+
+        let response = service
+            .jsonrpc_get_global_clusters(&mut req, &json!(60), &json!(0), &json!(1))
+            .await
+            .unwrap();
+        let obj = response.as_object().expect("cluster response");
+        assert_eq!(obj["dt"].as_i64().unwrap(), 3600);
+        // `t` is the interval end in `%Y%m%dT%H:%M:%S` (the clock is the wall
+        // clock, so only the format is asserted).
+        let t = obj["t"].as_str().unwrap();
+        assert_eq!(t.len(), 17, "got {t}");
+        assert_eq!(t.as_bytes()[8], b'T');
+        assert!(chrono::NaiveDateTime::parse_from_str(t, "%Y%m%dT%H:%M:%S").is_ok());
+        let clusters = obj["clusters"].as_array().unwrap();
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0]["id"], json!(42));
+        assert_eq!(clusters[0]["interval_seconds"], json!(3600));
+        assert_eq!(clusters[0]["strike_count"], json!(7));
+        assert!(clusters[0]["timestamp"]
+            .as_str()
+            .unwrap()
+            .starts_with("2023-11-14"));
+        // The shape round-trips as [lon, lat] pairs.
+        assert_eq!(clusters[0]["shape"][0], json!([11.0, 51.0]));
+
+        // Global: no geometry filter is applied.
+        let calls = mock.calls();
+        let cluster_calls: Vec<&str> = calls
+            .iter()
+            .map(|(sql, _)| sql.as_str())
+            .filter(|sql| sql.contains("FROM strike_clusters"))
+            .collect();
+        assert_eq!(cluster_calls.len(), 1, "one cluster query");
+        assert!(
+            !cluster_calls[0].contains("&& geog"),
+            "global query must not filter by geometry"
+        );
+        // One query counted, plus the global cluster request metrics.
+        let lines = service.metrics.lines();
+        assert!(lines.contains(&"clusters_query.count:1|c".to_string()));
+        assert!(lines.contains(&"clusters.total_count:1|c".to_string()));
+        assert!(lines.contains(&"global_clusters.total_count:1|c".to_string()));
+        assert!(lines.contains(&"global_clusters.total:1|ms".to_string()));
+    }
+
+    #[tokio::test]
+    async fn jsonrpc_get_local_clusters_applies_local_area() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows(
+            "FROM strike_clusters",
+            vec![cluster_row(1, ts(1_700_000_000))],
+        );
+        let mock = Arc::new(mock);
+        let metrics = crate::metrics::RecordingMetrics::new();
+        let service: Service<crate::metrics::RecordingMetrics> =
+            Service::with_parts(mock.clone(), ServiceCache::new(), metrics, HashSet::new());
+        let mut req = req_with("5.6.7.8");
+
+        // data_area 1 is clamped up to 5.
+        let response = service
+            .jsonrpc_get_local_clusters(
+                &mut req,
+                &json!(3),
+                &json!(10),
+                &json!(30),
+                &json!(0),
+                &json!(1),
+                &json!(1),
+            )
+            .await
+            .unwrap();
+        assert!(response.get("clusters").is_some());
+
+        // The local query carries the neighbourhood envelope geometry filter.
+        let calls = mock.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|(sql, _)| sql.contains("FROM strike_clusters") && sql.contains("&& geog")),
+            "local query must filter by the local-grid envelope: {:?}",
+            calls.iter().map(|(sql, _)| sql).collect::<Vec<_>>()
+        );
+        let lines = service.metrics.lines();
+        assert!(lines.contains(&"clusters.total_count:1|c".to_string()));
+        assert!(lines.contains(&"local_clusters.total_count:1|c".to_string()));
+        // data_area clamped to 5 for the metric/area.
+        assert!(lines.contains(&"local_clusters.data_area.5:1|c".to_string()));
+    }
+
+    #[tokio::test]
+    async fn jsonrpc_get_local_clusters_blocks_invalid_client() {
+        let service = Service::new(Arc::new(MockExecutor::new()));
+        let mut req = Request::default();
+        let response = service
+            .jsonrpc_get_local_clusters(
+                &mut req,
+                &json!(1),
+                &json!(1),
+                &json!(60),
+                &json!(0),
+                &json!(5),
+                &json!(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response, json!({}));
+        assert!(req.blocked_reason.is_some());
+    }
+
+    #[tokio::test]
+    async fn jsonrpc_get_clusters_invalid_params_yield_empty_object() {
+        let service = Service::new(Arc::new(MockExecutor::new()));
+        let mut req = req_with("5.6.7.8");
+        let response = service
+            .jsonrpc_get_global_clusters(&mut req, &json!("x"), &json!(0), &json!(1))
+            .await
+            .unwrap();
+        assert_eq!(response, json!({}));
     }
 }
