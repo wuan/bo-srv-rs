@@ -21,6 +21,8 @@ mod support;
 
 use std::collections::{BTreeSet, HashSet};
 
+use serde_json::json;
+
 use blitzortung_srv::cli::cluster_tool;
 use blitzortung_srv::config::Config;
 use blitzortung_srv::data::{GridData, Strike, StrikeCluster, Timestamp};
@@ -925,5 +927,61 @@ fn cluster_tool_insert_persists_and_is_idempotent() {
             .await
             .expect("re-insert must succeed");
         assert_eq!(again, 0, "the same interval must not be inserted twice");
+    });
+}
+
+/// `get_global_clusters` / `get_local_clusters` end-to-end: insert stored
+/// clusters, then query them through the JSON-RPC service handlers.
+#[test]
+fn service_cluster_queries_read_stored_clusters() {
+    use blitzortung_srv::service::{Request, Service};
+
+    let ctx = ClusterTestContext::new();
+    let (service_runtime, executor) = support::test_db().executor();
+    // The cluster's `timestamp` must match the interval end the service
+    // computes (`now` truncated to the second).  Insert at the current second.
+    let end =
+        chrono::DateTime::<chrono::Utc>::from_timestamp(chrono::Utc::now().timestamp(), 0).unwrap();
+    ctx.runtime.block_on(async {
+        let db = StrikeClusterDb::new(&ctx.executor, 4326);
+        db.insert(&cluster_at(end, 11.0, 51.0)).await.unwrap();
+    });
+
+    service_runtime.block_on(async {
+        let service = Service::new(executor);
+        let mut req = Request {
+            user_agent: Some("bo-android-190".to_string()),
+            content_type: Some("text/json".to_string()),
+            ..Default::default()
+        };
+
+        // Global: no area filter -> the stored cluster is returned.  The window
+        // length must match the stored `interval_seconds` (600 = 10 minutes).
+        let response = service
+            .jsonrpc_get_global_clusters(&mut req, &json!(10), &json!(0), &json!(1))
+            .await
+            .expect("global cluster query");
+        let clusters = response["clusters"].as_array().unwrap();
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0]["strike_count"], json!(42));
+        assert_eq!(clusters[0]["interval_seconds"], json!(600));
+        assert_eq!(response["dt"], json!(600));
+
+        // Local around (x=1, y=1): the neighbourhood envelope covers
+        // (0..15, 0..15) degrees at data_area=5, which excludes the cluster
+        // near (11, 51).
+        let response = service
+            .jsonrpc_get_local_clusters(
+                &mut req,
+                &json!(1),
+                &json!(1),
+                &json!(10),
+                &json!(0),
+                &json!(5),
+                &json!(1),
+            )
+            .await
+            .expect("local cluster query");
+        assert!(response["clusters"].as_array().unwrap().is_empty());
     });
 }

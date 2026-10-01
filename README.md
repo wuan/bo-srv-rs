@@ -454,6 +454,8 @@ the actual DB queries behind each cache miss:
 | `get_strikes_grid` | `strikes_grid.total_count` (+ `.<region>`), `strikes_grid.cache_hits` gauge, `strikes_grid_query.count` counter (one per DB query), `strikes_grid.total` timing (>= 1ms); at a 10-minute length also `strikes_grid.bg_count` (+ `.<region>`) |
 | `get_global_strikes_grid` | `strikes_grid.total_count`, `global_strikes_grid.total_count`, `global_strikes_grid.cache_hits` gauge, `strikes_grid_query.count` counter, `global_strikes_grid.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
 | `get_local_strikes_grid` | `strikes_grid.total_count`, `local_strikes_grid.total_count`, `local_strikes_grid.data_area.<area>`, `local_strikes_grid.cache_hits` gauge, `strikes_grid_query.count` counter, `strikes_grid.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
+| `get_global_clusters` | `clusters.total_count`, `global_clusters.total_count`, `global_clusters.cache_hits` gauge, `clusters_query.count` counter (one per DB query), `global_clusters.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
+| `get_local_clusters` | `clusters.total_count`, `local_clusters.total_count`, `local_clusters.data_area.<area>`, `local_clusters.cache_hits` gauge, `clusters_query.count` counter, `clusters.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
 | histogram cache | `histogram.query.count` counter (one per DB query), `histogram.cache_hits` gauge, `histogram.size` gauge |
 | DB pool wait | `db.pool_wait` timing in milliseconds (at least `1`) |
 
@@ -543,6 +545,29 @@ render as bare pre-1.0 dicts; a missing required argument raises the Python
 | `get_strikes_grid` / `get_strikes_raster` / `get_strokes_raster` | `(minute_length, grid_base_length = 10000, minute_offset = 0, region = 1, count_threshold = 0)` | grid object |
 | `get_global_strikes_grid` | `(minute_length, grid_base_length = 10000, minute_offset = 0, count_threshold = 0)` | grid object |
 | `get_local_strikes_grid` | `(x, y, grid_base_length = 10000, minute_length = 60, minute_offset = 0, count_threshold = 0, data_area = 5)` | grid object |
+| `get_global_clusters` | `(minute_length, minute_offset = 0, interval_count = 1)` | cluster object |
+| `get_local_clusters` | `(x, y, minute_length = 60, minute_offset = 0, data_area = 5, interval_count = 1)` | cluster object |
+
+The two cluster methods read **stored** clusters from `strike_clusters` (they do
+not cluster on the fly); clustering was library-only in Python, so these methods
+are new.  They mirror the grid endpoint validation minus the `region` and
+`grid_base_length` rules: `__to_int` coercion, the client checks (blocked IP,
+user agent, content type, referer), `minute_length`/`minute_offset` clamping,
+`data_area = max(5, ..)` for the local flavour and `interval_count = max(1, ..)`.
+
+The detection window is `end = now (truncated to the second) + minute_offset`,
+`start = end - minute_length`.  `end` is the primary interval; the
+`interval_count - 1` earlier intervals step back by `minute_length` each.  This
+maps to `StrikeClusterDb::select(timestamp = end, interval_duration =
+minute_length minutes, interval_count, interval_offset = minute_length, area)`.
+The local flavour passes the `LocalGrid { data_area, x, y }` neighbourhood
+envelope as the geometry filter; the global flavour has no area filter.
+
+Cluster result keys: `t, dt, clusters`.  `t` is `%Y%m%dT%H:%M:%S` of the interval
+end and `dt` the interval length in seconds (same conventions as the grid
+response); each element of `clusters` is
+`{id, timestamp, interval_seconds, strike_count, area, shape}` with `shape` a
+list of `[lon, lat]` pairs.
 
 Grid result keys (all endpoints): `r, xd, yd, x0, y1, xc, yc, t, dt, h`.
 `r` is the strike rows `[rx, ry, count, age]` (region grids flip and filter

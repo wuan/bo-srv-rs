@@ -215,6 +215,19 @@ fn method_spec(method: &str) -> Option<&'static [(&'static str, bool)]> {
             ("count_threshold", false),
             ("data_area", false),
         ]),
+        "get_global_clusters" => Some(&[
+            ("minute_length", true),
+            ("minute_offset", false),
+            ("interval_count", false),
+        ]),
+        "get_local_clusters" => Some(&[
+            ("x", true),
+            ("y", true),
+            ("minute_length", false),
+            ("minute_offset", false),
+            ("data_area", false),
+            ("interval_count", false),
+        ]),
         _ => None,
     }
 }
@@ -239,6 +252,15 @@ fn method_defaults(method: &str) -> Vec<Value> {
                 json!(5),
             ]
         }
+        "get_global_clusters" => vec![Value::Null, json!(0), json!(1)],
+        "get_local_clusters" => vec![
+            Value::Null,
+            Value::Null,
+            json!(60),
+            json!(0),
+            json!(5),
+            json!(1),
+        ],
         _ => vec![],
     }
 }
@@ -329,6 +351,18 @@ async fn invoke<M: Metrics>(
             service
                 .jsonrpc_get_local_strikes_grid(
                     request, &args[0], &args[1], &args[2], &args[3], &args[4], &args[5], &args[6],
+                )
+                .await
+        }
+        "get_global_clusters" => {
+            service
+                .jsonrpc_get_global_clusters(request, &args[0], &args[1], &args[2])
+                .await
+        }
+        "get_local_clusters" => {
+            service
+                .jsonrpc_get_local_clusters(
+                    request, &args[0], &args[1], &args[2], &args[3], &args[4], &args[5],
                 )
                 .await
         }
@@ -1138,5 +1172,175 @@ mod tests {
             .expect_response(),
         );
         assert_eq!(v["error"]["code"], FAILURE);
+    }
+
+    // -- cluster methods ----------------------------------------------------
+
+    #[test]
+    fn cluster_method_specs_and_defaults() {
+        assert_eq!(
+            method_spec("get_global_clusters"),
+            Some(
+                &[
+                    ("minute_length", true),
+                    ("minute_offset", false),
+                    ("interval_count", false),
+                ][..]
+            )
+        );
+        assert_eq!(
+            method_spec("get_local_clusters"),
+            Some(
+                &[
+                    ("x", true),
+                    ("y", true),
+                    ("minute_length", false),
+                    ("minute_offset", false),
+                    ("data_area", false),
+                    ("interval_count", false),
+                ][..]
+            )
+        );
+        // Defaults: global (null, 0, 1); local (null, null, 60, 0, 5, 1).
+        assert_eq!(
+            method_defaults("get_global_clusters"),
+            vec![Value::Null, json!(0), json!(1)]
+        );
+        assert_eq!(
+            method_defaults("get_local_clusters"),
+            vec![
+                Value::Null,
+                Value::Null,
+                json!(60),
+                json!(0),
+                json!(5),
+                json!(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn global_clusters_requires_minute_length() {
+        let service = service();
+        let v = parse(
+            &process(
+                &service,
+                &mut allowed_request(),
+                r#"{"jsonrpc":"2.0","id":2,"method":"get_global_clusters"}"#,
+            )
+            .expect_response(),
+        );
+        // Python TypeError -> txjsonrpc FAILURE fault (8002).
+        assert_eq!(v["error"]["code"], FAILURE);
+        assert_eq!(
+            v["error"]["message"],
+            "missing 1 required positional argument: 'minute_length'"
+        );
+    }
+
+    #[test]
+    fn local_clusters_requires_x_and_y() {
+        let service = service();
+        let v = parse(
+            &process(
+                &service,
+                &mut allowed_request(),
+                r#"{"jsonrpc":"2.0","id":2,"method":"get_local_clusters"}"#,
+            )
+            .expect_response(),
+        );
+        assert_eq!(v["error"]["code"], FAILURE);
+        assert_eq!(
+            v["error"]["message"],
+            "missing 1 required positional argument: 'x'"
+        );
+    }
+
+    #[test]
+    fn clusters_coerce_string_and_float_arguments() {
+        // `minute_length` as a float string truncates; local `data_area`
+        // clamps to 5. The request is blocked before the DB (no user agent),
+        // so the successful path is checked via the service tests.
+        let service = service();
+        let v = parse(
+            &process(
+                &service,
+                &mut Request::default(),
+                r#"{"jsonrpc":"2.0","id":1,"method":"get_global_clusters","params":["60.9",0,1]}"#,
+            )
+            .expect_response(),
+        );
+        assert_eq!(v["result"], json!({}));
+
+        let v = parse(
+            &process(
+                &service,
+                &mut Request::default(),
+                r#"{"jsonrpc":"2.0","id":1,"method":"get_local_clusters","params":[1,1,"30.5",0,"1.2",1]}"#,
+            )
+            .expect_response(),
+        );
+        assert_eq!(v["result"], json!({}));
+    }
+
+    /// A service whose cluster query fails.
+    fn service_with_cluster_db_error() -> Service<crate::metrics::NoopMetrics> {
+        let mut mock = MockExecutor::new();
+        mock.add_error("FROM strike_clusters", "database unavailable");
+        Service::new(std::sync::Arc::new(mock))
+    }
+
+    /// A service that returns one cluster row so the success shape can be
+    /// checked.
+    fn service_with_cluster_row() -> Service<crate::metrics::NoopMetrics> {
+        let mut mock = MockExecutor::new();
+        mock.add_rows(
+            "FROM strike_clusters",
+            vec![Row::new(vec![
+                ExecValue::Int(42),
+                ExecValue::Timestamp(chrono::Utc::now()),
+                ExecValue::Bytea(crate::wkb::linestring(&[
+                    (11.0, 51.0),
+                    (11.1, 51.0),
+                    (11.1, 51.1),
+                    (11.0, 51.0),
+                ])),
+                ExecValue::Int(3),
+            ])],
+        );
+        Service::new(std::sync::Arc::new(mock))
+    }
+
+    #[test]
+    fn global_clusters_success_response_shape() {
+        let service = service_with_cluster_row();
+        let result = process(
+            &service,
+            &mut allowed_request(),
+            r#"{"jsonrpc":"2.0","id":9,"method":"get_global_clusters","params":[60,0,1]}"#,
+        );
+        assert_eq!(result.meta.outcome, Some(Outcome::Success));
+        let v = parse(&result.expect_response());
+        let result = &v["result"];
+        assert!(result["t"].is_string());
+        assert_eq!(result["dt"], json!(3600));
+        let clusters = result["clusters"].as_array().unwrap();
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0]["id"], json!(42));
+        assert_eq!(clusters[0]["strike_count"], json!(3));
+        assert_eq!(clusters[0]["interval_seconds"], json!(3600));
+        assert_eq!(clusters[0]["shape"][0], json!([11.0, 51.0]));
+    }
+
+    #[test]
+    fn cluster_methods_dispatch_and_fault_on_db_error() {
+        for body in [
+            r#"{"jsonrpc":"2.0","id":9,"method":"get_global_clusters","params":[10,0,1]}"#,
+            r#"{"jsonrpc":"2.0","id":9,"method":"get_local_clusters","params":[1,1,10,0,5,1]}"#,
+        ] {
+            let service = service_with_cluster_db_error();
+            let v = parse(&process(&service, &mut allowed_request(), body).expect_response());
+            assert_eq!(v["error"]["code"], FAILURE, "body: {body}");
+        }
     }
 }
