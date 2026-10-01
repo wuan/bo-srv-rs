@@ -397,7 +397,7 @@ impl<M: Metrics> Service<M> {
         interval_count: i64,
     ) -> Result<Value, ServiceError> {
         let started = std::time::Instant::now();
-        let time_interval = create_time_interval(minute_length, minute_offset);
+        let time_interval = create_cluster_time_interval(minute_length, minute_offset);
         let clusters = self
             .select_clusters(&time_interval, interval_count, None)
             .await?;
@@ -428,7 +428,7 @@ impl<M: Metrics> Service<M> {
         let started = std::time::Instant::now();
         let local_grid = LocalGrid { data_area, x, y };
         let area = local_grid_area(&local_grid);
-        let time_interval = create_time_interval(minute_length, minute_offset);
+        let time_interval = create_cluster_time_interval(minute_length, minute_offset);
         let clusters = self
             .select_clusters(&time_interval, interval_count, Some(&area))
             .await?;
@@ -1218,6 +1218,36 @@ pub fn create_time_interval_at(
     TimeInterval::new(start, end)
 }
 
+/// The detection interval used by the cluster endpoints
+/// (`get_global_clusters` / `get_local_clusters`).
+///
+/// Unlike the grid endpoints, the cluster query matches stored
+/// `strike_clusters."timestamp"` values **exactly** (`"timestamp" IN (...)`,
+/// see [`crate::query::cluster_select_query`]), and `bo-cluster` stores each
+/// cluster at its interval end aligned to the **last minute start**
+/// (`cli::cluster_tool::resolve_cluster_interval`).  Reusing the grid
+/// second-precision [`create_time_interval`] here would almost never equal a
+/// stored timestamp, so `now` is truncated to the minute instead.
+pub fn create_cluster_time_interval(minute_length: i64, minute_offset: i64) -> TimeInterval {
+    create_cluster_time_interval_at(minute_length, minute_offset, Utc::now())
+}
+
+/// Testable variant of [`create_cluster_time_interval`] with an explicit clock.
+pub fn create_cluster_time_interval_at(
+    minute_length: i64,
+    minute_offset: i64,
+    now: DateTime<Utc>,
+) -> TimeInterval {
+    let now_secs = now.timestamp();
+    // Truncate down to the whole minute (rem_euclid keeps pre-epoch instants
+    // rounding towards the past minute too).
+    let minute_start = now_secs - now_secs.rem_euclid(60);
+    let end = DateTime::<Utc>::from_timestamp(minute_start, 0).expect("valid timestamp")
+        + Duration::minutes(minute_offset);
+    let start = end - Duration::minutes(minute_length);
+    TimeInterval::new(start, end)
+}
+
 /// Format `%Y%m%dT%H:%M:%S` (UTC).
 fn strftime_yyyymmddthms(ts: DateTime<Utc>) -> String {
     ts.format("%Y%m%dT%H:%M:%S").to_string()
@@ -1340,6 +1370,24 @@ mod tests {
 
     fn fixed_now() -> DateTime<Utc> {
         ts(1_700_000_000)
+    }
+
+    #[test]
+    fn cluster_interval_truncates_now_to_the_minute() {
+        // `fixed_now` is at second 20 of its minute.
+        let now = fixed_now();
+        assert_eq!(now.timestamp() % 60, 20);
+        let interval = create_cluster_time_interval_at(10, 0, now);
+        assert_eq!(interval.end, ts(now.timestamp() - 20));
+        assert_eq!(interval.start, ts(now.timestamp() - 20 - 600));
+        assert_eq!(interval.duration_seconds(), 600);
+    }
+
+    #[test]
+    fn cluster_interval_applies_offset_after_truncation() {
+        let now = fixed_now();
+        let interval = create_cluster_time_interval_at(10, -5, now);
+        assert_eq!(interval.end, ts(now.timestamp() - 20 - 300));
     }
 
     fn req_with(client: &str) -> Request {

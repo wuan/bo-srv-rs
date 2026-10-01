@@ -939,9 +939,10 @@ fn service_cluster_queries_read_stored_clusters() {
     let ctx = ClusterTestContext::new();
     let (service_runtime, executor) = support::test_db().executor();
     // The cluster's `timestamp` must match the interval end the service
-    // computes (`now` truncated to the second).  Insert at the current second.
-    let end =
-        chrono::DateTime::<chrono::Utc>::from_timestamp(chrono::Utc::now().timestamp(), 0).unwrap();
+    // computes (`now` truncated to the minute, like `bo-cluster`).  Insert at
+    // the current minute start.
+    let now = chrono::Utc::now().timestamp();
+    let end = chrono::DateTime::<chrono::Utc>::from_timestamp(now - now.rem_euclid(60), 0).unwrap();
     ctx.runtime.block_on(async {
         let db = StrikeClusterDb::new(&ctx.executor, 4326);
         db.insert(&cluster_at(end, 11.0, 51.0)).await.unwrap();

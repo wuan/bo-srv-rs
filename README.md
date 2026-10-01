@@ -561,10 +561,12 @@ are new.  They mirror the grid endpoint validation minus the `region` and
 user agent, content type, referer), `minute_length`/`minute_offset` clamping,
 `data_area = max(5, ..)` for the local flavour and `interval_count = max(1, ..)`.
 
-The detection window is `end = now (truncated to the second) + minute_offset`,
-`start = end - minute_length`.  `end` is the primary interval; the
-`interval_count - 1` earlier intervals step back by `minute_length` each.  This
-maps to `StrikeClusterDb::select(timestamp = end, interval_duration =
+The detection window is `end = now (truncated to the minute, matching the
+bo-cluster producer) + minute_offset`, `start = end - minute_length`.  The
+minute alignment matters because the cluster query matches stored
+`strike_clusters."timestamp"` values exactly.  `end` is the primary interval;
+the `interval_count - 1` earlier intervals step back by `minute_length` each.
+This maps to `StrikeClusterDb::select(timestamp = end, interval_duration =
 minute_length minutes, interval_count, interval_offset = minute_length, area)`.
 The local flavour passes the `LocalGrid { data_area, x, y }` neighbourhood
 envelope as the geometry filter; the global flavour has no area filter.
