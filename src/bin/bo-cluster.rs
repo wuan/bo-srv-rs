@@ -6,7 +6,7 @@
 //! ```text
 //! bo-cluster [--minutes N] [--startdate YYYYMMDD] [--starttime HHMM[SS]]
 //!            [--enddate ...] [--endtime ...] [--region N] [--area WKT]
-//!            [--tz TZ] [--srid N] [--json] [--insert]
+//!            [--tz TZ] [--srid N] [--json] [--insert] [--metrics]
 //! ```
 //!
 //! The interval is defined by its end and its length:
@@ -32,13 +32,23 @@
 //!
 //! Example: at 12:34:56 UTC the default end is 12:34:00 and, with the default
 //! `--minutes 10`, the window is 12:24:00..12:34:00.
+//!
+//! `--metrics` emits StatsD samples (under the importer prefix
+//! `org.blitzortung.import`): `clusters.strikes` (gauge, strikes selected),
+//! `clusters.produced` (gauge, clusters built), `clusters.calculate` (timing,
+//! ms) and, with `--insert`, `clusters.inserted` (gauge) and `clusters.insert`
+//! (timing, ms).  Without `--metrics`, or when no StatsD receiver is reachable,
+//! nothing is emitted.
+//!
 //! `-v`/`--verbose` and `-d`/`--debug` control logging (and `RUST_LOG` still
 //! overrides).
 
 use blitzortung_srv::cli::{
-    cluster_tool, connect_postgres, describe_error, exit_with, init_logging, parse_timezone,
+    build_import_metrics, cluster_tool, connect_postgres, describe_error, exit_with, init_logging,
+    parse_timezone,
 };
 use blitzortung_srv::config::Config;
+use blitzortung_srv::metrics::NoopMetrics;
 
 fn main() {
     let args = <cluster_tool::ClusterArgs as clap::Parser>::parse();
@@ -52,6 +62,14 @@ fn main() {
     }
 
     let config = Config::from_env();
+    // `--metrics` builds the StatsD sink (importer prefix, no-op fallback);
+    // otherwise every sample is dropped by `NoopMetrics`.
+    let metrics = if options.metrics {
+        build_import_metrics(&config)
+    } else {
+        std::sync::Arc::new(NoopMetrics)
+    };
+
     let (runtime, executor) = match connect_postgres(&config) {
         Ok(pair) => pair,
         Err(error) => exit_with(
@@ -60,7 +78,7 @@ fn main() {
         ),
     };
 
-    if let Err(error) = runtime.block_on(cluster_tool::run(&executor, &options)) {
+    if let Err(error) = runtime.block_on(cluster_tool::run(&executor, &options, metrics.as_ref())) {
         exit_with(&describe_error("error", error.as_ref()), 1);
     }
 }
