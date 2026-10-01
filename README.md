@@ -477,6 +477,12 @@ The importer CLIs report to the same receiver under the
 | `bo-import` (`cli/imprt.py`) | per region `strikes.<region>` counter, `strikes.<region>.count` gauge, `strikes.<region>.get` and `strikes.<region>.insert` timings (ms, at least `1`); after the run `strikes.error_count` gauge |
 | `bo-import-websocket` (`cli/imprt_websocket.py`) | `strikes` counter and `strikes.delay` gauge (local delay in seconds) per received strike |
 | `bo-update` (`cli/update.py`) | `strikes.imported` gauge with the number of inserted strikes |
+| `bo-cluster --metrics` | `clusters.strikes` gauge (strikes selected), `clusters.produced` gauge (clusters built), `clusters.calculate` timing (ms, at least `1`); with `--insert` also `clusters.inserted` gauge and `clusters.insert` timing (ms) |
+
+`bo-cluster` emits nothing unless `--metrics` is given, and shares the importer
+prefix/receiver (`org.blitzortung.import`).  `clusters.calculate` times only the
+clustering algorithm (not the strike `SELECT`); `clusters.insert` times the
+`--insert` database phase.
 
 For example:
 

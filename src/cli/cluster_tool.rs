@@ -6,6 +6,13 @@
 //! exercised against the database.  It is read-only by default (it selects
 //! strikes from the `strikes` table and prints the clusters); with `--insert` it
 //! additionally persists the detected clusters to `strike_clusters`.
+//!
+//! With `--metrics` the tool emits StatsD samples via the [`Metrics`] sink it is
+//! handed: `clusters.strikes` / `clusters.produced` gauges and the
+//! `clusters.calculate` timing for the calculation, plus `clusters.inserted` /
+//! `clusters.insert` for the `--insert` phase.  Nothing is emitted otherwise.
+//!
+//! [`Metrics`]: crate::metrics::Metrics
 
 use chrono::Timelike;
 use clap::Parser;
@@ -93,6 +100,10 @@ pub struct ClusterArgs {
     #[arg(long)]
     pub insert: bool,
 
+    /// emit StatsD metrics for the cluster calculation and insert
+    #[arg(long)]
+    pub metrics: bool,
+
     /// enable verbose (info level) logging
     #[arg(short = 'v', long)]
     pub verbose: bool,
@@ -114,6 +125,10 @@ pub struct ClusterOptions {
     /// Persist detected clusters to `strike_clusters` (see
     /// [`insert_clusters`] for the idempotency rule).
     pub insert: bool,
+    /// Emit StatsD metrics for the calculation and insert phases (see
+    /// [`Metrics`](crate::metrics::Metrics)); a missing StatsD receiver falls
+    /// back to a no-op sink.
+    pub metrics: bool,
     pub verbose: bool,
     pub debug: bool,
 }
@@ -145,6 +160,7 @@ impl ClusterOptions {
             region: args.region,
             json: args.json,
             insert: args.insert,
+            metrics: args.metrics,
             verbose: args.verbose,
             debug: args.debug,
         }
@@ -293,12 +309,26 @@ pub fn render_text(cluster: &StrikeCluster) -> String {
     )
 }
 
+/// The result of one cluster calculation: the number of strikes selected, the
+/// clusters built and the wall time spent in the clustering algorithm.
+#[derive(Debug, Clone)]
+pub struct ClusterCalculation {
+    /// Strikes selected from the `strikes` table for the interval.
+    pub strikes: usize,
+    /// Clusters produced by the clustering algorithm.
+    pub clusters: Vec<StrikeCluster>,
+    /// Wall time of the clustering algorithm (`Clustering::build_clusters`),
+    /// in seconds.  This excludes the strike `SELECT`; it is exactly the
+    /// "calculate the clusters" phase reported as `clusters.calculate`.
+    pub cluster_time: f64,
+}
+
 /// Select the strikes for `interval` and build the clusters.
 pub async fn collect_clusters(
     executor: &dyn QueryExecutor,
     options: &ClusterOptions,
     interval: &TimeInterval,
-) -> Result<Vec<StrikeCluster>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<ClusterCalculation, Box<dyn std::error::Error + Send + Sync>> {
     let db = StrikeDb::new(executor, options.db.srid);
     let area = resolve_area(&options.db);
     let strikes = db.select(interval, area.as_ref(), options.region).await?;
@@ -312,7 +342,11 @@ pub async fn collect_clusters(
         clusters.len(),
         strikes.len()
     );
-    Ok(clusters)
+    Ok(ClusterCalculation {
+        strikes: strikes.len(),
+        clusters,
+        cluster_time,
+    })
 }
 
 /// Render `clusters` as JSON (`--json`) or one text line each.
@@ -338,8 +372,8 @@ pub async fn fetch_clusters(
     options: &ClusterOptions,
     interval: &TimeInterval,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let clusters = collect_clusters(executor, options, interval).await?;
-    Ok(render_clusters(&clusters, options.json)?)
+    let calculation = collect_clusters(executor, options, interval).await?;
+    Ok(render_clusters(&calculation.clusters, options.json)?)
 }
 
 /// The largest `interval_seconds` value the `SMALLINT` column can hold.
@@ -415,9 +449,13 @@ fn floor_to_micros(timestamp: chrono::DateTime<chrono::Utc>) -> chrono::DateTime
 }
 
 /// Entry point for the `bo-cluster` binary, given a connected executor.
+///
+/// `metrics` receives the StatsD samples when `--metrics` is set; pass
+/// [`NoopMetrics`](crate::metrics::NoopMetrics) to disable emission.
 pub async fn run(
     executor: &dyn QueryExecutor,
     options: &ClusterOptions,
+    metrics: &dyn crate::metrics::Metrics,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Validate the timezone before touching the database, like `bo-db`.
     let tz = match parse_timezone(&options.db.tz) {
@@ -433,27 +471,44 @@ pub async fn run(
     let interval = TimeInterval::new(start, end);
 
     let mut timer = Timer::new();
-    let clusters = collect_clusters(executor, options, &interval).await?;
-    let output = render_clusters(&clusters, options.json)?;
+    let calculation = collect_clusters(executor, options, &interval).await?;
+    let output = render_clusters(&calculation.clusters, options.json)?;
     let elapsed = timer.lap();
 
     if !output.is_empty() {
         println!("{output}");
     }
 
+    // -- metrics: strikes selected, clusters produced and the calculation time.
+    // The select+render `elapsed` above is not reported; `clusters.calculate`
+    // is the pure clustering algorithm time measured in `collect_clusters`.
+    if options.metrics {
+        metrics.for_cluster_calculation(
+            calculation.strikes as u64,
+            calculation.clusters.len() as u64,
+            calculation.cluster_time,
+        );
+    }
+
     // `--insert` persists the clusters after the (unchanged) output is printed.
     let inserted = if options.insert {
-        match insert_clusters(executor, options, &interval, &clusters).await {
-            Ok(inserted) => inserted,
-            Err(error) => {
-                return Err(format!("failed to insert clusters: {error}").into());
-            }
+        let mut insert_timer = Timer::new();
+        let inserted =
+            match insert_clusters(executor, options, &interval, &calculation.clusters).await {
+                Ok(inserted) => inserted,
+                Err(error) => {
+                    return Err(format!("failed to insert clusters: {error}").into());
+                }
+            };
+        if options.metrics {
+            metrics.for_cluster_insert(inserted as u64, insert_timer.lap());
         }
+        inserted
     } else {
         0
     };
 
-    let count = clusters.len();
+    let count = calculation.clusters.len();
     eprintln!(
         "built {count} clusters from {} to {} in {elapsed:.3} seconds",
         start.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S"),
@@ -493,6 +548,7 @@ mod tests {
             srid: 4326,
             json: false,
             insert: false,
+            metrics: false,
             verbose: false,
             debug: false,
         })
@@ -863,5 +919,125 @@ mod tests {
         assert!(error.to_string().contains("SMALLINT"), "error: {error}");
         assert_eq!(mock.call_count(), 0, "no query must be issued");
         assert_eq!(mock.execution_count(), 0, "no insert must be issued");
+    }
+
+    // -- `--metrics` --------------------------------------------------------
+
+    use crate::metrics::{name, Metrics, RecordingMetrics};
+
+    /// Five strikes around (11, 51) that cluster into exactly one cluster.
+    fn five_clusterable_strikes() -> Vec<Row> {
+        vec![
+            strike_row(1, 11.0, 51.0),
+            strike_row(2, 11.02, 51.02),
+            strike_row(3, 11.02, 51.05),
+            strike_row(4, 11.4, 51.4),
+            strike_row(5, 12.0, 52.0),
+        ]
+    }
+
+    #[test]
+    fn metrics_flag_is_parsed() {
+        let args = ClusterArgs::try_parse_from(["bo-cluster", "--metrics"]).expect("parse");
+        assert!(args.metrics);
+        assert!(ClusterOptions::from_args(&args).metrics);
+        let args = ClusterArgs::try_parse_from(["bo-cluster"]).expect("parse");
+        assert!(!ClusterOptions::from_args(&args).metrics);
+    }
+
+    /// The documented metric names/units (importer prefix + `clusters.*`).
+    #[test]
+    fn cluster_metric_names_are_documented() {
+        assert_eq!(name::STRIKES_CLUSTERED, "clusters.strikes");
+        assert_eq!(name::CLUSTERS_PRODUCED, "clusters.produced");
+        assert_eq!(name::CLUSTERS_CALCULATE, "clusters.calculate");
+        assert_eq!(name::CLUSTERS_INSERT, "clusters.insert");
+        assert_eq!(name::CLUSTERS_INSERTED, "clusters.inserted");
+        // Exercised through the trait so the leaf names and units are fixed.
+        let metrics = RecordingMetrics::new();
+        metrics.for_cluster_calculation(5, 1, 0.01);
+        metrics.for_cluster_insert(1, 0.02);
+        assert_eq!(
+            metrics.lines(),
+            vec![
+                "clusters.strikes:5|g".to_string(),
+                "clusters.produced:1|g".to_string(),
+                "clusters.calculate:10|ms".to_string(),
+                "clusters.inserted:1|g".to_string(),
+                "clusters.insert:20|ms".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_metrics_emits_calculation_metrics() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows("FROM strikes", five_clusterable_strikes());
+        let metrics = RecordingMetrics::new();
+        let mut opts = options();
+        opts.metrics = true;
+
+        run(&mock, &opts, &metrics).await.unwrap();
+
+        let lines = metrics.lines();
+        assert!(
+            lines.contains(&"clusters.strikes:5|g".to_string()),
+            "lines: {lines:?}"
+        );
+        assert!(
+            lines.contains(&"clusters.produced:1|g".to_string()),
+            "lines: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("clusters.calculate:") && line.ends_with("|ms")),
+            "lines: {lines:?}"
+        );
+        // No `--insert`: no insert metrics.
+        assert!(!lines.iter().any(|line| line.starts_with("clusters.insert")));
+    }
+
+    #[tokio::test]
+    async fn run_without_metrics_emits_nothing() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows("FROM strikes", five_clusterable_strikes());
+        let metrics = RecordingMetrics::new();
+        // `options().metrics` is false by default.
+        run(&mock, &options(), &metrics).await.unwrap();
+        assert!(
+            metrics.lines().is_empty(),
+            "no metrics without --metrics: {:?}",
+            metrics.lines()
+        );
+    }
+
+    #[tokio::test]
+    async fn run_insert_with_metrics_emits_insert_metrics() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows("FROM strikes", five_clusterable_strikes());
+        // `get_latest_time` finds nothing, so the cluster is inserted.
+        mock.add_rows("FROM strike_clusters", vec![]);
+        let metrics = RecordingMetrics::new();
+        let mut opts = options();
+        opts.metrics = true;
+        opts.insert = true;
+
+        run(&mock, &opts, &metrics).await.unwrap();
+
+        let lines = metrics.lines();
+        assert!(
+            lines.contains(&"clusters.inserted:1|g".to_string()),
+            "lines: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("clusters.insert:") && line.ends_with("|ms")),
+            "lines: {lines:?}"
+        );
+        // The calculation metrics are still emitted too.
+        assert!(lines.contains(&"clusters.strikes:5|g".to_string()));
+        assert!(lines.contains(&"clusters.produced:1|g".to_string()));
     }
 }

@@ -48,6 +48,21 @@ pub mod name {
     pub const ERROR_COUNT: &str = "error_count";
     pub const DELAY: &str = "delay";
     pub const IMPORTED: &str = "imported";
+
+    /// Metric-name leaves used by the `bo-cluster` insert path
+    /// (`cli/cluster_tool.rs`).  They share the importer prefix
+    /// (`org.blitzortung.import`) under a `clusters` namespace.
+    pub const CLUSTERS_NS: &str = "clusters";
+    /// Total strikes selected for clustering.
+    pub const STRIKES_CLUSTERED: &str = "clusters.strikes";
+    /// Clusters produced by the calculation.
+    pub const CLUSTERS_PRODUCED: &str = "clusters.produced";
+    /// Cluster calculation wall time (milliseconds).
+    pub const CLUSTERS_CALCULATE: &str = "clusters.calculate";
+    /// Cluster database insert wall time (milliseconds).
+    pub const CLUSTERS_INSERT: &str = "clusters.insert";
+    /// Number of clusters actually written to the database.
+    pub const CLUSTERS_INSERTED: &str = "clusters.inserted";
 }
 
 /// `StatsDMetrics.name`: join the metric components with `.`.
@@ -259,6 +274,27 @@ pub trait Metrics: Send + Sync {
     fn for_update_imported(&self, insert_count: u64) {
         self.gauge(&metric_name(&[name::STRIKES, name::IMPORTED]), insert_count);
     }
+
+    /// `bo-cluster`: gauge the strikes selected for clustering and the
+    /// clusters the calculation produced, and time the calculation as
+    /// `clusters.calculate` in milliseconds (clamped to at least `1` like the
+    /// importer timings, so a sub-millisecond calculation stays visible).
+    fn for_cluster_calculation(&self, strikes: u64, clusters: u64, calculate_seconds: f64) {
+        self.gauge(name::STRIKES_CLUSTERED, strikes);
+        self.gauge(name::CLUSTERS_PRODUCED, clusters);
+        self.timing(
+            name::CLUSTERS_CALCULATE,
+            seconds_to_millis(calculate_seconds),
+        );
+    }
+
+    /// `bo-cluster --insert`: gauge the clusters actually inserted and time the
+    /// database insert phase as `clusters.insert` in milliseconds (clamped to
+    /// at least `1`).
+    fn for_cluster_insert(&self, inserted: u64, insert_seconds: f64) {
+        self.gauge(name::CLUSTERS_INSERTED, inserted);
+        self.timing(name::CLUSTERS_INSERT, seconds_to_millis(insert_seconds));
+    }
 }
 
 /// Seconds to whole milliseconds, clamped to at least `1`
@@ -346,6 +382,14 @@ impl Metrics for std::sync::Arc<dyn Metrics> {
 
     fn for_update_imported(&self, insert_count: u64) {
         (**self).for_update_imported(insert_count);
+    }
+
+    fn for_cluster_calculation(&self, strikes: u64, clusters: u64, calculate_seconds: f64) {
+        (**self).for_cluster_calculation(strikes, clusters, calculate_seconds);
+    }
+
+    fn for_cluster_insert(&self, inserted: u64, insert_seconds: f64) {
+        (**self).for_cluster_insert(inserted, insert_seconds);
     }
 }
 
