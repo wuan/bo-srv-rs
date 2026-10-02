@@ -792,6 +792,89 @@ pub fn cluster_timestamps(
     timestamps
 }
 
+/// Append the optional geometry filter of a cluster query to `sql`.
+///
+/// `geog` is the geography (or SRID-transformed geometry) expression the filter
+/// applies to; when `default_srid` is false the caller has already pushed the
+/// SRID as `$1` and the area geometries are built with that SRID.
+fn add_cluster_area_filter(
+    sql: &mut String,
+    parameters: &mut Vec<Param>,
+    default_srid: bool,
+    geog: &str,
+    area: &Area,
+) {
+    // Bounding-box pre-filter (`geog` for the default SRID), then the full
+    // `ST_Intersects` test when the geometry is not its own envelope.
+    parameters.push(Param::Bytea(area.envelope_wkb.clone()));
+    let envelope_param = parameters.len();
+    let envelope = if default_srid {
+        format!("ST_GeomFromWKB(${envelope_param}, {DEFAULT_SRID})")
+    } else {
+        format!("ST_GeomFromWKB(${envelope_param}, $1)")
+    };
+    sql.push_str(&format!(" AND {envelope} && {geog}"));
+    if let Some(geometry) = &area.geometry_wkb {
+        parameters.push(Param::Bytea(geometry.clone()));
+        let geometry_param = parameters.len();
+        let poly = if default_srid {
+            format!("ST_GeomFromWKB(${geometry_param}, {DEFAULT_SRID})")
+        } else {
+            format!("ST_GeomFromWKB(${geometry_param}, $1)")
+        };
+        sql.push_str(&format!(" AND ST_Intersects({poly}, {geog})"));
+    }
+}
+
+/// `SELECT "timestamp" FROM strike_clusters ... ORDER BY "timestamp" DESC LIMIT 1`:
+/// the newest stored timestamp in `[no_earlier_than, timestamp]` for the given
+/// interval length, optionally restricted to clusters intersecting `area`.
+///
+/// Used to snap a cluster query's newest interval to the most recent produced
+/// slot: the producers store clusters only for the minutes they actually ran,
+/// so the current minute (or the current `minute_offset`) may have no row.  A
+/// `None` result lets the caller keep the requested interval.
+pub fn cluster_latest_timestamp_query(
+    timestamp: DateTime<Utc>,
+    no_earlier_than: DateTime<Utc>,
+    interval_seconds: i64,
+    srid: i64,
+    area: Option<&Area>,
+) -> ClusterQuery {
+    let default_srid = srid == DEFAULT_SRID;
+    let geog = if default_srid {
+        "geog".to_string()
+    } else {
+        format!("ST_Transform(geog::geometry, ${})", 1)
+    };
+
+    let mut sql = String::from("SELECT \"timestamp\" FROM strike_clusters WHERE ");
+    let mut parameters: Vec<Param> = Vec::new();
+    if !default_srid {
+        parameters.push(Param::Int(srid));
+    }
+
+    parameters.push(Param::Timestamp(timestamp));
+    let upper = parameters.len();
+    parameters.push(Param::Timestamp(no_earlier_than));
+    let lower = parameters.len();
+    sql.push_str(&format!(
+        "\"timestamp\" <= ${upper}::timestamptz AND \"timestamp\" >= ${lower}::timestamptz"
+    ));
+
+    parameters.push(Param::Int(interval_seconds));
+    sql.push_str(&format!(
+        " AND interval_seconds=${}::smallint",
+        parameters.len()
+    ));
+
+    if let Some(area) = area {
+        add_cluster_area_filter(&mut sql, &mut parameters, default_srid, &geog, area);
+    }
+    sql.push_str(" ORDER BY \"timestamp\" DESC LIMIT 1");
+    ClusterQuery { sql, parameters }
+}
+
 /// `blitzortung.db.query_builder.StrikeCluster.select_query`: select
 /// `id`, `"timestamp"`, the shape geometry and `strike_count` for the
 /// timestamp set belonging to `interval_duration`, optionally restricted to
@@ -828,10 +911,7 @@ pub fn cluster_select_query(
         (DEFAULT_SRID.to_string(), "geog".to_string())
     } else {
         let srid_expr = format!("${}", 1);
-        (
-            srid_expr,
-            format!("ST_Transform(geog::geometry, ${})", 1),
-        )
+        (srid_expr, format!("ST_Transform(geog::geometry, ${})", 1))
     };
 
     let mut sql = String::from("SELECT id, \"timestamp\", ");
@@ -867,26 +947,7 @@ pub fn cluster_select_query(
     ));
 
     if let Some(area) = area {
-        // Bounding-box pre-filter (`geog` for the default SRID), then the full
-        // `ST_Intersects` test when the geometry is not its own envelope.
-        parameters.push(Param::Bytea(area.envelope_wkb.clone()));
-        let envelope_param = parameters.len();
-        let envelope = if default_srid {
-            format!("ST_GeomFromWKB(${envelope_param}, {DEFAULT_SRID})")
-        } else {
-            format!("ST_GeomFromWKB(${envelope_param}, $1)")
-        };
-        sql.push_str(&format!(" AND {envelope} && {geog}"));
-        if let Some(geometry) = &area.geometry_wkb {
-            parameters.push(Param::Bytea(geometry.clone()));
-            let geometry_param = parameters.len();
-            let poly = if default_srid {
-                format!("ST_GeomFromWKB(${geometry_param}, {DEFAULT_SRID})")
-            } else {
-                format!("ST_GeomFromWKB(${geometry_param}, $1)")
-            };
-            sql.push_str(&format!(" AND ST_Intersects({poly}, {geog})"));
-        }
+        add_cluster_area_filter(&mut sql, &mut parameters, default_srid, &geog, area);
     }
 
     ClusterQuery { sql, parameters }
@@ -1365,12 +1426,8 @@ mod tests {
     fn cluster_timestamps_steps_back_by_offset() {
         let end = utc(2020, 1, 1, 12, 0, 0);
         let duration = chrono::Duration::minutes(10);
-        let timestamps = cluster_timestamps(
-            end - duration * 5 - duration,
-            end,
-            duration,
-            Some(duration),
-        );
+        let timestamps =
+            cluster_timestamps(end - duration * 5 - duration, end, duration, Some(duration));
         assert_eq!(
             timestamps,
             vec![
@@ -1389,12 +1446,7 @@ mod tests {
         let end = utc(2020, 1, 1, 12, 0, 0);
         let duration = chrono::Duration::minutes(10);
         // offset None and a non-positive offset both fall back to duration.
-        let none = cluster_timestamps(
-            end - duration * 3,
-            end,
-            duration,
-            None,
-        );
+        let none = cluster_timestamps(end - duration * 3, end, duration, None);
         let zero = cluster_timestamps(
             end - duration * 3,
             end,
@@ -1431,7 +1483,9 @@ mod tests {
         assert!(query
             .to_postgres()
             .contains("ST_AsBinary(ST_Transform(geog::geometry, $1)) as geom"));
-        assert!(query.to_postgres().contains("\"timestamp\" in ($2::timestamptz)"));
+        assert!(query
+            .to_postgres()
+            .contains("\"timestamp\" in ($2::timestamptz)"));
         assert_eq!(query.parameters()[0], Param::Int(3857));
     }
 
@@ -1468,5 +1522,58 @@ mod tests {
         let sql = query.to_postgres();
         assert!(sql.contains("&& geog"));
         assert!(!sql.contains("ST_Intersects"));
+    }
+
+    #[test]
+    fn cluster_latest_timestamp_query_shape() {
+        let end = utc(2020, 1, 1, 12, 0, 0);
+        let floor = utc(2020, 1, 1, 11, 0, 0);
+        let query = cluster_latest_timestamp_query(end, floor, 600, 4326, None);
+        assert_eq!(
+            query.to_postgres(),
+            "SELECT \"timestamp\" FROM strike_clusters WHERE \
+             \"timestamp\" <= $1::timestamptz AND \"timestamp\" >= $2::timestamptz \
+             AND interval_seconds=$3::smallint ORDER BY \"timestamp\" DESC LIMIT 1"
+        );
+        assert_eq!(query.parameters().len(), 3);
+        assert_eq!(query.parameters()[0], Param::Timestamp(end));
+        assert_eq!(query.parameters()[1], Param::Timestamp(floor));
+        assert_eq!(query.parameters()[2], Param::Int(600));
+    }
+
+    #[test]
+    fn cluster_latest_timestamp_query_with_area_adds_geometry_filters() {
+        let end = utc(2020, 1, 1, 12, 0, 0);
+        let floor = utc(2020, 1, 1, 11, 0, 0);
+        let area = Area::from_polygon(&[vec![
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 2.0],
+            [0.0, 0.0],
+        ]])
+        .unwrap();
+        let query = cluster_latest_timestamp_query(end, floor, 600, 4326, Some(&area));
+        let sql = query.to_postgres();
+        assert!(sql.contains("ST_GeomFromWKB($4, 4326) && geog"));
+        assert!(sql.contains("ST_Intersects(ST_GeomFromWKB($5, 4326), geog)"));
+        let bytea = query
+            .parameters()
+            .iter()
+            .filter(|p| matches!(p, Param::Bytea(_)))
+            .count();
+        assert_eq!(bytea, 2);
+    }
+
+    #[test]
+    fn cluster_latest_timestamp_query_non_default_srid_uses_srid_param() {
+        let end = utc(2020, 1, 1, 12, 0, 0);
+        let floor = utc(2020, 1, 1, 11, 0, 0);
+        let area = Area::from_envelope(&Envelope::new(10.0, 12.0, 50.0, 52.0));
+        let query = cluster_latest_timestamp_query(end, floor, 600, 3857, Some(&area));
+        assert_eq!(query.parameters()[0], Param::Int(3857));
+        assert!(query
+            .to_postgres()
+            .contains("&& ST_Transform(geog::geometry, $1)"));
     }
 }

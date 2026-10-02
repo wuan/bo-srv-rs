@@ -131,7 +131,11 @@ impl TestDb {
     }
 
     /// Remove every cluster row and restart the `bigserial` sequence.
-    pub fn truncate_clusters(&self, runtime: &tokio::runtime::Runtime, executor: &dyn QueryExecutor) {
+    pub fn truncate_clusters(
+        &self,
+        runtime: &tokio::runtime::Runtime,
+        executor: &dyn QueryExecutor,
+    ) {
         runtime
             .block_on(executor.execute("TRUNCATE strike_clusters RESTART IDENTITY", &[]))
             .expect("truncate strike_clusters");

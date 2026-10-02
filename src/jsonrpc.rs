@@ -1294,6 +1294,11 @@ mod tests {
     /// checked.
     fn service_with_cluster_row() -> Service<crate::metrics::NoopMetrics> {
         let mut mock = MockExecutor::new();
+        // The anchor lookup (newest stored timestamp) runs before the select.
+        mock.add_rows(
+            "SELECT \"timestamp\" FROM strike_clusters",
+            vec![Row::new(vec![ExecValue::Timestamp(chrono::Utc::now())])],
+        );
         mock.add_rows(
             "FROM strike_clusters",
             vec![Row::new(vec![

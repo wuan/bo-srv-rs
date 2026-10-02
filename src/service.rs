@@ -398,10 +398,11 @@ impl<M: Metrics> Service<M> {
     ) -> Result<Value, ServiceError> {
         let started = std::time::Instant::now();
         let time_interval = create_cluster_time_interval(minute_length, minute_offset);
-        let clusters = self
+        let (anchor, clusters) = self
             .select_clusters(&time_interval, interval_count, None)
             .await?;
-        let response = Self::build_clusters_response(&clusters, &time_interval);
+        let response =
+            Self::build_clusters_response(&clusters, &reanchor_interval(&time_interval, anchor));
         // Mirror the grid producers: record the total time once the response
         // is fully built (a cache miss only).
         self.metrics.for_grid_total(
@@ -429,10 +430,11 @@ impl<M: Metrics> Service<M> {
         let local_grid = LocalGrid { data_area, x, y };
         let area = local_grid_area(&local_grid);
         let time_interval = create_cluster_time_interval(minute_length, minute_offset);
-        let clusters = self
+        let (anchor, clusters) = self
             .select_clusters(&time_interval, interval_count, Some(&area))
             .await?;
-        let response = Self::build_clusters_response(&clusters, &time_interval);
+        let response =
+            Self::build_clusters_response(&clusters, &reanchor_interval(&time_interval, anchor));
         // Local cluster queries share the `clusters` metric name, like the
         // local grid shares `strikes_grid`.
         self.metrics.for_grid_total(
@@ -443,7 +445,7 @@ impl<M: Metrics> Service<M> {
     }
 
     /// Run [`StrikeClusterDb::select`] for the resolved interval and return the
-    /// stored clusters.
+    /// stored clusters together with the interval end actually used.
     ///
     /// Interval mapping: `select`'s `timestamp` is the interval **end**;
     /// `interval_duration` is `minute_length` minutes (the value stored in the
@@ -451,23 +453,48 @@ impl<M: Metrics> Service<M> {
     /// and `interval_offset` defaults to `interval_duration`, so earlier slots
     /// step back by `minute_length` minutes each (see
     /// [`crate::query::cluster_select_query`]).
+    ///
+    /// The newest interval is **snapped** to the most recent stored cluster
+    /// timestamp in the requested window, so a producer that has not stored a
+    /// cluster for the current minute (or for `minute_offset`) still yields its
+    /// latest series.  The search is bounded by `minute_length * interval_count`
+    /// capped at one day; when nothing matches, the requested end is kept.  The
+    /// returned end is the resolved (possibly shifted) anchor, so the response's
+    /// `t` reports the interval actually returned.
     async fn select_clusters(
         &self,
         time_interval: &TimeInterval,
         interval_count: i64,
         area: Option<&Area>,
-    ) -> Result<Vec<StrikeCluster>, ServiceError> {
-        self.metrics.for_clusters_query();
+    ) -> Result<(DateTime<Utc>, Vec<StrikeCluster>), ServiceError> {
+        let interval_seconds = time_interval.duration_seconds();
+        let interval_duration = Duration::seconds(interval_seconds);
         let db = StrikeClusterDb::new(self.executor.as_ref(), SRID);
-        db.select(
-            time_interval.end,
-            Duration::seconds(time_interval.duration_seconds()),
-            interval_count,
-            None,
-            area,
-        )
-        .await
-        .map_err(|e| ServiceError::Database(e.to_string()))
+
+        // Snap the anchor: the latest stored cluster at or before the requested
+        // end, but no further back than the requested window (at most one day).
+        let lookback_seconds = interval_seconds
+            .saturating_mul(interval_count)
+            .min(MAX_MINUTES_PER_DAY * 60);
+        let lookback = Duration::seconds(lookback_seconds);
+        self.metrics.for_clusters_query();
+        let anchor = db
+            .latest_timestamp_at_or_before(
+                time_interval.end,
+                time_interval.end - lookback,
+                interval_seconds,
+                area,
+            )
+            .await
+            .map_err(|e| ServiceError::Database(e.to_string()))?
+            .unwrap_or(time_interval.end);
+
+        self.metrics.for_clusters_query();
+        let clusters = db
+            .select(anchor, interval_duration, interval_count, None, area)
+            .await
+            .map_err(|e| ServiceError::Database(e.to_string()))?;
+        Ok((anchor, clusters))
     }
 
     /// Shape the cluster response
@@ -1251,6 +1278,16 @@ pub fn create_cluster_time_interval_at(
 /// Format `%Y%m%dT%H:%M:%S` (UTC).
 fn strftime_yyyymmddthms(ts: DateTime<Utc>) -> String {
     ts.format("%Y%m%dT%H:%M:%S").to_string()
+}
+
+/// Re-anchor a cluster time interval at the resolved (snapped) end, keeping the
+/// requested duration.  Used so the cluster response's `t` reports the interval
+/// actually returned rather than the originally requested (possibly empty) end.
+fn reanchor_interval(time_interval: &TimeInterval, anchor: DateTime<Utc>) -> TimeInterval {
+    TimeInterval::new(
+        anchor - Duration::seconds(time_interval.duration_seconds()),
+        anchor,
+    )
 }
 
 /// The `LocalGrid { data_area, x, y }` neighbourhood envelope as a
@@ -2283,6 +2320,12 @@ mod tests {
     #[tokio::test]
     async fn jsonrpc_get_global_clusters_shapes_response_without_area() {
         let mut mock = MockExecutor::new();
+        // The anchor lookup runs first (newest stored timestamp); then the
+        // cluster select itself.
+        mock.add_rows(
+            "SELECT \"timestamp\" FROM strike_clusters",
+            vec![Row::new(vec![DBValue::Timestamp(ts(1_700_000_000))])],
+        );
         mock.add_rows(
             "FROM strike_clusters",
             vec![cluster_row(42, ts(1_700_000_000))],
@@ -2299,8 +2342,8 @@ mod tests {
             .unwrap();
         let obj = response.as_object().expect("cluster response");
         assert_eq!(obj["dt"].as_i64().unwrap(), 3600);
-        // `t` is the interval end in `%Y%m%dT%H:%M:%S` (the clock is the wall
-        // clock, so only the format is asserted).
+        // `t` is the anchor (the newest stored timestamp) in
+        // `%Y%m%dT%H:%M:%S`, so only the format is asserted.
         let t = obj["t"].as_str().unwrap();
         assert_eq!(t.len(), 17, "got {t}");
         assert_eq!(t.as_bytes()[8], b'T');
@@ -2317,19 +2360,24 @@ mod tests {
         // The shape round-trips as [lon, lat] pairs.
         assert_eq!(clusters[0]["shape"][0], json!([11.0, 51.0]));
 
-        // Global: no geometry filter is applied.
+        // Global: two queries (anchor lookup + select), no geometry filter.
         let calls = mock.calls();
         let cluster_calls: Vec<&str> = calls
             .iter()
             .map(|(sql, _)| sql.as_str())
             .filter(|sql| sql.contains("FROM strike_clusters"))
             .collect();
-        assert_eq!(cluster_calls.len(), 1, "one cluster query");
+        assert_eq!(cluster_calls.len(), 2, "anchor lookup + select query");
+        let select = calls
+            .iter()
+            .map(|(sql, _)| sql.as_str())
+            .find(|sql| sql.contains("strike_count FROM strike_clusters"))
+            .expect("select query");
         assert!(
-            !cluster_calls[0].contains("&& geog"),
+            !select.contains("&& geog"),
             "global query must not filter by geometry"
         );
-        // One query counted, plus the global cluster request metrics.
+        // Two DB queries counted, plus the global cluster request metrics.
         let lines = service.metrics.lines();
         assert!(lines.contains(&"clusters_query.count:1|c".to_string()));
         assert!(lines.contains(&"clusters.total_count:1|c".to_string()));
@@ -2340,6 +2388,10 @@ mod tests {
     #[tokio::test]
     async fn jsonrpc_get_local_clusters_applies_local_area() {
         let mut mock = MockExecutor::new();
+        mock.add_rows(
+            "SELECT \"timestamp\" FROM strike_clusters",
+            vec![Row::new(vec![DBValue::Timestamp(ts(1_700_000_000))])],
+        );
         mock.add_rows(
             "FROM strike_clusters",
             vec![cluster_row(1, ts(1_700_000_000))],
@@ -2379,6 +2431,60 @@ mod tests {
         assert!(lines.contains(&"local_clusters.total_count:1|c".to_string()));
         // data_area clamped to 5 for the metric/area.
         assert!(lines.contains(&"local_clusters.data_area.5:1|c".to_string()));
+    }
+
+    #[tokio::test]
+    async fn select_clusters_snaps_anchor_to_latest_stored_timestamp() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows(
+            "SELECT \"timestamp\" FROM strike_clusters",
+            vec![Row::new(vec![DBValue::Timestamp(ts(1_700_000_000))])],
+        );
+        mock.add_rows(
+            "FROM strike_clusters",
+            vec![cluster_row(1, ts(1_700_000_000))],
+        );
+        let mock = Arc::new(mock);
+        let service: Service<crate::metrics::NoopMetrics> = Service::with_parts(
+            mock.clone(),
+            ServiceCache::new(),
+            crate::metrics::NoopMetrics,
+            HashSet::new(),
+        );
+        let requested = TimeInterval::new(ts(1_700_000_100), ts(1_700_003_700));
+
+        let (anchor, clusters) = service.select_clusters(&requested, 6, None).await.unwrap();
+        // The anchor is the stored timestamp, not the requested end.
+        assert_eq!(anchor, ts(1_700_000_000));
+        assert_eq!(clusters.len(), 1);
+        let select = mock
+            .calls()
+            .into_iter()
+            .find(|(sql, _)| sql.contains("strike_count FROM strike_clusters"))
+            .expect("select query");
+        assert_eq!(
+            select.1[0],
+            crate::executor::Param::Timestamp(ts(1_700_000_000))
+        );
+    }
+
+    #[tokio::test]
+    async fn select_clusters_keeps_requested_end_without_stored_clusters() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows("SELECT \"timestamp\" FROM strike_clusters", vec![]);
+        mock.add_rows("FROM strike_clusters", vec![]);
+        let mock = Arc::new(mock);
+        let service: Service<crate::metrics::NoopMetrics> = Service::with_parts(
+            mock.clone(),
+            ServiceCache::new(),
+            crate::metrics::NoopMetrics,
+            HashSet::new(),
+        );
+        let requested = TimeInterval::new(ts(1_700_000_100), ts(1_700_003_700));
+
+        let (anchor, clusters) = service.select_clusters(&requested, 6, None).await.unwrap();
+        assert_eq!(anchor, requested.end);
+        assert!(clusters.is_empty());
     }
 
     #[tokio::test]

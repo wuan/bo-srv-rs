@@ -455,6 +455,39 @@ impl<'a> StrikeClusterDb<'a> {
         }
     }
 
+    /// The newest stored `"timestamp"` in `[no_earlier_than, timestamp]` for an
+    /// interval length, optionally restricted to clusters intersecting `area`,
+    /// or `None` when no cluster matches.
+    ///
+    /// Used by the cluster endpoints to snap the newest interval to the most
+    /// recent produced slot (the producers only store the minutes they ran).
+    pub async fn latest_timestamp_at_or_before(
+        &self,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        no_earlier_than: chrono::DateTime<chrono::Utc>,
+        interval_seconds: i64,
+        area: Option<&Area>,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, DbError> {
+        let query = query::cluster_latest_timestamp_query(
+            timestamp,
+            no_earlier_than,
+            interval_seconds,
+            self.srid,
+            area,
+        );
+        let rows = self
+            .executor
+            .query(query.to_postgres(), query.parameters())
+            .await?;
+        match rows.first() {
+            None => Ok(None),
+            Some(row) => Ok(Some(
+                row.get_timestamp(0)
+                    .ok_or_else(|| DbError::Column("timestamp".to_string()))?,
+            )),
+        }
+    }
+
     /// `StrikeCluster.select`: the clusters belonging to `interval_duration`,
     /// optionally restricted to those intersecting `area`.
     ///
@@ -746,8 +779,7 @@ mod tests {
         let executions = mock.executions();
         assert_eq!(executions.len(), 1);
         let (sql, params) = &executions[0];
-        assert!(sql
-            .contains("ST_GeomFromWKB($3::bytea, $4::integer)"));
+        assert!(sql.contains("ST_GeomFromWKB($3::bytea, $4::integer)"));
         assert!(sql.starts_with("INSERT INTO strike_clusters"));
         assert!(matches!(params[0], Param::Timestamp(_)));
         assert_eq!(params[1], Param::Int(600));
@@ -776,9 +808,7 @@ mod tests {
         let mut mock = MockExecutor::new();
         mock.add_rows(
             "ORDER BY \"timestamp\" DESC",
-            vec![Row::new(vec![Value::Timestamp(ts(
-                2025, 1, 1, 12, 0, 0,
-            ))])],
+            vec![Row::new(vec![Value::Timestamp(ts(2025, 1, 1, 12, 0, 0))])],
         );
         let db = StrikeClusterDb::new(&mock, 4326);
         let latest = db.get_latest_time(600).await.unwrap().unwrap();
@@ -794,6 +824,51 @@ mod tests {
         mock.add_rows("ORDER BY", vec![]);
         let db = StrikeClusterDb::new(&mock, 4326);
         assert!(db.get_latest_time(600).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cluster_latest_timestamp_at_or_before_reads_row() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows(
+            "FROM strike_clusters",
+            vec![Row::new(vec![Value::Timestamp(ts(2025, 1, 1, 12, 0, 0))])],
+        );
+        let db = StrikeClusterDb::new(&mock, 4326);
+        let latest = db
+            .latest_timestamp_at_or_before(
+                ts(2025, 1, 1, 12, 5, 0),
+                ts(2025, 1, 1, 11, 5, 0),
+                600,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest, ts(2025, 1, 1, 12, 0, 0));
+        let (sql, params) = &mock.calls()[0];
+        assert!(sql.contains("\"timestamp\" <= $1::timestamptz"));
+        assert!(sql.contains("\"timestamp\" >= $2::timestamptz"));
+        assert!(sql.contains("interval_seconds=$3::smallint"));
+        assert_eq!(params[0], Param::Timestamp(ts(2025, 1, 1, 12, 5, 0)));
+        assert_eq!(params[1], Param::Timestamp(ts(2025, 1, 1, 11, 5, 0)));
+        assert_eq!(params[2], Param::Int(600));
+    }
+
+    #[tokio::test]
+    async fn cluster_latest_timestamp_at_or_before_no_row_is_none() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows("FROM strike_clusters", vec![]);
+        let db = StrikeClusterDb::new(&mock, 4326);
+        assert!(db
+            .latest_timestamp_at_or_before(
+                ts(2025, 1, 1, 12, 5, 0),
+                ts(2025, 1, 1, 11, 5, 0),
+                600,
+                None,
+            )
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -836,9 +911,8 @@ mod tests {
         let mut mock = MockExecutor::new();
         mock.add_rows("FROM strike_clusters", vec![]);
         let db = StrikeClusterDb::new(&mock, 4326);
-        let area = crate::query::Area::from_envelope(&crate::geom::Envelope::new(
-            10.0, 12.0, 50.0, 52.0,
-        ));
+        let area =
+            crate::query::Area::from_envelope(&crate::geom::Envelope::new(10.0, 12.0, 50.0, 52.0));
         db.select(
             ts(2025, 1, 1, 12, 0, 0),
             chrono::Duration::minutes(10),
