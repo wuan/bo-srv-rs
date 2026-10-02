@@ -209,7 +209,8 @@ Because the cluster producers only store a cluster for the minutes they actually
 ran, the newest interval **anchor** is snapped to the most recent stored cluster
 timestamp in `[end - lookback, end]` (see
 [Cluster time anchoring](#cluster-time-anchoring)); when no cluster matches, the
-requested `end` is kept.  The response's `t` reports the snapped interval end.
+requested `end` is kept.  Snapping only applies when `minute_offset == 0`.  The
+response's `t` reports the snapped interval end.
 
 ### Cluster time anchoring
 
@@ -218,9 +219,12 @@ match a stored `strike_clusters."timestamp"` exactly.  The service resolves the
 newest interval as follows:
 
 1. Compute the requested `end = floor(now to the minute) + minute_offset`.
-2. Look for the newest stored cluster timestamp `within [end - lookback, end]`
-   that has `interval_seconds = minute_length * 60` (and, for the local
-   endpoint, intersects the tile's neighbourhood envelope).
+2. When `minute_offset == 0` (the request asks for "now"), look for the newest
+   stored cluster timestamp `within [end - lookback, end]` that has
+   `interval_seconds = minute_length * 60` (and, for the local endpoint,
+   intersects the tile's neighbourhood envelope).  A **non-zero `minute_offset`
+   disables the snap**: the client explicitly wants that past interval, so the
+   requested `end` is used as-is.
 3. Use that timestamp as the anchor when found, otherwise keep the requested
    `end`.
 4. Build the `interval_count` timestamps by stepping back `minute_length`
@@ -455,10 +459,10 @@ the fly, and it applies the client checks but **not** the `region` or
 returns `{}`.
 
 The newest interval ends at the minute-truncated `now + minute_offset`, snapped
-to the latest stored cluster within the requested window (see
-[Cluster time anchoring](#cluster-time-anchoring)); the `interval_count - 1`
-earlier intervals step back by `minute_length` each.  A database failure
-surfaces as a fault (`8002`).
+to the latest stored cluster within the requested window when `minute_offset` is
+`0` (see [Cluster time anchoring](#cluster-time-anchoring)); the
+`interval_count - 1` earlier intervals step back by `minute_length` each.  A
+database failure surfaces as a fault (`8002`).
 
 ```json
 {"jsonrpc": "2.0", "method": "get_global_clusters",
@@ -487,7 +491,8 @@ geometry filter.  `data_area` is clamped with `max(5, ..)`.
 returns `{}`.
 
 The newest interval is snapped to the latest stored cluster **within the tile's
-neighbourhood** (see [Cluster time anchoring](#cluster-time-anchoring)).
+neighbourhood** when `minute_offset` is `0` (see
+[Cluster time anchoring](#cluster-time-anchoring)).
 
 ```json
 {"jsonrpc": "2.0", "method": "get_local_clusters",
@@ -611,7 +616,9 @@ At `14:32:12` the requested end is `14:32:00`, and the intervals step back by
 10 minutes.  When the newest stored cluster is at `14:32` the result's `t` is
 `14:32`; when the producer last stored at `14:31` (or `14:30`) the anchor snaps
 back and `t` is `14:31` (or `14:30`), with the remaining intervals following
-from there:
+from there.  The snap only applies because `minute_offset` is `0`; a request
+with a non-zero offset (e.g. `params: [10, -5, 6]`) uses `14:27:00` as the end
+verbatim.
 
 ```json
 {"jsonrpc": "2.0",

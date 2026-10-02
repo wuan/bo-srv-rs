@@ -399,7 +399,7 @@ impl<M: Metrics> Service<M> {
         let started = std::time::Instant::now();
         let time_interval = create_cluster_time_interval(minute_length, minute_offset);
         let (anchor, clusters) = self
-            .select_clusters(&time_interval, interval_count, None)
+            .select_clusters(&time_interval, interval_count, None, minute_offset == 0)
             .await?;
         let response =
             Self::build_clusters_response(&clusters, &reanchor_interval(&time_interval, anchor));
@@ -431,7 +431,12 @@ impl<M: Metrics> Service<M> {
         let area = local_grid_area(&local_grid);
         let time_interval = create_cluster_time_interval(minute_length, minute_offset);
         let (anchor, clusters) = self
-            .select_clusters(&time_interval, interval_count, Some(&area))
+            .select_clusters(
+                &time_interval,
+                interval_count,
+                Some(&area),
+                minute_offset == 0,
+            )
             .await?;
         let response =
             Self::build_clusters_response(&clusters, &reanchor_interval(&time_interval, anchor));
@@ -456,30 +461,35 @@ impl<M: Metrics> Service<M> {
     ///
     /// The newest interval is **snapped** to the most recent stored cluster
     /// timestamp in the requested window, so a producer that has not stored a
-    /// cluster for the current minute (or for `minute_offset`) still yields its
-    /// latest series.  The search is bounded by `minute_length * interval_count`
-    /// capped at one day; when nothing matches, the requested end is kept.  The
-    /// returned end is the resolved (possibly shifted) anchor, so the response's
-    /// `t` reports the interval actually returned.
+    /// cluster for the current minute still yields its latest series.  Snapping
+    /// only applies when the request asks for "now" (`minute_offset == 0`) —
+    /// with a non-zero offset the client explicitly wants a specific past
+    /// interval, so the requested end is used as-is.  The search is bounded by
+    /// `minute_length * interval_count` capped at one day; when nothing matches,
+    /// the requested end is kept.  The returned end is the resolved (possibly
+    /// shifted) anchor, so the response's `t` reports the interval actually
+    /// returned.
     async fn select_clusters(
         &self,
         time_interval: &TimeInterval,
         interval_count: i64,
         area: Option<&Area>,
+        snap_anchor: bool,
     ) -> Result<(DateTime<Utc>, Vec<StrikeCluster>), ServiceError> {
         let interval_seconds = time_interval.duration_seconds();
         let interval_duration = Duration::seconds(interval_seconds);
         let db = StrikeClusterDb::new(self.executor.as_ref(), SRID);
 
-        // Snap the anchor: the latest stored cluster at or before the requested
-        // end, but no further back than the requested window (at most one day).
-        let lookback_seconds = interval_seconds
-            .saturating_mul(interval_count)
-            .min(MAX_MINUTES_PER_DAY * 60);
-        let lookback = Duration::seconds(lookback_seconds);
-        self.metrics.for_clusters_query();
-        let anchor = db
-            .latest_timestamp_at_or_before(
+        let anchor = if snap_anchor {
+            // Snap the anchor: the latest stored cluster at or before the
+            // requested end, but no further back than the requested window (at
+            // most one day).
+            let lookback_seconds = interval_seconds
+                .saturating_mul(interval_count)
+                .min(MAX_MINUTES_PER_DAY * 60);
+            let lookback = Duration::seconds(lookback_seconds);
+            self.metrics.for_clusters_query();
+            db.latest_timestamp_at_or_before(
                 time_interval.end,
                 time_interval.end - lookback,
                 interval_seconds,
@@ -487,7 +497,10 @@ impl<M: Metrics> Service<M> {
             )
             .await
             .map_err(|e| ServiceError::Database(e.to_string()))?
-            .unwrap_or(time_interval.end);
+            .unwrap_or(time_interval.end)
+        } else {
+            time_interval.end
+        };
 
         self.metrics.for_clusters_query();
         let clusters = db
@@ -2453,7 +2466,10 @@ mod tests {
         );
         let requested = TimeInterval::new(ts(1_700_000_100), ts(1_700_003_700));
 
-        let (anchor, clusters) = service.select_clusters(&requested, 6, None).await.unwrap();
+        let (anchor, clusters) = service
+            .select_clusters(&requested, 6, None, true)
+            .await
+            .unwrap();
         // The anchor is the stored timestamp, not the requested end.
         assert_eq!(anchor, ts(1_700_000_000));
         assert_eq!(clusters.len(), 1);
@@ -2482,9 +2498,53 @@ mod tests {
         );
         let requested = TimeInterval::new(ts(1_700_000_100), ts(1_700_003_700));
 
-        let (anchor, clusters) = service.select_clusters(&requested, 6, None).await.unwrap();
+        let (anchor, clusters) = service
+            .select_clusters(&requested, 6, None, true)
+            .await
+            .unwrap();
         assert_eq!(anchor, requested.end);
         assert!(clusters.is_empty());
+    }
+
+    #[tokio::test]
+    async fn select_clusters_does_not_snap_with_non_zero_offset() {
+        // Even when a stored timestamp is available the lookup is skipped
+        // (`snap_anchor = false`, i.e. `minute_offset != 0`), so the requested
+        // end is used verbatim.
+        let mut mock = MockExecutor::new();
+        mock.add_rows(
+            "FROM strike_clusters",
+            vec![cluster_row(1, ts(1_700_000_000))],
+        );
+        let mock = Arc::new(mock);
+        let service: Service<crate::metrics::NoopMetrics> = Service::with_parts(
+            mock.clone(),
+            ServiceCache::new(),
+            crate::metrics::NoopMetrics,
+            HashSet::new(),
+        );
+        let requested = TimeInterval::new(ts(1_700_000_100), ts(1_700_003_700));
+
+        let (anchor, clusters) = service
+            .select_clusters(&requested, 6, None, false)
+            .await
+            .unwrap();
+        assert_eq!(anchor, requested.end);
+        assert_eq!(clusters.len(), 1);
+        let calls = mock.calls();
+        let anchor_lookups = calls
+            .iter()
+            .filter(|(sql, _)| sql.contains("ORDER BY \"timestamp\" DESC LIMIT 1"))
+            .count();
+        assert_eq!(anchor_lookups, 0, "no anchor lookup with a non-zero offset");
+        let select = calls
+            .iter()
+            .find(|(sql, _)| sql.contains("strike_count FROM strike_clusters"))
+            .expect("select query");
+        assert_eq!(
+            select.1[0],
+            crate::executor::Param::Timestamp(requested.end)
+        );
     }
 
     #[tokio::test]

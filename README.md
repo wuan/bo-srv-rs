@@ -576,18 +576,20 @@ The local flavour passes the `LocalGrid { data_area, x, y }` neighbourhood
 envelope as the geometry filter; the global flavour has no area filter.
 
 **Anchor snapping.**  The producers only store a cluster for the minutes they
-actually ran, so the current minute (or the requested `minute_offset`) may have
-no row.  Before selecting, the service asks for the newest stored cluster
-timestamp in `[end - lookback, end]` (`interval_seconds = minute_length * 60`)
-and uses it as the interval end when present; otherwise the requested `end` is
-kept.  The lookback is `minute_length * interval_count` capped at one day, so
-the anchor never shifts more than the requested window.  This makes a request
-such as `minute_length=10, interval_count=6` at `14:32:12` still return the
-latest 10-minute series (for example `14:30, 14:20, ...` when the producer last
-stored at `14:30`, or `14:31, 14:21, ...` after it stored at `14:31`).  The
-response's `t` reports the snapped (actually returned) interval end.  The local
-flavour applies the same area filter to the anchor lookup, so a tile snaps to
-the latest cluster *within its neighbourhood*.
+actually ran, so the current minute may have no row.  Before selecting, when the
+request asks for "now" (`minute_offset == 0`) the service asks for the newest
+stored cluster timestamp in `[end - lookback, end]` (`interval_seconds =
+minute_length * 60`) and uses it as the interval end when present; otherwise the
+requested `end` is kept.  A non-zero `minute_offset` disables the snap (the
+client explicitly wants that past interval).  The lookback is `minute_length *
+interval_count` capped at one day, so the anchor never shifts more than the
+requested window.  This makes a request such as `minute_length=10,
+interval_count=6` at `14:32:12` still return the latest 10-minute series (for
+example `14:30, 14:20, ...` when the producer last stored at `14:30`, or `14:31,
+14:21, ...` after it stored at `14:31`).  The response's `t` reports the snapped
+(actually returned) interval end.  The local flavour applies the same area
+filter to the anchor lookup, so a tile snaps to the latest cluster *within its
+neighbourhood*.
 
 Cluster result keys: `t, dt, clusters`.  `t` is `%Y%m%dT%H:%M:%S` of the interval
 end and `dt` the interval length in seconds (same conventions as the grid
