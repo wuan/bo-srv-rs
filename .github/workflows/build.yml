@@ -142,7 +142,7 @@ jobs:
       # Prebuilt binary instead of `cargo install cargo-llvm-cov`, which would
       # recompile the tool (and its dependency tree) on every run.
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
         with:
           tool: cargo-llvm-cov
 
