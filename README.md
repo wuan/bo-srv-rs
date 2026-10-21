@@ -81,6 +81,10 @@ location / {
 }
 ```
 
+For a full Ubuntu deployment — binary installation, `/etc/blitzortung.conf`,
+the systemd unit, rsyslog routing and the log directory — see
+[`doc/service_setup.md`](doc/service_setup.md).
+
 ### LSP framing mode (opt-in)
 
 The original LSP-style `Content-Length` framing on a raw TCP socket is still
