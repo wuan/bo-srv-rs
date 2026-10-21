@@ -558,6 +558,13 @@ Each cluster object:
 > a request whose `minute_length` matches the `bo-cluster` interval they are
 > equal.
 
+> The `bo-cluster` producer merges every same-interval cluster whose buffered
+> area overlaps into a single cluster (by polygon union, falling back to the
+> combined convex hull when the union is not a single hole-free ring), so the
+> clusters stored for one `timestamp` never contain two overlapping areas for
+> the same storm region.  Only the producer changes: the response shape above
+> and previously stored rows are unchanged.
+
 ## Worked examples
 
 ### Positional, JSON-RPC 2.0
