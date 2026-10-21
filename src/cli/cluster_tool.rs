@@ -732,6 +732,60 @@ mod tests {
         assert_eq!(parsed[0]["interval_seconds"], 600);
     }
 
+    /// 27 strikes: a ring around (11.2, 51.2) whose hull encloses a central
+    /// triple.  The closest inter-cluster strike pair is farther than the 8 km
+    /// linkage cut, so detection yields two clusters whose buffered areas
+    /// overlap and must be merged into one.
+    fn overlapping_cluster_strikes() -> Vec<Row> {
+        let mut rows = Vec::new();
+        let mut id = 1;
+        for k in 0..24 {
+            let angle = 2.0 * std::f64::consts::PI * (k as f64) / 24.0;
+            rows.push(strike_row(
+                id,
+                11.2 + 0.2 * angle.cos(),
+                51.2 + 0.2 * angle.sin(),
+            ));
+            id += 1;
+        }
+        rows.push(strike_row(id, 11.2, 51.2));
+        rows.push(strike_row(id + 1, 11.21, 51.2));
+        rows.push(strike_row(id + 2, 11.19, 51.21));
+        rows
+    }
+
+    #[tokio::test]
+    async fn fetch_clusters_merges_overlapping_areas() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows("FROM strikes", overlapping_cluster_strikes());
+        let interval = TimeInterval::new(
+            Utc.with_ymd_and_hms(2025, 1, 1, 11, 50, 0).unwrap(),
+            Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap(),
+        );
+        let output = fetch_clusters(&mock, &options(), &interval).await.unwrap();
+        assert_eq!(output.lines().count(), 1, "one merged cluster: {output}");
+        assert!(output.contains(" 27 "), "summed strike_count: {output}");
+    }
+
+    #[tokio::test]
+    async fn insert_merges_overlapping_areas_into_one_row() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows("FROM strikes", overlapping_cluster_strikes());
+        mock.add_rows("FROM strike_clusters", vec![]);
+        let mut opts = options();
+        opts.insert = true;
+        let interval = minute_interval();
+
+        let calculation = collect_clusters(&mock, &opts, &interval).await.unwrap();
+        assert_eq!(calculation.clusters.len(), 1, "one merged cluster");
+        assert_eq!(calculation.clusters[0].strike_count, 27);
+
+        let inserted = insert_clusters(&mock, &opts, &interval, &calculation.clusters)
+            .await
+            .unwrap();
+        assert_eq!(inserted, 1, "the merged cluster inserts one row");
+    }
+
     #[tokio::test]
     async fn fetch_clusters_empty_for_too_few_strikes() {
         let mut mock = MockExecutor::new();

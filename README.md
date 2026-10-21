@@ -762,6 +762,17 @@ cargo run --bin bo-servicelog-stats -- --date 2023-11-14 --format html \
   were dropped.
 - **Fixed region table.** The 7-region grid layout is compiled into
   `geom::REGIONS` exactly as defined in `blitzortung/gis/constants.py`.
+- **Overlapping same-timestamp cluster areas are merged.** The Python
+  `blitzortung.clustering` step splits clusters only by strike-to-strike
+  distance, so two clusters of one interval can be farther apart than the
+  linkage cut yet have overlapping *buffered* areas (an elongated or enclosing
+  hull reaches over a separate group), and both are emitted.  The Rust
+  `bo-cluster` producer instead merges every same-interval cluster whose
+  buffered area overlaps, by polygon union, falling back to the combined convex
+  hull when the union has a hole or several rings (which a single closed ring
+  cannot represent).  Only the producer changes: the `strike_clusters` schema,
+  the `get_global_clusters`/`get_local_clusters` responses and the previously
+  stored rows are untouched.
 - **No `utm` crate.** The original port plan used the Rust `utm` crate; its
   accuracy does not match PROJ's etmerc output used by pyproj, so the grid
   factory uses the direct PROJ algorithm port in `geom.rs`, verified to

@@ -9,7 +9,9 @@
 //!   its `(min_label, max_label, distance, size)` output rows;
 //! * uses the [`geo`] crate for the convex hull, the round-join `0.02` deg
 //!   buffer and the Douglas-Peucker simplification;
-//! * uses `geographiclib-rs` for the WGS84 polygon area.
+//! * uses `geographiclib-rs` for the WGS84 polygon area;
+//! * merges same-interval clusters whose buffered areas overlap (a difference
+//!   from the Python reference), so one storm region is emitted once.
 //!
 //! See [`Clustering::build_clusters`] for the algorithm and the module docs of
 //! [`crate::clustering::geometry`] for the geometry pipeline.
@@ -17,7 +19,9 @@
 use chrono::DateTime;
 use chrono::Utc;
 
-use crate::clustering::geometry::{buffer_ring, convex_hull_ring, simplify_ring};
+use crate::clustering::geometry::{
+    buffer_ring, convex_hull_ring, rings_overlap, simplify_ring, union_rings,
+};
 use crate::data::{Strike, StrikeCluster, Timestamp};
 use crate::query::TimeInterval;
 
@@ -189,6 +193,18 @@ impl Default for Clustering {
     }
 }
 
+/// A detected cluster during the merge phase: its member strike indices (into
+/// the interval's strike vector) and its current boundary ring.
+///
+/// Member indices are retained because the deterministic emission order sorts
+/// by the smallest member index and the convex fallback rebuilds the shape from
+/// the combined member strikes.
+#[derive(Debug, Clone)]
+struct ClusterShape {
+    members: Vec<usize>,
+    shape: Vec<(f64, f64)>,
+}
+
 impl Clustering {
     /// The Python class-level constants.
     pub fn new() -> Self {
@@ -250,23 +266,30 @@ impl Clustering {
             .collect();
         clustered.sort_by_key(|members| members.iter().copied().min());
 
+        // Build one shape per agglomerated cluster, keeping the member strike
+        // indices beside it for the merge phase and the fallback rebuild.
+        let mut shaped: Vec<ClusterShape> = Vec::with_capacity(clustered.len());
         for members in clustered {
-            let events_in_cluster = members.len();
-            if events_in_cluster <= 2 {
+            if members.len() <= 2 {
                 continue;
             }
             let cluster_points: Vec<(f64, f64)> = members.iter().map(|&i| points[i]).collect();
-            let shape = match self.build_shape(&cluster_points) {
-                Some(shape) => shape,
-                None => continue,
+            let Some(shape) = self.build_shape(&cluster_points) else {
+                continue;
             };
-            let area = crate::clustering::geometry::polygon_area_km2(&shape);
+            shaped.push(ClusterShape { members, shape });
+        }
+
+        // Merge clusters whose buffered areas overlap (transitively) so one
+        // interval never emits two overlapping areas for the same storm region.
+        for cluster in self.merge_overlapping(shaped, &points) {
+            let area = crate::clustering::geometry::polygon_area_km2(&cluster.shape);
             clusters_out.push(StrikeCluster {
                 id: -1,
                 timestamp,
                 interval_seconds,
-                shape: Some(shape),
-                strike_count: events_in_cluster as i64,
+                shape: Some(cluster.shape),
+                strike_count: cluster.members.len() as i64,
                 area,
             });
         }
@@ -292,6 +315,49 @@ impl Clustering {
         } else {
             None
         }
+    }
+
+    /// Merge every pair of clusters whose boundary rings overlap, repeating
+    /// until a full pass finds no overlapping pair (the transitive closure).
+    ///
+    /// The merged shape is the polygon union of the two rings ([`union_rings`]).
+    /// When that union is not a single hole-free ring, the shape is rebuilt from
+    /// the combined member strikes through [`Self::build_shape`], which always
+    /// yields one closed ring covering the replaced areas.  Member lists are
+    /// merged and sorted, and the result is ordered by the smallest member index
+    /// so the emission order stays deterministic.
+    fn merge_overlapping(
+        &self,
+        mut clusters: Vec<ClusterShape>,
+        points: &[(f64, f64)],
+    ) -> Vec<ClusterShape> {
+        loop {
+            let mut overlapping = None;
+            'search: for i in 0..clusters.len() {
+                for j in (i + 1)..clusters.len() {
+                    if rings_overlap(&clusters[i].shape, &clusters[j].shape) {
+                        overlapping = Some((i, j));
+                        break 'search;
+                    }
+                }
+            }
+            let Some((i, j)) = overlapping else { break };
+
+            let other = clusters.remove(j);
+            let mut members = std::mem::take(&mut clusters[i].members);
+            members.extend(other.members);
+            members.sort_unstable();
+            let shape = union_rings(&clusters[i].shape, &other.shape)
+                .or_else(|| {
+                    let cluster_points: Vec<(f64, f64)> =
+                        members.iter().map(|&index| points[index]).collect();
+                    self.build_shape(&cluster_points)
+                })
+                .expect("a merged cluster keeps a covering shape");
+            clusters[i] = ClusterShape { members, shape };
+        }
+        clusters.sort_by_key(|cluster| cluster.members.iter().copied().min());
+        clusters
     }
 }
 
@@ -528,6 +594,213 @@ mod tests {
         // so each triple stays a (size 3) cluster.
         assert_eq!(clusters.len(), 2);
         assert!(clusters.iter().all(|cluster| cluster.strike_count == 3));
+    }
+
+    // -- merging overlapping same-interval areas ----------------------------
+
+    /// A closed axis-aligned square with lower-left corner `(x, y)`.
+    fn ring_square(x: f64, y: f64, size: f64) -> Vec<(f64, f64)> {
+        vec![
+            (x, y),
+            (x + size, y),
+            (x + size, y + size),
+            (x, y + size),
+            (x, y),
+        ]
+    }
+
+    fn cluster_shape(members: &[usize], shape: Vec<(f64, f64)>) -> ClusterShape {
+        ClusterShape {
+            members: members.to_vec(),
+            shape,
+        }
+    }
+
+    /// Three non-collinear points so the convex fallback always has a hull.
+    fn fallback_points() -> Vec<(f64, f64)> {
+        vec![(10.0, 10.0), (10.2, 10.0), (10.1, 10.2)]
+    }
+
+    fn contains_point(ring: &[(f64, f64)], x: f64, y: f64) -> bool {
+        use geo::{Contains, LineString, Point, Polygon};
+        let line: LineString<f64> = ring
+            .iter()
+            .map(|&(x, y)| geo::coord! { x: x, y: y })
+            .collect();
+        let polygon = Polygon::new(line, Vec::new());
+        polygon.contains(&Point::new(x, y))
+    }
+
+    /// Strikes tracing a circle of `radius` degrees around `(cx, cy)`.
+    fn circle_strikes(cx: f64, cy: f64, radius: f64, count: usize) -> Vec<Strike> {
+        (0..count)
+            .map(|k| {
+                let angle = 2.0 * std::f64::consts::PI * (k as f64) / (count as f64);
+                strike(cx + radius * angle.cos(), cy + radius * angle.sin())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn merge_overlapping_combines_overlapping_clusters() {
+        let clustering = Clustering::new();
+        let merged = clustering.merge_overlapping(
+            vec![
+                cluster_shape(&[0], ring_square(0.0, 0.0, 2.0)),
+                cluster_shape(&[1], ring_square(1.0, 1.0, 2.0)),
+            ],
+            &fallback_points(),
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].members, vec![0, 1]);
+        // The merged ring is the union of the two areas: it covers a point only
+        // in the first and a point only in the second.
+        assert!(contains_point(&merged[0].shape, 0.5, 0.5));
+        assert!(contains_point(&merged[0].shape, 2.5, 2.5));
+    }
+
+    #[test]
+    fn merge_overlapping_is_transitive() {
+        let clustering = Clustering::new();
+        // A overlaps B, B overlaps C, but A does not overlap C.
+        let merged = clustering.merge_overlapping(
+            vec![
+                cluster_shape(&[0], ring_square(0.0, 0.0, 2.0)),
+                cluster_shape(&[1], ring_square(1.5, 0.0, 2.0)),
+                cluster_shape(&[2], ring_square(3.0, 0.0, 2.0)),
+            ],
+            &fallback_points(),
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].members, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn merge_overlapping_keeps_disjoint_and_touching_clusters_separate() {
+        let clustering = Clustering::new();
+        let points = fallback_points();
+        let disjoint = clustering.merge_overlapping(
+            vec![
+                cluster_shape(&[0], ring_square(0.0, 0.0, 1.0)),
+                cluster_shape(&[1], ring_square(5.0, 5.0, 1.0)),
+            ],
+            &points,
+        );
+        assert_eq!(disjoint.len(), 2);
+        // Two squares that share only the edge x = 1 must not merge.
+        let touching = clustering.merge_overlapping(
+            vec![
+                cluster_shape(&[0], ring_square(0.0, 0.0, 1.0)),
+                cluster_shape(&[1], ring_square(1.0, 0.0, 1.0)),
+            ],
+            &points,
+        );
+        assert_eq!(touching.len(), 2);
+    }
+
+    #[test]
+    fn merge_overlapping_falls_back_when_union_has_a_hole() {
+        let clustering = Clustering::new();
+        let points = fallback_points();
+        // A U-shaped area plus a bar closing its open top: the polygon union has
+        // a hole, which one closed ring cannot represent, so the merge must
+        // rebuild a single covering ring from the combined member strikes.
+        let u = vec![
+            (0.0, 0.0),
+            (3.0, 0.0),
+            (3.0, 3.0),
+            (2.0, 3.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 3.0),
+            (0.0, 3.0),
+            (0.0, 0.0),
+        ];
+        let bar = vec![(0.5, 2.0), (2.5, 2.0), (2.5, 3.0), (0.5, 3.0), (0.5, 2.0)];
+        let merged = clustering.merge_overlapping(
+            vec![cluster_shape(&[0, 1], u), cluster_shape(&[2], bar)],
+            &points,
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].members, vec![0, 1, 2]);
+        // The fallback is the convex hull of the combined member points, which
+        // covers both replaced areas, instead of the hole-bearing union.
+        let expected = clustering.build_shape(&points).expect("covering shape");
+        assert_eq!(merged[0].shape, expected);
+    }
+
+    #[test]
+    fn build_clusters_merges_overlapping_areas() {
+        // A ring of strikes whose hull encloses a separate triple: the closest
+        // inter-cluster strike distance exceeds the 8 km linkage cut, yet the
+        // buffered hulls overlap, so the two detected clusters must merge.
+        let mut events = circle_strikes(11.2, 51.2, 0.2, 24);
+        events.push(strike(11.2, 51.2));
+        events.push(strike(11.21, 51.2));
+        events.push(strike(11.19, 51.21));
+
+        let clusters = Clustering::new().build_clusters(&events, &interval());
+        assert_eq!(clusters.len(), 1, "overlapping areas must merge");
+        assert_eq!(clusters[0].strike_count, 27, "merged strike count");
+        // One closed ring whose reported area is computed from that ring.
+        let shape = clusters[0].shape.as_ref().expect("a shape");
+        assert_eq!(shape.first(), shape.last());
+        assert_eq!(
+            clusters[0].area,
+            crate::clustering::geometry::polygon_area_km2(shape)
+        );
+        // The union covers both replaced areas: the enclosed centre and the
+        // outer ring.
+        assert!(contains_point(shape, 11.2, 51.2), "missing the centre area");
+        assert!(contains_point(shape, 11.4, 51.2), "missing the outer area");
+    }
+
+    #[test]
+    fn build_clusters_emits_in_smallest_member_index_order() {
+        // The first triple (member indices 0..3) is near (11, 51); the second
+        // (indices 3..6) near (20, 60).  Merging must not reorder them.
+        let events = vec![
+            strike(11.0, 51.0),
+            strike(11.02, 51.0),
+            strike(11.01, 51.03),
+            strike(20.0, 60.0),
+            strike(20.02, 60.0),
+            strike(20.01, 60.03),
+        ];
+        let clusters = Clustering::new().build_clusters(&events, &interval());
+        assert_eq!(clusters.len(), 2);
+        let first = clusters[0].shape.as_ref().unwrap();
+        let second = clusters[1].shape.as_ref().unwrap();
+        assert!(
+            first.iter().all(|(x, _)| *x < 15.0),
+            "first cluster is the (11, 51) group"
+        );
+        assert!(
+            second.iter().all(|(x, _)| *x > 15.0),
+            "second cluster is the (20, 60) group"
+        );
+    }
+
+    #[test]
+    fn overlapping_areas_in_different_intervals_do_not_merge() {
+        // Merging only happens inside one `build_clusters` call, so clusters
+        // with different interval timestamps can never be merged together.
+        let mut events = circle_strikes(11.2, 51.2, 0.2, 24);
+        events.push(strike(11.2, 51.2));
+        events.push(strike(11.21, 51.2));
+        events.push(strike(11.19, 51.21));
+
+        let interval_a = interval();
+        let interval_b = TimeInterval::new(
+            interval_a.start + chrono::Duration::minutes(10),
+            interval_a.end + chrono::Duration::minutes(10),
+        );
+        let clusters_a = Clustering::new().build_clusters(&events, &interval_a);
+        let clusters_b = Clustering::new().build_clusters(&events, &interval_b);
+        assert_eq!(clusters_a.len(), 1);
+        assert_eq!(clusters_b.len(), 1);
+        assert_eq!(clusters_a[0].timestamp.datetime, Some(interval_a.end));
+        assert_eq!(clusters_b[0].timestamp.datetime, Some(interval_b.end));
     }
 }
 

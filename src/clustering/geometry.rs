@@ -23,6 +23,10 @@
 //!   `simplify` is the topology-*discarding* variant, i.e. shapely's
 //!   `preserve_topology=False`).
 //! * [`polygon_area_km2`] — `geographiclib-rs` `PolygonArea` on WGS84.
+//! * [`rings_overlap`] — a positive-area intersection test used to decide which
+//!   same-timestamp clusters merge.
+//! * [`union_rings`] — the polygon union of two cluster areas when it is a
+//!   single hole-free ring (otherwise the caller rebuilds a covering hull).
 //!
 //! ## Deviation from the Python reference
 //!
@@ -35,10 +39,13 @@
 //! expectation.  The convex hull, the buffer and the area are reproduced
 //! exactly; see the crate PR for details.
 
+use geo::algorithm::bool_ops::BooleanOps;
 use geo::algorithm::convex_hull::ConvexHull;
 use geo::algorithm::simplify::Simplify;
 use geo::{Buffer, Coord, LineString, MultiPoint, Point, Polygon};
 use geographiclib_rs::{Geodesic, PolygonArea, Winding};
+
+use geo::algorithm::area::Area;
 
 use crate::round::py_round;
 
@@ -119,6 +126,60 @@ pub fn simplify_ring(ring: &[(f64, f64)], tolerance: f64) -> Vec<(f64, f64)> {
         .collect()
 }
 
+/// Build a `geo::Polygon` from a closed ring, or `None` when the ring cannot
+/// describe a polygon (fewer than four coordinates).
+fn ring_polygon(ring: &[(f64, f64)]) -> Option<Polygon<f64>> {
+    if ring.len() < 4 {
+        return None;
+    }
+    let line: LineString<f64> = ring.iter().map(|&(x, y)| Coord { x, y }).collect();
+    Some(Polygon::new(line, Vec::new()))
+}
+
+/// True when two closed rings overlap in a strictly positive area.
+///
+/// Boundary-only contact (a shared edge or vertex) does not count as an
+/// overlap: the intersection must have non-zero area, so clusters that merely
+/// touch stay separate.
+pub fn rings_overlap(a: &[(f64, f64)], b: &[(f64, f64)]) -> bool {
+    let (Some(poly_a), Some(poly_b)) = (ring_polygon(a), ring_polygon(b)) else {
+        return false;
+    };
+    poly_a.intersection(&poly_b).unsigned_area() > 0.0
+}
+
+/// Union two closed rings into one ring.
+///
+/// Returns the exterior ring of the union when the union is a single polygon
+/// without holes.  Returns `None` when the union has a hole, splits into more
+/// than one polygon, or is numerically empty — none of which is representable
+/// as the single `GEOGRAPHY(LineString)` stored for a cluster, so the caller
+/// falls back to a hull rebuild over the combined member strikes.
+pub fn union_rings(a: &[(f64, f64)], b: &[(f64, f64)]) -> Option<Vec<(f64, f64)>> {
+    let poly_a = ring_polygon(a)?;
+    let poly_b = ring_polygon(b)?;
+    let union = poly_a.union(&poly_b);
+    if union.0.len() != 1 {
+        return None;
+    }
+    let polygon = &union.0[0];
+    if !polygon.interiors().is_empty() {
+        return None;
+    }
+    if polygon.unsigned_area() <= 0.0 {
+        return None;
+    }
+    let ring: Vec<(f64, f64)> = polygon
+        .exterior()
+        .coords()
+        .map(|c| (round_coord(c.x, 4), round_coord(c.y, 4)))
+        .collect();
+    if ring.len() < 4 {
+        return None;
+    }
+    Some(ring)
+}
+
 /// Geodesic polygon area in km², rounded to one decimal (port of
 /// `builder.strike_cluster.StrikeCluster.build` with `geographiclib`).
 ///
@@ -155,7 +216,6 @@ pub fn polygon_area_km2(ring: &[(f64, f64)]) -> Option<f64> {
 /// Planar polygon area in degree² (used only to pick the largest buffered
 /// polygon).
 fn polygon_area_deg2(polygon: &Polygon<f64>) -> f64 {
-    use geo::algorithm::area::Area;
     polygon.unsigned_area()
 }
 
@@ -237,5 +297,89 @@ mod tests {
     #[test]
     fn polygon_area_none_for_empty() {
         assert_eq!(polygon_area_km2(&[]), None);
+    }
+
+    /// A closed axis-aligned square with lower-left corner `(x, y)`.
+    fn square(x: f64, y: f64, size: f64) -> Vec<(f64, f64)> {
+        vec![
+            (x, y),
+            (x + size, y),
+            (x + size, y + size),
+            (x, y + size),
+            (x, y),
+        ]
+    }
+
+    /// Planar point-in-polygon test: is `(x, y)` inside the closed ring?
+    fn inside(ring: &[(f64, f64)], x: f64, y: f64) -> bool {
+        let polygon = ring_polygon(ring).expect("polygon");
+        let point = Point::new(x, y);
+        geo::algorithm::contains::Contains::contains(&polygon, &point)
+    }
+
+    #[test]
+    fn rings_overlap_for_overlapping_squares() {
+        assert!(rings_overlap(
+            &square(0.0, 0.0, 2.0),
+            &square(1.0, 1.0, 2.0)
+        ));
+    }
+
+    #[test]
+    fn rings_do_not_overlap_when_disjoint() {
+        assert!(!rings_overlap(
+            &square(0.0, 0.0, 1.0),
+            &square(5.0, 5.0, 1.0)
+        ));
+    }
+
+    #[test]
+    fn rings_do_not_overlap_when_only_touching() {
+        // The two squares share the edge x = 1 but no interior area.
+        assert!(!rings_overlap(
+            &square(0.0, 0.0, 1.0),
+            &square(1.0, 0.0, 1.0)
+        ));
+    }
+
+    #[test]
+    fn union_rings_unions_overlapping_areas() {
+        let a = square(0.0, 0.0, 2.0);
+        let b = square(1.0, 1.0, 2.0);
+        let union = union_rings(&a, &b).expect("a single hole-free ring");
+        assert_eq!(union.first(), union.last(), "the union ring is closed");
+        // The union is the 3x3 bounding square of the two 2x2 squares, so it
+        // covers a point only in `a` and a point only in `b`.
+        assert!(inside(&union, 0.5, 0.5), "union misses the a-only area");
+        assert!(inside(&union, 2.5, 2.5), "union misses the b-only area");
+    }
+
+    #[test]
+    fn union_rings_reports_hole_for_fallback() {
+        // A U-shaped area plus a bar closing its open top encloses a hole
+        // (the cavity x in 1..2, y in 1..2) that one ring cannot represent.
+        let u = vec![
+            (0.0, 0.0),
+            (3.0, 0.0),
+            (3.0, 3.0),
+            (2.0, 3.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 3.0),
+            (0.0, 3.0),
+            (0.0, 0.0),
+        ];
+        // The bar spans the arms (overlapping them with positive area) and the
+        // opening, leaving the cavity x in 1..2, y in 1..2 as a hole.
+        let bar = vec![(0.5, 2.0), (2.5, 2.0), (2.5, 3.0), (0.5, 3.0), (0.5, 2.0)];
+        assert!(union_rings(&u, &bar).is_none());
+    }
+
+    #[test]
+    fn union_rings_reports_degenerate_for_fallback() {
+        assert!(union_rings(&[], &square(0.0, 0.0, 1.0)).is_none());
+        // Two zero-area (collinear) inputs union to a numerically empty area.
+        let line = vec![(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (0.0, 0.0)];
+        assert!(union_rings(&line, &line).is_none());
     }
 }
