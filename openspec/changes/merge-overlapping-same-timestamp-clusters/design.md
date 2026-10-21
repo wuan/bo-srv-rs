@@ -19,14 +19,15 @@ polygons to `get_global_clusters` / `get_local_clusters`.
 The stored shape is a single closed ring: the column is
 `GEOGRAPHY(LineString)` and `db::map_cluster` decodes it with
 `wkb::decode_linestring`. There is no representation for holes or
-multi-polygons, and every existing shape is a buffered convex hull.
+multi-polygons. An unmerged cluster shape is a buffered convex hull; a merged
+shape is generally not convex.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
 - One area per storm region: any two clusters of the same interval whose areas
-  overlap become one cluster.
+  overlap become one cluster whose area is their union.
 - Preserve the existing shape pipeline, the single-ring invariant and the
   deterministic emission order, so `bo-cluster` and the JSON-RPC responses keep
   their current shape/field contracts.
@@ -52,66 +53,91 @@ the service would only fix the read path and leave the table wrong.
 ### Overlap test is positive-area intersection
 
 Two cluster areas overlap when their interiors share area. The predicate builds
-`geo::Polygon`s from the closed rings and checks that
-`BooleanOps::intersection` has non-zero area; boundary-only contact (a shared
-edge or vertex) is not an overlap. The `geo` crate already provides
-`BooleanOps` and `unary_union`, so no new dependency is needed.
+`geo::Polygon`s from the closed rings and checks that `BooleanOps::intersection`
+has non-zero area; boundary-only contact (a shared edge or vertex) is not an
+overlap. The `geo` crate already provides `BooleanOps`, so no new dependency is
+needed.
 
 *Alternative considered:* a bounding-box or centroid test — rejected, it would
 merge shapes that do not actually touch.
 
-### Merge by combining member strikes and rebuilding the shape
+### Merge by unioning the buffered areas
 
-`build_clusters` keeps each surviving group's member strike indices next to its
-shape. A merge unions the member index sets and rebuilds the shape through the
-existing hull → buffer → simplify pipeline, then recomputes the geodesic area,
-sums `strike_count`, and reuses the interval `timestamp`/`interval_seconds`.
+A merge unions the two cluster polygons with `geo::BooleanOps::union` and sums
+their `strike_count`. When the union is a single polygon without holes its
+exterior ring is the merged shape. The interval `timestamp` / `interval_seconds`
+are reused.
 
-This keeps the invariant that a cluster area is a buffered convex hull and
-always yields a single exterior ring, which the `GEOGRAPHY(LineString)` column
-and `decode_linestring` require.
+This is the literal "merge the areas" behaviour: the merged boundary follows the
+actual overlapping outlines instead of over-approximating them. The stored
+`GEOGRAPHY(LineString)` column and `decode_linestring` only need a single closed
+ring, which the union exterior provides.
 
-*Alternative considered:* unioning the two buffered polygons directly. It
-matches "areas merged" literally but can produce a hole or a multi-polygon with
-concave seams, which the storage type and the WKB decoder cannot represent, and
-it would break the convex-hull shape contract the rest of the pipeline relies
-on.
+*Alternative considered:* always rebuilding the convex hull of the combined
+member strikes — rejected on review: it inflates the merged area well beyond the
+union of the two buffered areas. A convex rebuild is kept only as the fallback
+below.
+
+### Fall back to a convex rebuild when the union is not a single ring
+
+A union can produce a hole (for example a ring of areas enclosing a void) or, in
+principle, more than one polygon. Neither is representable as one closed ring.
+In that case the merge rebuilds the shape from the unioned member strike indices
+through the existing hull → buffer → simplify pipeline, which always yields a
+single convex ring that covers the areas it replaces. `union_rings` in
+`src/clustering/geometry.rs` reports this condition (no single hole-free ring)
+so `build_clusters` can choose the fallback.
 
 ### Iterate to a fixpoint
 
 Rebuilding a merged shape can grow its area into a further overlap, so merging
-repeats until a full pass finds no overlapping pair (transitive closure). The
-merge is commutative in the member sets, so the result is order-independent even
+repeats until a full pass finds no overlapping pair (transitive closure). Union
+is commutative in the member sets, so the result is order-independent even
 though pairs are examined in a fixed order.
 
 ### Deterministic ordering
 
 After merging, clusters are emitted in ascending order of their smallest member
 strike index, the same key `build_clusters` sorts by today, so a `HashMap`-
-backed merge cannot reorder the output between runs.
+backed merge cannot reorder the output between runs. Member strike indices are
+retained alongside each shape because the ordering key and the convex fallback
+both need them.
 
 ## Risks / Trade-offs
 
-- A merged area is the convex hull of the combined strikes and can be larger
-  than the exact union of the two buffered areas → accepted: it upholds the
-  single convex-ring invariant, and the spec only requires the merged area to
-  cover the areas it replaces.
-- Pairwise intersection over the interval's clusters is `O(k²)` per fixpoint
-  pass → `k` is small (a handful of clusters per interval), and the harness
-  already fits thousands of strikes in memory.
+- A merged shape is a polygon union and is generally not convex, so the
+  "cluster area is a buffered convex hull" invariant only holds for unmerged
+  clusters. Accepted: storage needs a single closed ring, not convexity, and the
+  spec only requires the merged area to cover the areas it replaces.
+- A union with a hole or multiple rings falls back to the convex hull of the
+  combined strikes and can be larger than the exact union → accepted: it keeps
+  the single-ring invariant while still covering every replaced area.
 - Numeric robustness of polygon intersection on rounded rings could report a
   sliver for a shared edge → require a strictly positive intersection area so
-  boundary-touching clusters stay separate.
+  boundary-touching clusters stay separate; a numerically degenerate union is
+  treated like a non-single ring and takes the fallback.
+- Pairwise intersection and union over the interval's clusters is `O(k²)` per
+  fixpoint pass → `k` is small (a handful of clusters per interval), and the
+  harness already fits thousands of strikes in memory.
 
 ## Migration Plan
 
 - No schema or API change; deploy the producer and later intervals are stored
   merged. Previously stored overlapping rows stay until a backfill is run, which
-  is out of scope.
+  is out of scope. The database content is not rewritten.
 - Rollback is reverting the producer build; stored merged rows remain valid
   clusters.
 
 ## Open Questions
 
-None that change the specs, the approach or the tasks. Whether to backfill
-already-stored overlapping clusters is deferred to a separate change.
+None that change the specs, the approach or the tasks. Review resolved the three
+open points:
+
+1. Merge by polygon union, with a convex rebuild only when the union produces a
+   hole (or otherwise is not a single ring) — replaces the earlier
+   always-convex-rebuild default.
+2. Only the producer changes; existing database content is not affected.
+3. Only interiors sharing area merge; boundary-only contact stays separate.
+
+Whether to backfill already-stored overlapping clusters is deferred to a
+separate change.
