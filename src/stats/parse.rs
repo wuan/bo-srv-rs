@@ -29,9 +29,9 @@ pub struct ServiceLogRow {
     pub timestamp: String,
     pub country: Option<String>,
     pub city: Option<String>,
-    /// `A` for Android, `-` for anything else.
+    /// `A` for Android, `I` for iOS, `-` for anything else.
     pub platform: String,
-    /// The parsed `bo-android-<n>` version, else `None`.
+    /// The parsed `bo-android-<n>` / `bo-ios-<n>` version, else `None`.
     pub version: Option<i64>,
     pub minute_offset: i64,
     pub minute_length: i64,

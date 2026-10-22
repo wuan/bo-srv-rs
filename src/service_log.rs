@@ -47,7 +47,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 
 use crate::metrics::Metrics;
-use crate::service::USER_AGENT_PREFIX;
+use crate::service::{IOS_USER_AGENT_PREFIX, USER_AGENT_PREFIX};
 
 /// Environment variable overriding the usage-log directory
 /// (`BO_SERVICE_SERVICELOG`); `BO_SERVICE_LOG_DIR` is accepted as an alias.
@@ -209,14 +209,16 @@ pub fn local_entry(
     }
 }
 
-/// `user_agent_version`: parse `bo-android-<n>` from the user agent's first
-/// whitespace-separated word.  Returns `None` when it does not match.
+/// `user_agent_version`: parse the integer version of a recognised
+/// `bo-android-<n>` / `bo-ios-<n>` client from the user agent's first
+/// whitespace-separated word.  Returns `None` when it does not match, including
+/// bare `bo-ios` and a non-positive or non-numeric version.
 pub fn user_agent_version(user_agent: Option<&str>) -> Option<i64> {
     let user_agent = user_agent?;
     let first = user_agent.split(' ').next().unwrap_or("");
     let (prefix, version) = first.rsplit_once('-')?;
-    if prefix == "bo-android" {
-        version.parse::<i64>().ok()
+    if prefix == "bo-android" || prefix == "bo-ios" {
+        version.parse::<i64>().ok().filter(|version| *version != 0)
     } else {
         None
     }
@@ -267,8 +269,8 @@ fn calc_tab_pad_count(length: usize) -> usize {
 /// 2. `country` — GeoIP ISO code, else `-`;
 /// 3. `city` — GeoIP English name, else `-`, followed by computed tab padding
 ///    (see [`pad_city`]; never truncated);
-/// 4. `platform` — `A` for Android, else `-`;
-/// 5. `version` — `bo-android-<n>` version, else `None`;
+/// 4. `platform` — `A` for Android, `I` for iOS, else `-`;
+/// 5. `version` — `bo-android-<n>` / `bo-ios-<n>` version, else `None`;
 /// 6. `minute_offset`;
 /// 7. `minute_length`;
 /// 8. `grid_baselength` — the **pre-clamp** `original_grid_base_length`;
@@ -293,8 +295,9 @@ fn calc_tab_pad_count(length: usize) -> usize {
 ///
 /// `platform` and `version` are derived from [`ServiceLogEntry::user_agent`]
 /// via [`client_platform`] / [`user_agent_version`]: an Android client yields
-/// `A` and its integer version; any other (or absent) user agent yields `-`
-/// and `None` respectively.
+/// `A` and its integer version, an iOS client yields `I` and its integer
+/// version, and any other (or absent) user agent yields `-` and `None`
+/// respectively.
 pub fn build_row(
     entry: &ServiceLogEntry,
     version: Option<i64>,
@@ -348,14 +351,15 @@ pub fn build_row(
 
 /// The client platform marker for the servicelog `platform` column.
 ///
-/// Currently only the Blitzortung Android client is recognised: a user agent
-/// whose version parses (`bo-android-<n>`) yields `A`.  Anything else — a
-/// missing user agent, or one that is not an Android client — yields `-`.
+/// A Blitzortung Android client (`bo-android-<n>`) yields `A` and an iOS client
+/// (`bo-ios-<n>`) yields `I`.  A bare `bo-ios` (or one whose version does not
+/// parse) and any other user agent yield `-`; a missing user agent is `-`.
 pub fn client_platform(user_agent: Option<&str>, version: Option<i64>) -> &'static str {
-    if version.is_some() || user_agent.is_some_and(|ua| ua.starts_with(USER_AGENT_PREFIX)) {
-        "A"
-    } else {
-        "-"
+    let first = user_agent.and_then(|ua| ua.split(' ').next());
+    match first {
+        Some(ua) if ua.starts_with(USER_AGENT_PREFIX) => "A",
+        Some(ua) if ua.starts_with(IOS_USER_AGENT_PREFIX) && version.is_some() => "I",
+        _ => "-",
     }
 }
 
@@ -799,6 +803,15 @@ mod tests {
         assert_eq!(user_agent_version(Some("bo-android-190 more")), Some(190));
         assert_eq!(user_agent_version(Some("bo-android-abc")), None);
         assert_eq!(user_agent_version(Some("bo-android")), None);
+        // The version suffix is required: bare `bo-ios` and a malformed or
+        // zero version leave the version absent.
+        assert_eq!(user_agent_version(Some("bo-ios-42")), Some(42));
+        assert_eq!(user_agent_version(Some("bo-ios-42 more")), Some(42));
+        assert_eq!(user_agent_version(Some("bo-ios")), None);
+        assert_eq!(user_agent_version(Some("bo-ios-")), None);
+        assert_eq!(user_agent_version(Some("bo-ios-abc")), None);
+        assert_eq!(user_agent_version(Some("bo-ios-0")), None);
+        assert_eq!(user_agent_version(Some("bo-android-0")), None);
         assert_eq!(user_agent_version(Some("Mozilla/5.0")), None);
         assert_eq!(user_agent_version(None), None);
     }
@@ -1290,14 +1303,54 @@ mod tests {
         assert!(open_geoip(Path::new("/nonexistent/GeoLite2-City.mmdb")).is_none());
     }
 
-    /// `client_platform` recognises only the Android prefix.
+    /// `client_platform` recognises the Android and iOS prefixes.
     #[test]
     fn client_platform_marker() {
         assert_eq!(client_platform(Some("bo-android-190"), Some(190)), "A");
         // A prefix match without a parsed version is still Android.
         assert_eq!(client_platform(Some("bo-android-abc"), None), "A");
+        // A versioned iOS client is `I`; a bare or unparsable one is unknown.
+        assert_eq!(client_platform(Some("bo-ios-42"), Some(42)), "I");
+        assert_eq!(client_platform(Some("bo-ios"), None), "-");
+        assert_eq!(client_platform(Some("bo-ios-abc"), None), "-");
         assert_eq!(client_platform(Some("Mozilla/5.0"), None), "-");
         assert_eq!(client_platform(None, None), "-");
+    }
+
+    /// A versioned iOS client is logged as `I` with its version, while a bare
+    /// `bo-ios` and an unknown client are `-` with the version absent.
+    #[test]
+    fn ios_usage_rows_record_platform_and_version() {
+        let mut e = entry(0, None);
+        e.user_agent = Some("bo-ios-42".into());
+        let row = build_row(&e, user_agent_version(e.user_agent.as_deref()), None, None);
+        let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
+        assert_eq!(logical[3], "I"); // platform
+        assert_eq!(logical[4], "42"); // version
+
+        let mut bare = entry(0, None);
+        bare.user_agent = Some("bo-ios".into());
+        let row = build_row(
+            &bare,
+            user_agent_version(bare.user_agent.as_deref()),
+            None,
+            None,
+        );
+        let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
+        assert_eq!(logical[3], "-");
+        assert_eq!(logical[4], "None");
+
+        let mut invalid = entry(0, None);
+        invalid.user_agent = Some("bo-ios-abc".into());
+        let row = build_row(
+            &invalid,
+            user_agent_version(invalid.user_agent.as_deref()),
+            None,
+            None,
+        );
+        let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
+        assert_eq!(logical[3], "-");
+        assert_eq!(logical[4], "None");
     }
 
     /// `access_metric_key` skips zero local coordinates (Python truthiness) and

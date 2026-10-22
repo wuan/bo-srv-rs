@@ -66,6 +66,18 @@ fn dash_placeholders_become_none() {
     assert_eq!(row.x, None);
 }
 
+/// The platform column is opaque to the parser: an iOS row carries `I` and its
+/// integer version without any special-casing.
+#[test]
+fn ios_platform_row_parses() {
+    let line = "08:44:51.106\tDE\tBerlin\t\t\t\tI\t42\t0\t60\t5000\t-1\t0\t2\t10\t5\t0.000";
+    let row = parse_row(line).expect("parses");
+    assert_eq!(row.platform, "I");
+    assert_eq!(row.version, Some(42));
+    assert_eq!(row.country.as_deref(), Some("DE"));
+    assert_eq!(row.city.as_deref(), Some("Berlin"));
+}
+
 #[test]
 fn aggregates_totals_and_flavours() {
     let outcome = parse_content(ISSUE_SAMPLE);
