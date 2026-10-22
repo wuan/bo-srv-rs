@@ -2,22 +2,26 @@
 
 ## Why
 
-The Blitzortung iOS app identifies itself with the user agent `bo-ios`, but the
-service recognises only `bo-android-<int>`. `is_forbidden` therefore rejects
-every iOS request with `{}`, so the first-party iOS client cannot use the
-service at all. Android and iOS are both Blitzortung clients and should be
-accepted, logged and counted the same way.
+The Blitzortung service recognises only the Android client user agent
+`bo-android-<int>` and rejects every other request in `is_forbidden` with `{}`,
+so the first-party iOS client cannot use the service. Android and iOS are both
+Blitzortung clients and should be accepted, logged and counted the same way.
+
+Review resolved the iOS form: like Android, the iOS client identifies itself
+with a **versioned** user agent `bo-ios-<int>`, so the recorded client names a
+specific build. Bare `bo-ios` (the form the current iOS app sends) therefore
+stays blocked; the matching client change lives in the iOS app (wuan/bo-ios) and
+is out of scope here.
 
 ## What Changes
 
-- Accept requests whose `User-Agent` identifies the Blitzortung iOS client —
-  bare `bo-ios` (the form the iOS app actually sends) and a versioned
-  `bo-ios-<int>` form — in addition to the existing `bo-android-<int>` client.
-  No version suffix is required for the iOS client.
-- Record iOS clients in the usage log with their own platform marker `I` and
-  their parsed version when the user agent carries one. `A` stays the Android
-  marker and `-` stays "unknown"; the version column stays absent for a client
-  without a version.
+- Accept requests whose `User-Agent` first whitespace-separated word is the
+  versioned iOS client `bo-ios-<int>`, in addition to the existing
+  `bo-android-<int>` client. The version suffix is **required**, exactly as for
+  Android: bare `bo-ios` and malformed suffixes (`bo-ios-`, `bo-ios-abc`,
+  `bo-ios-0`) stay blocked.
+- Record iOS clients in the usage log with their own platform marker `I`,
+  alongside the existing Android marker `A`; `-` stays "unknown".
 - Keep the Android-only `Accept-Encoding` compatibility downgrade
   (`fix_bad_accept_header`) Android-only: an iOS client's `Accept-Encoding` is
   never stripped.
@@ -47,6 +51,8 @@ accepted, logged and counted the same way.
 - `src/stats/parse.rs` — the platform-column documentation gains `I`; parsing
   already treats the column as an opaque string.
 - `README.md`, `doc/jsonrpc_methods.md` — document the accepted client user
-  agents and the `I` platform marker.
+  agents (`bo-android-<int>`, `bo-ios-<int>`) and the `I` platform marker.
 - Tests: `src/service.rs`, `src/service_log.rs`, `src/stats`, `tests/http_server.rs`
   and `tests/access_logging.rs` gain iOS cases.
+- Out-of-scope dependency: `wuan/bo-ios` must send `bo-ios-<int>` before the app
+  benefits; until it does, the app's bare `bo-ios` requests stay blocked.
