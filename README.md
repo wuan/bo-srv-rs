@@ -272,8 +272,8 @@ following columns further right.
 | 1 | `timestamp` | request time as the UTC wall-clock time of day, `HH:MM:SS.nnn` (millisecond precision); the date is carried by the daily file name |
 | 2 | country | GeoIP ISO code, else `-` |
 | 3 | city | GeoIP English city name, else `-`; always followed by two tabs (never truncated) |
-| 4 | platform | `A` for the Android client, else `-` |
-| 5 | version | `bo-android-<n>` client version, else `None` |
+| 4 | platform | `A` for the Android client, `I` for the iOS client, else `-` |
+| 5 | version | `bo-android-<n>` / `bo-ios-<n>` client version, else `None` |
 | 6 | `minute_offset` | |
 | 7 | `minute_length` | |
 | 8 | `grid_baselength` | the **pre-clamp** `original_grid_base_length` |
@@ -287,8 +287,10 @@ following columns further right.
 The raw client IP is never written.  For the global/region flavours fields
 11–13 are `-`; a local request carries its `x`/`y`/`data_area` values and is
 also distinguishable by `region == -1`.  The `platform`
-marker recognises the Blitzortung Android client (`A`); a missing or non-Android
-user agent yields `-` and its version stays `None`.
+marker recognises the versioned Blitzortung clients: the Android client yields
+`A`, the iOS client (`bo-ios-<n>`) yields `I`.  A missing user agent, a bare
+`bo-ios` and any non-client user agent yield `-` and their version stays
+`None`.
 
 The file is opened in **append** mode and stays open across days; when an
 entry's UTC date changes (e.g. the first request after `00:00` UTC) the writer
@@ -612,7 +614,8 @@ histogram bins (empty when `minute_length <= 10`).
 
 - `__to_int` coercion: booleans → 1/0, floats truncate, strings parse,
   anything else (incl. `null`) → blocked request (`{}` result).
-- `is_forbidden`: blocked client IP, user agent not `bo-android-<int>`,
+- `is_forbidden`: blocked client IP, user agent not a versioned first-party
+  client (`bo-android-<int>` or `bo-ios-<int>`),
   content type ≠ `text/json`, non-empty referer, `grid_base_length` below the
   endpoint minimum (5000 region/local, 25000 global) or not one of the valid
   sizes — checked on the *unclamped* value.
@@ -622,7 +625,8 @@ histogram bins (empty when `minute_length <= 10`).
 - `region` clamped to `[1, 7]`, `count_threshold = max(0, ..)`,
   `data_area = max(5, ..)`.
 - `fix_bad_accept_header`: `Accept-Encoding` is stripped for
-  `bo-android-<version>` with `1 <= version <= 177`.
+  `bo-android-<version>` with `1 <= version <= 177`.  The downgrade is
+  Android-only; iOS clients keep their `Accept-Encoding`.
 - Response compression (HTTP transport) mirrors
   `txjsonrpc_ng.web.render.Renderer.handle_compression`: the response is
   gzipped (with `Content-Encoding: gzip`) when the request advertises
@@ -841,7 +845,8 @@ cargo run --bin bo-servicelog-stats -- --date 2023-11-14 --format html \
 standalone tool to schedule.  The row is a 13-column format: the timestamp is
   the UTC wall-clock time of day as `HH:MM:SS.nnn` (milliseconds; the daily file
   name carries the date), the masked client-IP
-  column is dropped, a client **platform** marker (`A` for Android) is added,
+  column is dropped, a client **platform** marker (`A` for Android, `I` for
+  iOS) is added,
   and the local `x`/`y`/`data_area` columns carry the local request values (or
   `-` for the global/region flavours; a local request is also
   identified by `region == -1`).  The `city` field is padded with tabs (four

@@ -151,6 +151,30 @@ fn missing_user_agent_is_blocked_but_still_http_200() {
     assert_eq!(v["result"], serde_json::json!({}));
 }
 
+/// A versioned iOS client is served a real grid result, while bare `bo-ios`
+/// (no version suffix) stays blocked.  `large_response_executor` answers the
+/// grid query so "served" is distinguishable from the blocked `{}`.
+#[test]
+fn versioned_ios_client_is_served_but_bare_ios_is_blocked() {
+    let port = run_server(large_response_executor());
+
+    let ios_headers =
+        "User-Agent: bo-ios-42\r\nContent-Type: text/json\r\nAccept-Encoding: identity\r\n";
+    let served = post_raw(port, ios_headers, LARGE_GRID_BODY);
+    assert_eq!(served.status_line, "HTTP/1.1 200 OK");
+    let body = String::from_utf8(served.body).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["result"].get("r").is_some(), "unexpected body: {body}");
+
+    let bare_headers =
+        "User-Agent: bo-ios\r\nContent-Type: text/json\r\nAccept-Encoding: identity\r\n";
+    let blocked = post_raw(port, bare_headers, LARGE_GRID_BODY);
+    assert_eq!(blocked.status_line, "HTTP/1.1 200 OK");
+    let body = String::from_utf8(blocked.body).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["result"], serde_json::json!({}));
+}
+
 #[test]
 fn keep_alive_serves_two_requests_on_one_connection() {
     let port = run_server(MockExecutor::new());

@@ -29,6 +29,28 @@ pub const SRID: i64 = 4326;
 pub const JSON_CONTENT_TYPE: &str = "text/json";
 /// `USER_AGENT_PREFIX` in `base.py`.
 pub const USER_AGENT_PREFIX: &str = "bo-android-";
+/// The versioned first-party iOS client user agent prefix.
+pub const IOS_USER_AGENT_PREFIX: &str = "bo-ios-";
+
+/// A first-party Blitzortung client recognised from the `User-Agent` header.
+///
+/// Both clients identify themselves with a **versioned** user agent
+/// (`bo-android-<int>`, `bo-ios-<int>`); the version suffix is required and
+/// must parse as a non-zero integer (see [`Request::user_agent_client`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserAgentClient {
+    Android(i64),
+    Ios(i64),
+}
+
+impl UserAgentClient {
+    /// The integer version carried by a recognised client.
+    pub fn version(self) -> i64 {
+        match self {
+            UserAgentClient::Android(version) | UserAgentClient::Ios(version) => version,
+        }
+    }
+}
 
 // Grid validation constants (`Blitzortung` class attributes).
 pub const MIN_GRID_BASE_LENGTH: i64 = 5000;
@@ -110,32 +132,44 @@ impl Request {
         }
     }
 
-    /// `base.parse_user_agent`: the integer version of a `bo-android-<int>`
-    /// user agent, `0` when the header is missing or does not match.
-    pub fn user_agent_version(&self) -> i64 {
-        let Some(user_agent) = self.user_agent.as_deref() else {
-            return 0;
-        };
-        match user_agent
-            .split(' ')
-            .next()
-            .and_then(|word| word.rsplit_once('-'))
-        {
-            Some(("bo-android", version)) => version.parse::<i64>().unwrap_or(0),
-            _ => 0,
+    /// `base.parse_user_agent`: the recognised `bo-android-<int>` /
+    /// `bo-ios-<int>` client parsed from the first whitespace-separated word of
+    /// the user agent, or `None` when the header is missing or the client is not
+    /// recognised.
+    ///
+    /// The version suffix is required for both clients and must parse as a
+    /// non-zero integer, so bare `bo-ios`, `bo-ios-`, `bo-ios-abc`, `bo-ios-0`
+    /// and their Android counterparts are all `None`.
+    pub fn user_agent_client(&self) -> Option<UserAgentClient> {
+        let user_agent = self.user_agent.as_deref()?;
+        let first = user_agent.split(' ').next().unwrap_or("");
+        let (prefix, version) = first.rsplit_once('-')?;
+        let version = version
+            .parse::<i64>()
+            .ok()
+            .filter(|version| *version != 0)?;
+        match prefix {
+            "bo-android" => Some(UserAgentClient::Android(version)),
+            "bo-ios" => Some(UserAgentClient::Ios(version)),
+            _ => None,
         }
     }
 
     /// `base.fix_bad_accept_header`: old Android clients (< version 178) have
     /// gzip bugs; their `Accept-Encoding` header is removed.  Returns whether
     /// the header was stripped.
+    ///
+    /// The downgrade is Android-only: an iOS client's `Accept-Encoding` is never
+    /// stripped.
     pub fn fix_bad_accept_header(&mut self) -> bool {
-        let version = self.user_agent_version();
-        if version > 0 && version <= MAX_COMPATIBLE_ANDROID_VERSION {
-            self.accept_encoding_removed = true;
-            true
-        } else {
-            false
+        match self.user_agent_client() {
+            Some(UserAgentClient::Android(version))
+                if version <= MAX_COMPATIBLE_ANDROID_VERSION =>
+            {
+                self.accept_encoding_removed = true;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -646,9 +680,10 @@ impl<M: Metrics> Service<M> {
     }
 
     /// `base.is_forbidden`: a data request is rejected when the client IP is
-    /// blocked, the user agent is not a valid `bo-android-<int>` client, the
-    /// content type is not `text/json`, a referer is set, or the grid baseline
-    /// is below the endpoint minimum or not one of the supported sizes.
+    /// blocked, the user agent is not a recognised `bo-android-<int>` /
+    /// `bo-ios-<int>` client, the content type is not `text/json`, a referer is
+    /// set, or the grid baseline is below the endpoint minimum or not one of the
+    /// supported sizes.
     ///
     /// Returns the human-readable reason when forbidden (`None` when allowed),
     /// matching the `FORBIDDEN - client: .., user agent: ..` diagnostic of
@@ -657,11 +692,11 @@ impl<M: Metrics> Service<M> {
         &self,
         request: &Request,
         client: Option<&str>,
-        user_agent_version: i64,
+        client_kind: Option<UserAgentClient>,
         grid_base_length: i64,
         min_grid_base_length: i64,
     ) -> Option<String> {
-        if let Some(reason) = self.forbidden_client_reason(request, client, user_agent_version) {
+        if let Some(reason) = self.forbidden_client_reason(request, client, client_kind) {
             return Some(reason);
         }
         if grid_base_length < min_grid_base_length {
@@ -683,13 +718,13 @@ impl<M: Metrics> Service<M> {
         &self,
         request: &Request,
         client: Option<&str>,
-        user_agent_version: i64,
+        client_kind: Option<UserAgentClient>,
     ) -> Option<String> {
         let content_type = request.content_type.as_deref();
         let referer = request.referer.as_deref();
         if client.is_some_and(|client| self.forbidden_ips.contains(client)) {
             Some(format!("blocked ip {client:?}"))
-        } else if user_agent_version == 0 {
+        } else if client_kind.is_none() {
             Some(format!(
                 "invalid user agent {:?}",
                 request.user_agent.as_deref().unwrap_or("")
@@ -750,12 +785,12 @@ impl<M: Metrics> Service<M> {
         };
 
         let client = request.request_client();
-        let user_agent_version = request.user_agent_version();
+        let client_kind = request.user_agent_client();
 
         if let Some(reason) = self.forbidden_reason(
             request,
             client.as_deref(),
-            user_agent_version,
+            client_kind,
             grid_base_length,
             MIN_GRID_BASE_LENGTH,
         ) {
@@ -864,12 +899,12 @@ impl<M: Metrics> Service<M> {
         };
 
         let client = request.request_client();
-        let user_agent_version = request.user_agent_version();
+        let client_kind = request.user_agent_client();
 
         if let Some(reason) = self.forbidden_reason(
             request,
             client.as_deref(),
-            user_agent_version,
+            client_kind,
             grid_base_length,
             GLOBAL_MIN_GRID_BASE_LENGTH,
         ) {
@@ -961,12 +996,12 @@ impl<M: Metrics> Service<M> {
         };
 
         let client = request.request_client();
-        let user_agent_version = request.user_agent_version();
+        let client_kind = request.user_agent_client();
 
         if let Some(reason) = self.forbidden_reason(
             request,
             client.as_deref(),
-            user_agent_version,
+            client_kind,
             grid_base_length,
             MIN_GRID_BASE_LENGTH,
         ) {
@@ -1051,9 +1086,8 @@ impl<M: Metrics> Service<M> {
         };
 
         let client = request.request_client();
-        let user_agent_version = request.user_agent_version();
-        if let Some(reason) =
-            self.forbidden_client_reason(request, client.as_deref(), user_agent_version)
+        let client_kind = request.user_agent_client();
+        if let Some(reason) = self.forbidden_client_reason(request, client.as_deref(), client_kind)
         {
             request.blocked_reason = Some(reason);
             return Ok(json!({}));
@@ -1123,9 +1157,8 @@ impl<M: Metrics> Service<M> {
         };
 
         let client = request.request_client();
-        let user_agent_version = request.user_agent_version();
-        if let Some(reason) =
-            self.forbidden_client_reason(request, client.as_deref(), user_agent_version)
+        let client_kind = request.user_agent_client();
+        if let Some(reason) = self.forbidden_client_reason(request, client.as_deref(), client_kind)
         {
             request.blocked_reason = Some(reason);
             return Ok(json!({}));
@@ -1454,7 +1487,7 @@ mod tests {
         service: &Service,
         request: &Request,
         client: Option<&str>,
-        user_agent_version: i64,
+        client_kind: Option<UserAgentClient>,
         grid_base_length: i64,
         min_grid_base_length: i64,
     ) -> bool {
@@ -1462,7 +1495,7 @@ mod tests {
             .forbidden_reason(
                 request,
                 client,
-                user_agent_version,
+                client_kind,
                 grid_base_length,
                 min_grid_base_length,
             )
@@ -1492,31 +1525,57 @@ mod tests {
     }
 
     #[test]
-    fn user_agent_version_parsing() {
+    fn user_agent_client_parsing() {
         let mut base = Request {
             user_agent: None,
             client_ip: Some("1.2.3.4".to_string()),
             content_type: Some(JSON_CONTENT_TYPE.to_string()),
             ..Default::default()
         };
-        assert_eq!(base.user_agent_version(), 0);
-        for (ua, version) in [
-            ("bo-android-190", 190),
-            ("bo-android-1", 1),
-            ("bo-android-178", 178),
-            ("bo-android-0", 0),
-            ("bo-android--5", 0),
-            ("bo-android-abc", 0),
-            ("bo-android", 0),
-            ("bo-android-", 0),
-            ("bo_android_150", 0),
-            ("BO-ANDROID-150", 0),
-            ("python-requests/2.32", 0),
-            ("Mozilla/5.0 (Linux; Android 13)", 0),
+        assert_eq!(base.user_agent_client(), None);
+        // Bare and malformed clients (Android and iOS) are all unknown.
+        for ua in [
+            "bo-android-0",
+            "bo-android--5",
+            "bo-android-abc",
+            "bo-android",
+            "bo-android-",
+            "bo-ios-0",
+            "bo-ios--5",
+            "bo-ios-abc",
+            "bo-ios",
+            "bo-ios-",
+            "bo_android_150",
+            "BO-ANDROID-150",
+            "BO-IOS-42",
+            "python-requests/2.32",
+            "Mozilla/5.0 (Linux; Android 13)",
         ] {
             base.user_agent = Some(ua.to_string());
-            assert_eq!(base.user_agent_version(), version, "user agent {ua:?}");
+            assert_eq!(base.user_agent_client(), None, "user agent {ua:?}");
         }
+        for (ua, client) in [
+            ("bo-android-190", UserAgentClient::Android(190)),
+            ("bo-android-1", UserAgentClient::Android(1)),
+            ("bo-android-178", UserAgentClient::Android(178)),
+            ("bo-ios-42", UserAgentClient::Ios(42)),
+            ("bo-ios-1", UserAgentClient::Ios(1)),
+        ] {
+            base.user_agent = Some(ua.to_string());
+            assert_eq!(base.user_agent_client(), Some(client), "user agent {ua:?}");
+            assert_eq!(
+                base.user_agent_client().unwrap().version(),
+                client.version()
+            );
+        }
+        // Only the first whitespace-separated word is significant.
+        base.user_agent = Some("bo-ios-42 extra".to_string());
+        assert_eq!(base.user_agent_client(), Some(UserAgentClient::Ios(42)));
+        base.user_agent = Some("bo-android-190 more".to_string());
+        assert_eq!(
+            base.user_agent_client(),
+            Some(UserAgentClient::Android(190))
+        );
     }
 
     #[test]
@@ -1555,6 +1614,15 @@ mod tests {
             ..Default::default()
         };
         assert!(!req.fix_bad_accept_header());
+
+        // The downgrade is Android-only: an iOS client keeps its header even
+        // when its version is within the Android compatibility range.
+        let mut req = Request {
+            user_agent: Some("bo-ios-177".to_string()),
+            ..Default::default()
+        };
+        assert!(!req.fix_bad_accept_header());
+        assert!(!req.accept_encoding_removed);
     }
 
     /// The compression policy: `gzip` must be advertised, and an old Android
@@ -1608,6 +1676,15 @@ mod tests {
             ..Default::default()
         };
         assert!(new_client.accepts_gzip());
+
+        // An iOS client is never downgraded, even at a version the Android
+        // compatibility rule would strip.
+        let ios_client = Request {
+            user_agent: Some("bo-ios-177".to_string()),
+            accept_encoding: Some("gzip".to_string()),
+            ..Default::default()
+        };
+        assert!(ios_client.accepts_gzip());
     }
 
     #[test]
@@ -1630,7 +1707,7 @@ mod tests {
             &service,
             &blocked_ip,
             Some("1.2.3.4"),
-            190,
+            Some(UserAgentClient::Android(190)),
             10_000,
             MIN_GRID_BASE_LENGTH
         ));
@@ -1645,7 +1722,7 @@ mod tests {
             &service,
             &bad_ua,
             Some("5.6.7.8"),
-            0,
+            None,
             10_000,
             MIN_GRID_BASE_LENGTH
         ));
@@ -1660,7 +1737,7 @@ mod tests {
             &service,
             &bad_content_type,
             Some("5.6.7.8"),
-            190,
+            Some(UserAgentClient::Android(190)),
             10_000,
             MIN_GRID_BASE_LENGTH
         ));
@@ -1676,7 +1753,7 @@ mod tests {
             &service,
             &referer,
             Some("5.6.7.8"),
-            190,
+            Some(UserAgentClient::Android(190)),
             10_000,
             MIN_GRID_BASE_LENGTH
         ));
@@ -1691,7 +1768,7 @@ mod tests {
             &service,
             &low_baseline,
             Some("5.6.7.8"),
-            190,
+            Some(UserAgentClient::Android(190)),
             1000,
             MIN_GRID_BASE_LENGTH
         ));
@@ -1700,7 +1777,7 @@ mod tests {
             &service,
             &low_baseline,
             Some("5.6.7.8"),
-            190,
+            Some(UserAgentClient::Android(190)),
             20_000,
             MIN_GRID_BASE_LENGTH
         ));
@@ -1715,7 +1792,38 @@ mod tests {
             &service,
             &valid,
             Some("5.6.7.8"),
-            190,
+            Some(UserAgentClient::Android(190)),
+            10_000,
+            MIN_GRID_BASE_LENGTH
+        ));
+
+        // A versioned iOS client is accepted by the same check.
+        let ios = Request {
+            user_agent: Some("bo-ios-42".to_string()),
+            client_ip: Some("5.6.7.8".to_string()),
+            content_type: Some(JSON_CONTENT_TYPE.to_string()),
+            ..Default::default()
+        };
+        assert!(!is_forbidden(
+            &service,
+            &ios,
+            Some("5.6.7.8"),
+            Some(UserAgentClient::Ios(42)),
+            10_000,
+            MIN_GRID_BASE_LENGTH
+        ));
+        // Bare `bo-ios` stays forbidden.
+        let bare_ios = Request {
+            user_agent: Some("bo-ios".to_string()),
+            client_ip: Some("5.6.7.8".to_string()),
+            content_type: Some(JSON_CONTENT_TYPE.to_string()),
+            ..Default::default()
+        };
+        assert!(is_forbidden(
+            &service,
+            &bare_ios,
+            Some("5.6.7.8"),
+            None,
             10_000,
             MIN_GRID_BASE_LENGTH
         ));

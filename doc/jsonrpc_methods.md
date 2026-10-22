@@ -267,7 +267,9 @@ Before a data request reaches the grid/cluster producer,
 2. **`is_forbidden` client checks.** A request is blocked (returns `{}` and logs
    a `BLOCKED` access line) when any of the following holds:
    - the resolved client IP is in the forbidden set;
-   - the `User-Agent` is not of the form `bo-android-<integer>`;
+   - the `User-Agent` is not a versioned first-party client
+     (`bo-android-<integer>` or `bo-ios-<integer>`); the version suffix is
+     required, so bare `bo-ios` is blocked;
    - the `Content-Type` is not exactly `text/json`;
    - a non-empty `Referer` header is present.
 
@@ -296,10 +298,10 @@ success envelope.  A **database failure** while producing a result is a fault
 
 Over the HTTP transport a rendered response is gzipped (with
 `Content-Encoding: gzip`) when the request advertises `Accept-Encoding: gzip`
-and the body is at least 1000 bytes.  Clients with a valid
+and the body is at least 1000 bytes.  Android clients with a valid
 `bo-android-<version>` where `1 <= version <= 177` have their `Accept-Encoding`
 header stripped first (`fix_bad_accept_header`) and therefore never receive
-gzip.
+gzip.  The downgrade is Android-only; iOS clients keep their `Accept-Encoding`.
 
 ### Caching
 
@@ -598,8 +600,8 @@ Each cluster object:
 
 ### Blocked request (invalid user agent)
 
-No `bo-android-*` user agent, so the data request is blocked and returns `{}`
-inside the pre-1.0 bare array (id `0`):
+No `bo-android-*` / `bo-ios-*` user agent, so the data request is blocked and
+returns `{}` inside the pre-1.0 bare array (id `0`):
 
 ```json
 {"method": "get_local_strikes_grid", "params": [101, 202, 10000, 60, 0, 0, 5], "id": 0}
