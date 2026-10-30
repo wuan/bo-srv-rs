@@ -328,7 +328,22 @@ fn text_render_contains_totals_and_tops() {
     let text = render_text("2023-11-14", &stats);
     assert!(text.contains("servicelog statistics for 2023-11-14"));
     assert!(text.contains("total requests: 6"));
-    assert!(text.contains("grid: 6  cluster: 0"), "{text}");
+    // The query matrix is the single breakdown: 5 local + 1 global grid
+    // query, no cluster or region queries; its grand total matches.
+    assert!(
+        text.contains(&format!(
+            "    {:>8}  {:>12}  {:>12}  {:>12}  {:>8}",
+            "grid", 5, 1, 0, 6
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "    {:>8}  {:>12}  {:>12}  {:>12}  {:>8}",
+            "sum", 5, 1, 0, 6
+        )),
+        "{text}"
+    );
     assert!(text.contains("top countries:"));
     assert!(text.contains("DE"));
     assert!(text.contains("local query locations: 5"));
@@ -772,8 +787,8 @@ fn json_reports_offline_and_interactive() {
     let value: serde_json::Value =
         serde_json::from_str(&render_json("2023-11-14", &stats)).unwrap();
     assert_eq!(value["total_requests"], 3);
-    assert_eq!(value["grid_requests"], 2);
-    assert_eq!(value["cluster_requests"], 1);
+    assert_eq!(value["query_matrix"]["grid"]["sum"], 2);
+    assert_eq!(value["query_matrix"]["cluster"]["sum"], 1);
     assert_eq!(value["offline_requests"], 1);
     assert_eq!(value["interactive_requests"], 2);
     assert_eq!(value["local_queries"][0]["interactive"], false);
@@ -787,11 +802,10 @@ fn json_reports_offline_and_interactive() {
     assert_eq!(value["local_queries"][2]["query_type"], "C");
 }
 
-// --- query matrix (grid/cluster x local/global) ---------------------------
+// --- query matrix (grid/cluster x local/global/region) --------------------
 
-/// A sample covering all four matrix cells plus a region query, which stays
-/// outside the matrix: 2 grid-local, 1 grid-global, 1 grid-region,
-/// 3 cluster-local.
+/// A sample covering all matrix cells: 2 grid-local, 1 grid-global,
+/// 1 grid-region, 3 cluster-local.
 fn matrix_sample() -> String {
     [
         local_row_minutes(1, 1, "5", 10),     // grid, local
@@ -805,84 +819,107 @@ fn matrix_sample() -> String {
     .join("\n")
 }
 
-/// `aggregate` fills the grid/cluster x local/global matrix; region queries
-/// are counted in `region_requests` but not in any matrix cell.
+/// `aggregate` fills the grid/cluster x local/global/region matrix; every
+/// row lands in exactly one cell, so the matrix sums match the headline
+/// counters.
 #[test]
 fn aggregate_counts_the_query_matrix() {
     let stats = aggregate(&parse_content(&matrix_sample()).rows, 10);
     assert_eq!(stats.query_matrix.grid_local, 2);
     assert_eq!(stats.query_matrix.grid_global, 1);
+    assert_eq!(stats.query_matrix.grid_region, 1);
     assert_eq!(stats.query_matrix.cluster_local, 3);
     assert_eq!(stats.query_matrix.cluster_global, 0);
-    // Row/column/grand sums (region query is outside the matrix).
-    assert_eq!(stats.query_matrix.grid_sum(), 3);
+    assert_eq!(stats.query_matrix.cluster_region, 0);
+    // Row/column/grand sums.
+    assert_eq!(stats.query_matrix.grid_sum(), 4);
     assert_eq!(stats.query_matrix.cluster_sum(), 3);
     assert_eq!(stats.query_matrix.local_sum(), 5);
     assert_eq!(stats.query_matrix.global_sum(), 1);
-    assert_eq!(stats.query_matrix.total(), 6);
-    // The totals still add up: 4 grid (2 local + 1 global + 1 region) + 3 cluster.
+    assert_eq!(stats.query_matrix.region_sum(), 1);
+    assert_eq!(stats.query_matrix.total(), 7);
+    // The totals add up: 4 grid (2 local + 1 global + 1 region) + 3 cluster,
+    // and the matrix sums equal the headline counters.
     assert_eq!(stats.total_requests, 7);
-    assert_eq!(stats.grid_requests, 4);
-    assert_eq!(stats.cluster_requests, 3);
-    assert_eq!(stats.local_requests, 5);
-    assert_eq!(stats.global_requests, 1);
-    assert_eq!(stats.region_requests, 1);
+    assert_eq!(stats.grid_requests, stats.query_matrix.grid_sum());
+    assert_eq!(stats.cluster_requests, stats.query_matrix.cluster_sum());
+    assert_eq!(stats.local_requests, stats.query_matrix.local_sum());
+    assert_eq!(stats.global_requests, stats.query_matrix.global_sum());
+    assert_eq!(stats.region_requests, stats.query_matrix.region_sum());
 }
 
-/// The text report prints the matrix as an aligned table under the totals.
+/// The text report prints the matrix as an aligned table under the total; the
+/// grand total matches the headline `total requests`.
 #[test]
 fn text_render_includes_the_query_matrix() {
     let stats = aggregate(&parse_content(&matrix_sample()).rows, 10);
     let text = render_text("2023-11-14", &stats);
+    assert!(text.contains("total requests: 7"), "{text}");
     assert!(text.contains("query matrix"), "{text}");
     assert!(
         text.contains(&format!(
-            "    {:>8}  {:>12}  {:>12}  {:>8}",
-            "", "local query", "global query", "sum"
+            "    {:>8}  {:>12}  {:>12}  {:>12}  {:>8}",
+            "", "local query", "global query", "region query", "sum"
         )),
         "{text}"
     );
     assert!(
         text.contains(&format!(
-            "    {:>8}  {:>12}  {:>12}  {:>8}",
-            "grid", 2, 1, 3
+            "    {:>8}  {:>12}  {:>12}  {:>12}  {:>8}",
+            "grid", 2, 1, 1, 4
         )),
         "{text}"
     );
     assert!(
         text.contains(&format!(
-            "    {:>8}  {:>12}  {:>12}  {:>8}",
-            "cluster", 3, 0, 3
+            "    {:>8}  {:>12}  {:>12}  {:>12}  {:>8}",
+            "cluster", 3, 0, 0, 3
         )),
         "{text}"
     );
     assert!(
         text.contains(&format!(
-            "    {:>8}  {:>12}  {:>12}  {:>8}",
-            "sum", 5, 1, 6
+            "    {:>8}  {:>12}  {:>12}  {:>12}  {:>8}",
+            "sum", 5, 1, 1, 7
         )),
         "{text}"
     );
 }
 
-/// The JSON report carries the matrix as nested objects.
+/// The JSON report carries the matrix as nested objects and no separate
+/// grid/cluster/local/global/region counters (they are the matrix sums).
 #[test]
 fn json_render_includes_the_query_matrix() {
     let stats = aggregate(&parse_content(&matrix_sample()).rows, 10);
     let value: serde_json::Value =
         serde_json::from_str(&render_json("2023-11-14", &stats)).unwrap();
+    assert_eq!(value["total_requests"], 7);
     assert_eq!(value["query_matrix"]["grid"]["local"], 2);
     assert_eq!(value["query_matrix"]["grid"]["global"], 1);
-    assert_eq!(value["query_matrix"]["grid"]["sum"], 3);
+    assert_eq!(value["query_matrix"]["grid"]["region"], 1);
+    assert_eq!(value["query_matrix"]["grid"]["sum"], 4);
     assert_eq!(value["query_matrix"]["cluster"]["local"], 3);
     assert_eq!(value["query_matrix"]["cluster"]["global"], 0);
+    assert_eq!(value["query_matrix"]["cluster"]["region"], 0);
     assert_eq!(value["query_matrix"]["cluster"]["sum"], 3);
     assert_eq!(value["query_matrix"]["sum"]["local"], 5);
     assert_eq!(value["query_matrix"]["sum"]["global"], 1);
-    assert_eq!(value["query_matrix"]["sum"]["sum"], 6);
+    assert_eq!(value["query_matrix"]["sum"]["region"], 1);
+    assert_eq!(value["query_matrix"]["sum"]["sum"], 7);
+    // The flat counters are not repeated next to the matrix.
+    for field in [
+        "grid_requests",
+        "cluster_requests",
+        "local_requests",
+        "global_requests",
+        "region_requests",
+    ] {
+        assert!(value.get(field).is_none(), "{field} should be gone");
+    }
 }
 
-/// The HTML report renders the matrix as a table with local/global columns.
+/// The HTML report renders the matrix as a table with local/global/region
+/// columns and does not repeat the row/column totals as summary cards.
 #[test]
 fn html_report_includes_the_query_matrix() {
     let stats = aggregate(&parse_content(&matrix_sample()).rows, 10);
@@ -890,26 +927,34 @@ fn html_report_includes_the_query_matrix() {
     assert!(html.contains("<h2>Query matrix</h2>"), "{html}");
     assert!(html.contains("<th class=\"num\">local query</th>"), "{html}");
     assert!(html.contains("<th class=\"num\">global query</th>"), "{html}");
+    assert!(html.contains("<th class=\"num\">region query</th>"), "{html}");
     assert!(html.contains("<th class=\"num\">sum</th>"), "{html}");
     assert!(
         html.contains(
             "<tr><td>grid</td><td class=\"num\">2</td><td class=\"num\">1</td>\
-             <td class=\"num\">3</td></tr>"
+             <td class=\"num\">1</td><td class=\"num\">4</td></tr>"
         ),
         "{html}"
     );
     assert!(
         html.contains(
             "<tr><td>cluster</td><td class=\"num\">3</td><td class=\"num\">0</td>\
-             <td class=\"num\">3</td></tr>"
+             <td class=\"num\">0</td><td class=\"num\">3</td></tr>"
         ),
         "{html}"
     );
     assert!(
         html.contains(
             "<tr><td>sum</td><td class=\"num\">5</td><td class=\"num\">1</td>\
-             <td class=\"num\">6</td></tr>"
+             <td class=\"num\">1</td><td class=\"num\">7</td></tr>"
         ),
         "{html}"
     );
+    // No redundant per-flavour cards next to the matrix.
+    for label in ["grid", "cluster", "local", "global", "region"] {
+        assert!(
+            !html.contains(&format!("<div class=\"label\">{label}</div>")),
+            "{label} card should be gone: {html}"
+        );
+    }
 }

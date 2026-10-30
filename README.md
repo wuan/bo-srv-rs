@@ -347,21 +347,20 @@ org.blitzortung.service.access,version=190,region=3,minutes=60,offset=0,grid=100
 `bo-servicelog-stats` (there is no Python counterpart; see issue #24) reads the
 daily `servicelog_YYYY-MM-DD` files back and reports, per day:
 
-* **total requests**, split into grid (`query_type == 'G'`) and cluster
-  (`query_type == 'C'`) queries and further into local (`region == -1`),
-  global (`region == 0`) and region (`region > 0`) flavours, plus the unknown
-  geo/version counts;
-* **query matrix** — the request counts as a grid/cluster x local/global
-  matrix (rows `grid`/`cluster`, columns `local query`/`global query`, each
-  with a `sum` column/row; region queries with `region > 0` sit outside the
-  matrix), shown in the text, JSON and HTML reports, e.g. in text:
+* **total requests**, plus the unknown geo/version counts;
+* **query matrix** — the single request breakdown: request counts as a
+  grid/cluster x local/global/region matrix (rows `grid`/`cluster` by
+  `query_type == 'G'`/`'C'`, columns `local query`/`global query`/`region
+  query` by `region == -1`/`0`/`> 0`, each with a `sum` column/row; the grand
+  total equals the total requests), shown in the text, JSON and HTML reports,
+  e.g. in text:
 
   ```text
-  query matrix (rows: grid/cluster, columns: local/global query):
-               local query  global query       sum
-        grid             2             1         3
-     cluster             3             0         3
-         sum             5             1         6
+  query matrix (rows: grid/cluster, columns: local/global/region query):
+               local query  global query  region query       sum
+        grid             2             1             1         4
+     cluster             3             0             0         3
+         sum             5             1             1         7
   ```
 
 * **top countries**, **top cities** and **top client versions** (each `--top N`
@@ -384,8 +383,8 @@ daily `servicelog_YYYY-MM-DD` files back and reports, per day:
 
   ![servicelog stats map](doc/servicelog_stats_map.png)
 
-  The report also lists the grid/cluster and
-  offline/interactive counts next to the totals, and each JSON
+  The report also lists the
+  offline/interactive counts next to the query matrix, and each JSON
   `local_queries` entry carries `minute_length`, `query_type` and an
   `interactive` flag.
 ```sh

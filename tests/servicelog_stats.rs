@@ -55,9 +55,20 @@ fn text_report_lists_totals_and_tops() {
         "{stdout}"
     );
     assert!(stdout.contains("total requests: 6"), "{stdout}");
-    assert!(stdout.contains("grid: 6  cluster: 0"), "{stdout}");
+    // The query matrix is the single request breakdown: 5 local + 1 global
+    // grid query, no cluster or region queries; the grand total matches.
     assert!(
-        stdout.contains("local:  5  global: 1  region: 0"),
+        stdout.contains(&format!(
+            "    {:>8}  {:>12}  {:>12}  {:>12}  {:>8}",
+            "grid", 5, 1, 0, 6
+        )),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "    {:>8}  {:>12}  {:>12}  {:>12}  {:>8}",
+            "sum", 5, 1, 0, 6
+        )),
         "{stdout}"
     );
     assert!(stdout.contains("top countries:"), "{stdout}");
@@ -96,8 +107,9 @@ fn json_report_is_valid_json() {
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
     assert_eq!(value["day"], "2023-11-14");
     assert_eq!(value["total_requests"], 6);
-    assert_eq!(value["grid_requests"], 6);
-    assert_eq!(value["cluster_requests"], 0);
+    assert_eq!(value["query_matrix"]["grid"]["sum"], 6);
+    assert_eq!(value["query_matrix"]["cluster"]["sum"], 0);
+    assert_eq!(value["query_matrix"]["sum"]["sum"], 6);
     assert_eq!(value["countries"][0]["label"], "DE");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -189,7 +201,22 @@ fn offline_and_interactive_are_split_into_separate_maps() {
         .expect("run bo-servicelog-stats");
     assert!(text.status.success());
     let stdout = String::from_utf8(text.stdout).unwrap();
-    assert!(stdout.contains("grid: 3  cluster: 1"), "{stdout}");
+    // The matrix carries the grid/cluster split: 3 grid-local, 1
+    // cluster-local.
+    assert!(
+        stdout.contains(&format!(
+            "    {:>8}  {:>12}  {:>12}  {:>12}  {:>8}",
+            "grid", 3, 0, 0, 3
+        )),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "    {:>8}  {:>12}  {:>12}  {:>12}  {:>8}",
+            "cluster", 1, 0, 0, 1
+        )),
+        "{stdout}"
+    );
     // The cluster query has `minute_length=10` but is interactive, so only
     // the two grid queries with a 10-minute window are offline.
     assert!(stdout.contains("offline: 2  interactive: 2"), "{stdout}");
@@ -229,8 +256,8 @@ fn offline_and_interactive_are_split_into_separate_maps() {
     assert!(json.status.success());
     let value: serde_json::Value =
         serde_json::from_str(&String::from_utf8(json.stdout).unwrap()).expect("valid json");
-    assert_eq!(value["grid_requests"], 3);
-    assert_eq!(value["cluster_requests"], 1);
+    assert_eq!(value["query_matrix"]["grid"]["sum"], 3);
+    assert_eq!(value["query_matrix"]["cluster"]["sum"], 1);
     assert_eq!(value["offline_requests"], 2);
     assert_eq!(value["interactive_requests"], 2);
     let queries = value["local_queries"].as_array().unwrap();

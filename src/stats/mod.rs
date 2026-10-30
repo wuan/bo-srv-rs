@@ -5,10 +5,9 @@
 //! [`crate::service_log`]).  This module parses those files back into rows and
 //! aggregates them into daily statistics:
 //!
-//! * **total requests** — the number of parsed rows, split by query type
-//!   (grid `G` / cluster `C`) and by the local / global / region request
-//!   flavours, plus the **query matrix**: a grid/cluster x local/global
-//!   count matrix ([`QueryMatrix`], region queries sit outside it) and the
+//! * **total requests** — the number of parsed rows, broken down by the
+//!   **query matrix**: a grid/cluster x local/global/region count matrix
+//!   ([`QueryMatrix`]; its grand total equals the total requests), plus the
 //!   background/interactive split of the local queries:
 //!   only **grid** queries with `minute_length == 10` are background
 //!   (offline); cluster queries — even with a 10-minute window — and grid
@@ -407,15 +406,21 @@ mod tool_tests {
         let output = run(&options).unwrap();
         assert!(output.contains("servicelog statistics for 2023-11-14"));
         assert!(output.contains("total requests: 3"));
-        assert!(output.contains("grid: 3  cluster: 0"), "{output}");
-        // The query matrix: 2 grid-local, 1 grid-global, no clusters.
+        // The query matrix is the single breakdown: 2 grid-local, 1
+        // grid-global, no region or cluster queries.
         assert!(output.contains("query matrix"), "{output}");
         assert!(
-            output.contains(&format!("    {:>8}  {:>12}  {:>12}  {:>8}", "grid", 2, 1, 3)),
+            output.contains(&format!(
+                "    {:>8}  {:>12}  {:>12}  {:>12}  {:>8}",
+                "grid", 2, 1, 0, 3
+            )),
             "{output}"
         );
         assert!(
-            output.contains(&format!("    {:>8}  {:>12}  {:>12}  {:>8}", "sum", 2, 1, 3)),
+            output.contains(&format!(
+                "    {:>8}  {:>12}  {:>12}  {:>12}  {:>8}",
+                "sum", 2, 1, 0, 3
+            )),
             "{output}"
         );
         assert!(output.contains("local query locations: 2"));

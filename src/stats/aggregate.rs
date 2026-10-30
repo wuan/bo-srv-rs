@@ -96,47 +96,64 @@ impl LocalQuery {
     }
 }
 
-/// The grid/cluster x local/global request-count matrix.
+/// The grid/cluster x local/global/region request-count matrix.
 ///
 /// Rows are the query type (grid `G` / cluster `C`), columns the request
-/// flavour (local `region == -1` / global `region == 0`).  Region queries
-/// (`region > 0`) sit outside the matrix and are only counted in
-/// [`ServiceLogStats::region_requests`].
+/// flavour (local `region == -1` / global `region == 0` / region
+/// `region > 0`).  Every row lands in exactly one cell, so the row sums equal
+/// [`ServiceLogStats::grid_requests`] / [`ServiceLogStats::cluster_requests`],
+/// the column sums equal `local_requests` / `global_requests` /
+/// [`ServiceLogStats::region_requests`], and the grand total equals
+/// [`ServiceLogStats::total_requests`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QueryMatrix {
     /// Grid queries with `region == -1` (`get_local_strikes_grid`).
     pub grid_local: u64,
     /// Grid queries with `region == 0` (`get_global_strikes_grid`).
     pub grid_global: u64,
+    /// Grid queries with `region > 0` (`get_strikes_grid` for a region).
+    pub grid_region: u64,
     /// Cluster queries with `region == -1` (`get_local_clusters`).
     pub cluster_local: u64,
     /// Cluster queries with `region == 0` (`get_global_clusters`).
     pub cluster_global: u64,
+    /// Cluster queries with `region > 0`.
+    pub cluster_region: u64,
 }
 
 impl QueryMatrix {
-    /// The `grid` row sum (local + global grid queries).
+    /// The `grid` row sum (local + global + region grid queries); equals
+    /// [`ServiceLogStats::grid_requests`].
     pub fn grid_sum(&self) -> u64 {
-        self.grid_local + self.grid_global
+        self.grid_local + self.grid_global + self.grid_region
     }
 
-    /// The `cluster` row sum (local + global cluster queries).
+    /// The `cluster` row sum (local + global + region cluster queries); equals
+    /// [`ServiceLogStats::cluster_requests`].
     pub fn cluster_sum(&self) -> u64 {
-        self.cluster_local + self.cluster_global
+        self.cluster_local + self.cluster_global + self.cluster_region
     }
 
-    /// The `local query` column sum (grid + cluster local queries).
+    /// The `local query` column sum (grid + cluster local queries); equals
+    /// [`ServiceLogStats::local_requests`].
     pub fn local_sum(&self) -> u64 {
         self.grid_local + self.cluster_local
     }
 
-    /// The `global query` column sum (grid + cluster global queries).
+    /// The `global query` column sum (grid + cluster global queries); equals
+    /// [`ServiceLogStats::global_requests`].
     pub fn global_sum(&self) -> u64 {
         self.grid_global + self.cluster_global
     }
 
-    /// The grand total of the matrix (all four cells; region queries are
-    /// outside the matrix and not included).
+    /// The `region query` column sum (grid + cluster region queries); equals
+    /// [`ServiceLogStats::region_requests`].
+    pub fn region_sum(&self) -> u64 {
+        self.grid_region + self.cluster_region
+    }
+
+    /// The grand total of the matrix (all six cells); equals
+    /// [`ServiceLogStats::total_requests`].
     pub fn total(&self) -> u64 {
         self.grid_sum() + self.cluster_sum()
     }
@@ -157,7 +174,8 @@ pub struct ServiceLogStats {
     pub global_requests: u64,
     /// Requests with `region > 0`.
     pub region_requests: u64,
-    /// The grid/cluster x local/global request-count matrix.
+    /// The grid/cluster x local/global/region request-count matrix; its grand
+    /// total equals [`ServiceLogStats::total_requests`].
     pub query_matrix: QueryMatrix,
     /// Local grid requests with a 10-minute window (the background/offline
     /// widget).
@@ -221,6 +239,8 @@ pub fn aggregate(rows: &[ServiceLogRow], top_n: usize) -> ServiceLogStats {
                 stats.query_matrix.grid_local += 1;
             } else if row.is_global() {
                 stats.query_matrix.grid_global += 1;
+            } else if row.is_region() {
+                stats.query_matrix.grid_region += 1;
             }
         } else if row.is_cluster() {
             stats.cluster_requests += 1;
@@ -228,6 +248,8 @@ pub fn aggregate(rows: &[ServiceLogRow], top_n: usize) -> ServiceLogStats {
                 stats.query_matrix.cluster_local += 1;
             } else if row.is_global() {
                 stats.query_matrix.cluster_global += 1;
+            } else if row.is_region() {
+                stats.query_matrix.cluster_region += 1;
             }
         }
         if row.is_local() {
