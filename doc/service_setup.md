@@ -145,7 +145,7 @@ There are three separate log outputs:
 | --- | --- | --- |
 | journald | `journalctl -u blitzortung-webservice` | access lines / warnings (structured journal entries under systemd) |
 | rsyslog | `/var/log/blitzortung/bo-webservice.log` | the same lines, filtered by `$programname` |
-| usage log | `/var/log/blitzortung/servicelog_YYYY-MM-DD` | one tab-separated row per successful grid request, written by the service itself |
+| usage log | `/var/log/blitzortung/servicelog_YYYY-MM-DD` | one tab-separated row per successful grid or cluster request (query type `G`/`C` in column 6), written by the service itself |
 
 Useful commands:
 

@@ -405,12 +405,12 @@ mod tests {
     use crate::stats::{aggregate, parse_content};
 
     const ISSUE_SAMPLE: &str = "\
-08:44:50.596\tUS\tSun Prairie\t\t\tA\t352\t0\t10\t25000\t0\t0\t-\t-\t-\t0.036\n\
-08:44:50.637\tSE\tGothenburg\t\t\tA\t352\t0\t10\t5000\t-1\t0\t4\t13\t5\t0.000\n\
-08:44:50.655\tRO\tBucharest\t\t\tA\t352\t0\t10\t5000\t-1\t0\t5\t8\t5\t0.039\n\
-08:44:51.106\tDE\tBerlin\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t2\t10\t5\t0.000\n\
-08:44:51.238\tDE\tUlm\t\t\t\tA\t352\t0\t10\t5000\t-1\t0\t1\t9\t5\t0.000\n\
-08:44:51.277\tIT\tVicenza\t\t\t\tA\t352\t0\t10\t5000\t-1\t0\t2\t9\t5\t0.000\n";
+08:44:50.596\tUS\tSun Prairie\t\t\tA\t352\tG\t0\t10\t25000\t0\t0\t-\t-\t-\t0.036\n\
+08:44:50.637\tSE\tGothenburg\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t4\t13\t5\t0.000\n\
+08:44:50.655\tRO\tBucharest\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t5\t8\t5\t0.039\n\
+08:44:51.106\tDE\tBerlin\t\t\t\tA\t352\tG\t0\t60\t5000\t-1\t0\t2\t10\t5\t0.000\n\
+08:44:51.238\tDE\tUlm\t\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t1\t9\t5\t0.000\n\
+08:44:51.277\tIT\tVicenza\t\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t2\t9\t5\t0.000\n";
 
     /// Count the raster `<rect>`s in a rendered map (excluding the background
     /// rectangle that fills the whole viewport).
@@ -563,8 +563,9 @@ mod tests {
             x,
             y,
             data_area,
-            grid_baselength: 5000,
+            grid_baselength: Some(5000),
             minute_length: 10,
+            query_type: 'G',
         };
         // A single data_area=10 query covers four 5-degree cells.
         let one = AsciiWorldMap::from_local_queries(&[make(1, 1, 10)]);
@@ -590,8 +591,9 @@ mod tests {
             x,
             y,
             data_area: 5,
-            grid_baselength: 5000,
+            grid_baselength: Some(5000),
             minute_length: 10,
+            query_type: 'G',
         };
         // Two queries on the same cell -> one cell labelled 2.
         let svg = render_world_map_svg(&[make(1, 1), make(1, 1)], "test", 960, 480);
@@ -616,8 +618,9 @@ mod tests {
             x,
             y,
             data_area: 5,
-            grid_baselength: 5000,
+            grid_baselength: Some(5000),
             minute_length: 10,
+            query_type: 'G',
         };
         // A one-digit and a four-digit count on different cells.
         let svg = render_world_map_svg(
@@ -689,8 +692,9 @@ mod tests {
             x,
             y,
             data_area: 5,
-            grid_baselength: 5000,
+            grid_baselength: Some(5000),
             minute_length: 10,
+            query_type: 'G',
         };
         // Two queries on the same cell -> maximum 2.
         let svg = render_world_map_svg(&[make(1, 1), make(1, 1)], "test", 960, 480);

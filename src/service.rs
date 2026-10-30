@@ -1114,6 +1114,17 @@ impl<M: Metrics> Service<M> {
             .map_err(service_error)?;
         let _ = request.fix_bad_accept_header();
 
+        // Record the request: clusters are stored in 10-minute detection
+        // intervals, so the logged `minute_length` is `interval_count * 10`.
+        let now = Utc::now();
+        self.record_usage(crate::service_log::global_cluster_entry(
+            epoch_microseconds(now),
+            minute_offset,
+            interval_count,
+            client.clone(),
+            request.user_agent.clone(),
+        ));
+
         self.metrics.for_global_clusters(
             minute_length,
             self.cache.global_clusters(minute_offset).get_ratio(),
@@ -1192,6 +1203,20 @@ impl<M: Metrics> Service<M> {
             .await
             .map_err(service_error)?;
         let _ = request.fix_bad_accept_header();
+
+        // Record the request: clusters are stored in 10-minute detection
+        // intervals, so the logged `minute_length` is `interval_count * 10`.
+        let now = Utc::now();
+        self.record_usage(crate::service_log::local_cluster_entry(
+            epoch_microseconds(now),
+            minute_offset,
+            interval_count,
+            client.clone(),
+            request.user_agent.clone(),
+            x,
+            y,
+            data_area,
+        ));
 
         self.metrics.for_local_clusters(
             minute_length,
@@ -2083,9 +2108,9 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 1);
         // City padding is made of tabs, so a naive split yields empty
-        // segments; ignore them to recover the 14 logical fields.
+        // segments; ignore them to recover the 15 logical fields.
         let logical: Vec<&str> = lines[0].split('\t').filter(|s| !s.is_empty()).collect();
-        assert_eq!(logical.len(), 14);
+        assert_eq!(logical.len(), 15);
         // Field 1 is the UTC wall-clock time of day, `HH:MM:SS.nnn`.
         let timestamp = logical[0];
         assert_eq!(timestamp.len(), 12, "got {timestamp}");
@@ -2103,11 +2128,12 @@ mod tests {
         assert_eq!(logical[2], "-"); // city
         assert_eq!(logical[3], "A"); // platform (bo-android user agent)
         assert_eq!(logical[4], "190"); // user agent version
-        assert_eq!(logical[6], "30"); // minute_length
-        assert_eq!(logical[7], "10000"); // pre-clamp grid_baselength
-        assert_eq!(logical[8], "1"); // region
+        assert_eq!(logical[5], "G"); // query type
+        assert_eq!(logical[7], "30"); // minute_length
+        assert_eq!(logical[8], "10000"); // pre-clamp grid_baselength
+        assert_eq!(logical[9], "1"); // region
                                      // The fill is `filled / (xc * yc) * 100` with three decimals.
-        assert_eq!(logical[13], expected_fill);
+        assert_eq!(logical[14], expected_fill);
         // The raw client IP is never written.
         assert!(!lines[0].contains("5.6.7.8"));
 
@@ -2148,12 +2174,13 @@ mod tests {
         let content = read_servicelog(&log_dir, &today());
         let line = content.lines().next().unwrap();
         let logical: Vec<&str> = line.split('\t').filter(|s| !s.is_empty()).collect();
-        assert_eq!(logical.len(), 14);
-        assert_eq!(logical[8], "-1"); // region -1 for local
-        assert_eq!(logical[10], "101"); // local x
-        assert_eq!(logical[11], "202"); // local y
-        assert_eq!(logical[12], "5"); // local data_area
-        assert_eq!(logical[13], "0.000"); // no filled cells
+        assert_eq!(logical.len(), 15);
+        assert_eq!(logical[5], "G"); // query type
+        assert_eq!(logical[9], "-1"); // region -1 for local
+        assert_eq!(logical[11], "101"); // local x
+        assert_eq!(logical[12], "202"); // local y
+        assert_eq!(logical[13], "5"); // local data_area
+        assert_eq!(logical[14], "0.000"); // no filled cells
                                           // The raw client IP is never written.
         assert!(!line.contains("5.6.7.8"));
 
@@ -2195,10 +2222,144 @@ mod tests {
             .split('\t')
             .filter(|s| !s.is_empty())
             .collect();
-        assert_eq!(logical.len(), 14);
-        assert_eq!(logical[8], "0"); // region 0 for global
-        assert_eq!(logical[13], "0.000"); // no filled cells
+        assert_eq!(logical.len(), 15);
+        assert_eq!(logical[5], "G"); // query type
+        assert_eq!(logical[9], "0"); // region 0 for global
+        assert_eq!(logical[14], "0.000"); // no filled cells
 
+        let _ = std::fs::remove_dir_all(&log_dir);
+    }
+
+    /// A global cluster request is recorded with query type `C`,
+    /// `minute_length = interval_count * 10`, `region = 0` and `-` for the
+    /// grid-only fields.
+    #[tokio::test]
+    async fn jsonrpc_get_global_clusters_records_usage_entry() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows(
+            "SELECT \"timestamp\" FROM strike_clusters",
+            vec![Row::new(vec![DBValue::Timestamp(ts(1_700_000_000))])],
+        );
+        mock.add_rows(
+            "FROM strike_clusters",
+            vec![cluster_row(42, ts(1_700_000_000))],
+        );
+        let log_dir = usage_log_dir("global-cluster");
+        let (tx, consumer) = crate::service_log::spawn(log_dir.clone(), None, None);
+        let metrics = crate::metrics::RecordingMetrics::new();
+        let service: Service<crate::metrics::RecordingMetrics> =
+            Service::with_parts(Arc::new(mock), ServiceCache::new(), metrics, HashSet::new())
+                .with_service_log(tx);
+        let mut req = req_with("5.6.7.8");
+
+        let response = service
+            .jsonrpc_get_global_clusters(&mut req, &json!(60), &json!(0), &json!(6))
+            .await
+            .unwrap();
+        assert!(response.get("clusters").is_some());
+
+        drop(service);
+        consumer.shutdown();
+        let content = read_servicelog(&log_dir, &today());
+        let line = content.lines().next().unwrap();
+        let logical: Vec<&str> = line.split('\t').filter(|s| !s.is_empty()).collect();
+        assert_eq!(logical.len(), 15);
+        assert_eq!(logical[3], "A"); // platform
+        assert_eq!(logical[4], "190"); // version
+        assert_eq!(logical[5], "C"); // query type
+        assert_eq!(logical[6], "0"); // minute_offset
+        assert_eq!(logical[7], "60"); // minute_length = interval_count * 10
+        assert_eq!(logical[8], "-"); // grid_baselength
+        assert_eq!(logical[9], "0"); // region 0 for global
+        assert_eq!(logical[10], "-"); // count_threshold
+        assert_eq!(logical[11], "-"); // x
+        assert_eq!(logical[12], "-"); // y
+        assert_eq!(logical[13], "-"); // data_area
+        assert_eq!(logical[14], "-"); // fill
+        assert!(!line.contains("5.6.7.8"));
+
+        let _ = std::fs::remove_dir_all(&log_dir);
+    }
+
+    /// A local cluster request is recorded with query type `C`, `region = -1`
+    /// and the request's `x`/`y`/`data_area`.
+    #[tokio::test]
+    async fn jsonrpc_get_local_clusters_records_usage_entry() {
+        let mut mock = MockExecutor::new();
+        mock.add_rows(
+            "SELECT \"timestamp\" FROM strike_clusters",
+            vec![Row::new(vec![DBValue::Timestamp(ts(1_700_000_000))])],
+        );
+        mock.add_rows(
+            "FROM strike_clusters",
+            vec![cluster_row(1, ts(1_700_000_000))],
+        );
+        let log_dir = usage_log_dir("local-cluster");
+        let (tx, consumer) = crate::service_log::spawn(log_dir.clone(), None, None);
+        let metrics = crate::metrics::RecordingMetrics::new();
+        let service: Service<crate::metrics::RecordingMetrics> =
+            Service::with_parts(Arc::new(mock), ServiceCache::new(), metrics, HashSet::new())
+                .with_service_log(tx);
+        let mut req = req_with("5.6.7.8");
+
+        let response = service
+            .jsonrpc_get_local_clusters(
+                &mut req,
+                &json!(101),
+                &json!(202),
+                &json!(60),
+                &json!(0),
+                &json!(5),
+                &json!(2),
+            )
+            .await
+            .unwrap();
+        assert!(response.get("clusters").is_some());
+
+        drop(service);
+        consumer.shutdown();
+        let content = read_servicelog(&log_dir, &today());
+        let line = content.lines().next().unwrap();
+        let logical: Vec<&str> = line.split('\t').filter(|s| !s.is_empty()).collect();
+        assert_eq!(logical.len(), 15);
+        assert_eq!(logical[5], "C"); // query type
+        assert_eq!(logical[7], "20"); // minute_length = interval_count * 10
+        assert_eq!(logical[8], "-"); // grid_baselength
+        assert_eq!(logical[9], "-1"); // region -1 for local
+        assert_eq!(logical[10], "-"); // count_threshold
+        assert_eq!(logical[11], "101"); // x
+        assert_eq!(logical[12], "202"); // y
+        assert_eq!(logical[13], "5"); // data_area
+        assert_eq!(logical[14], "-"); // fill
+        assert!(!line.contains("5.6.7.8"));
+
+        let _ = std::fs::remove_dir_all(&log_dir);
+    }
+
+    /// A blocked cluster request is not recorded.
+    #[tokio::test]
+    async fn blocked_cluster_requests_are_not_recorded() {
+        let log_dir = usage_log_dir("blocked-cluster");
+        let (tx, consumer) = crate::service_log::spawn(log_dir.clone(), None, None);
+        let metrics = crate::metrics::RecordingMetrics::new();
+        let service: Service<crate::metrics::RecordingMetrics> = Service::with_parts(
+            Arc::new(MockExecutor::new()),
+            ServiceCache::new(),
+            metrics,
+            HashSet::new(),
+        )
+        .with_service_log(tx);
+        // No user agent -> forbidden.
+        let mut req = Request::default();
+        let response = service
+            .jsonrpc_get_global_clusters(&mut req, &json!(60), &json!(0), &json!(1))
+            .await
+            .unwrap();
+        assert_eq!(response, json!({}));
+        drop(service);
+        consumer.shutdown();
+        let entries: Vec<_> = std::fs::read_dir(&log_dir).unwrap().flatten().collect();
+        assert!(entries.is_empty(), "no servicelog file expected");
         let _ = std::fs::remove_dir_all(&log_dir);
     }
 

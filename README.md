@@ -207,8 +207,9 @@ the Python two-step design (per-minute JSON reports plus the separate
 `bo-webservice-insertlog` tool), the transform runs **in-process**:
 
 1. every *successful* `get_strikes_grid` / `get_global_strikes_grid` /
-   `get_local_strikes_grid` call is pushed onto a **bounded queue** (blocked or
-   invalid requests are never recorded);
+   `get_local_strikes_grid` / `get_global_clusters` / `get_local_clusters`
+   call is pushed onto a **bounded queue** (blocked or invalid requests are
+   never recorded);
 2. a dedicated **background OS thread** consumes the queue, enriches each entry
    (GeoIP country/city, client platform/version) and appends
    one tab-separated line per request to `{log_dir}/servicelog_{YYYY-MM-DD}`.
@@ -245,12 +246,12 @@ An empty env value disables it quietly.  When enabled the service logs
 
 ### File format
 
-Rows are appended to `{log_dir}/servicelog_{YYYY-MM-DD}`, 14 logical fields (one
+Rows are appended to `{log_dir}/servicelog_{YYYY-MM-DD}`, 15 logical fields (one
 line per request).  Tabs are shown as `\t` here; the file contains real tab
 characters:
 
 ```text
-22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t3\t0\t-\t-\t-\t3.420
+22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\tG\t0\t60\t10000\t3\t0\t-\t-\t-\t3.420
 ```
 
 **City padding (tabs).** The `city` field is padded with **tab characters**, not
@@ -263,8 +264,8 @@ following columns further right.
 
 > **Consequence:** because the padding is made of tabs, splitting a line on
 > `'\t'` yields **empty fields**.  The line therefore no longer has a fixed
-> 14-element index layout.  Consumers must split on tabs and **ignore empty
-> segments** (the 14 logical fields are still all present and in order), or treat
+> 15-element index layout.  Consumers must split on tabs and **ignore empty
+> segments** (the 15 logical fields are still all present and in order), or treat
 > the column positions as display-only.
 
 | # | Logical field | Notes |
@@ -274,18 +275,19 @@ following columns further right.
 | 3 | city | GeoIP English city name, else `-`; always followed by two tabs (never truncated) |
 | 4 | platform | `A` for the Android client, `I` for the iOS client, else `-` |
 | 5 | version | `bo-android-<n>` / `bo-ios-<n>` client version, else `None` |
-| 6 | `minute_offset` | |
-| 7 | `minute_length` | |
-| 8 | `grid_baselength` | the **pre-clamp** `original_grid_base_length` |
-| 9 | `region` | `0` global, clamped region for the region grid, `-1` local |
-| 10 | `count_threshold` | |
-| 11 | `x` | local-grid centre `x`, else `-` |
-| 12 | `y` | local-grid centre `y`, else `-` |
-| 13 | `data_area` | local-grid data area, else `-` |
-| 14 | `fill` | percentage of filled raster cells (`filled / (xc * yc) * 100`), three decimals |
+| 6 | `query_type` | `G` for a grid request, `C` for a cluster request |
+| 7 | `minute_offset` | |
+| 8 | `minute_length` | cluster requests: `interval_count * 10` (the total minutes covered by the 10-minute cluster intervals) |
+| 9 | `grid_baselength` | the **pre-clamp** `original_grid_base_length`; `-` for cluster requests |
+| 10 | `region` | `0` global, clamped region for the region grid, `-1` local (also `0`/`-1` for global/local cluster requests) |
+| 11 | `count_threshold` | `-` for cluster requests |
+| 12 | `x` | local centre `x`, else `-` |
+| 13 | `y` | local centre `y`, else `-` |
+| 14 | `data_area` | local data area, else `-` |
+| 15 | `fill` | percentage of filled raster cells (`filled / (xc * yc) * 100`), three decimals; `-` for cluster requests |
 
 The raw client IP is never written.  For the global/region flavours fields
-11–13 are `-`; a local request carries its `x`/`y`/`data_area` values and is
+12–14 are `-`; a local request carries its `x`/`y`/`data_area` values and is
 also distinguishable by `region == -1`.  The `platform`
 marker recognises the versioned Blitzortung clients: the Android client yields
 `A`, the iOS client (`bo-ios-<n>`) yields `I`.  A missing user agent, a bare
@@ -345,8 +347,23 @@ org.blitzortung.service.access,version=190,region=3,minutes=60,offset=0,grid=100
 `bo-servicelog-stats` (there is no Python counterpart; see issue #24) reads the
 daily `servicelog_YYYY-MM-DD` files back and reports, per day:
 
-* **total requests**, split into local (`region == -1`), global (`region == 0`)
-  and region (`region > 0`) flavours, plus the unknown geo/version counts;
+* **total requests**, split into grid (`query_type == 'G'`) and cluster
+  (`query_type == 'C'`) queries and further into local (`region == -1`),
+  global (`region == 0`) and region (`region > 0`) flavours, plus the unknown
+  geo/version counts;
+* **query matrix** — the request counts as a grid/cluster x local/global
+  matrix (rows `grid`/`cluster`, columns `local query`/`global query`, each
+  with a `sum` column/row; region queries with `region > 0` sit outside the
+  matrix), shown in the text, JSON and HTML reports, e.g. in text:
+
+  ```text
+  query matrix (rows: grid/cluster, columns: local/global query):
+               local query  global query       sum
+        grid             2             1         3
+     cluster             3             0         3
+         sum             5             1         6
+  ```
+
 * **top countries**, **top cities** and **top client versions** (each `--top N`
   entries, default 10; ties are broken alphabetically for a stable order);
 * **`data_area` distribution** over the local queries — how many requests used
@@ -360,15 +377,17 @@ daily `servicelog_YYYY-MM-DD` files back and reports, per day:
   accumulate), anchored at the local-grid origin
   `((x-1) * data_area, (y-1) * data_area)`.
 
-  Two maps are produced: one for the **offline** queries (a fixed 10-minute
-  window, `minute_length == 10`) and one for the **interactive** queries (any
-  longer window, `minute_length > 10`). 
+  Two maps are produced: one for the **background/offline** queries — grid
+  queries with a fixed 10-minute window (`minute_length == 10`) — and one for
+  the **interactive** queries (everything else: cluster queries, even with a
+  10-minute window, and grid queries with any other window).
 
   ![servicelog stats map](doc/servicelog_stats_map.png)
 
-  The report also lists the
-  offline/interactive counts next to the local totals, and each JSON
-  `local_queries` entry carries `minute_length` and an `interactive` flag.
+  The report also lists the grid/cluster and
+  offline/interactive counts next to the totals, and each JSON
+  `local_queries` entry carries `minute_length`, `query_type` and an
+  `interactive` flag.
 ```sh
 bo-servicelog-stats [--dir <DIR|FILE>] [--date YYYY-MM-DD] [--all] [--top N] \
                     [--format text|json|svg|map|html] [--output FILE] \
@@ -422,8 +441,8 @@ bo-servicelog-stats --format html --output report.html
 ```
 
 Parsing splits each line on tabs and **ignores the empty segments** produced by
-the tab-padded `city` column, recovering the 14 logical fields; a line that
-does not yield 14 parseable fields is counted as malformed and skipped (the
+the tab-padded `city` column, recovering the 15 logical fields; a line that
+does not yield 15 parseable fields is counted as malformed and skipped (the
 parser never panics on a truncated or hand-edited file).  The `-` placeholder
 for unknown country/city is normalised to "unknown" and never appears as a
 "top" entry.
@@ -455,13 +474,18 @@ The metric names and counts match the Python implementation, plus a
 `strikes_grid_query.count` / `histogram.query.count` counter pair that counts
 the actual DB queries behind each cache miss:
 
+The query metrics form a grid/cluster x local/global matrix:
+
+| | local query | global query |
+| --- | --- | --- |
+| **grid** | `get_local_strikes_grid`: `strikes_grid.total_count`, `local_strikes_grid.total_count`, `local_strikes_grid.data_area.<area>`, `local_strikes_grid.cache_hits` gauge, `strikes_grid_query.count` counter, `strikes_grid.total` timing (>= 1ms); at 10 minutes also both `bg_count`s | `get_global_strikes_grid`: `strikes_grid.total_count`, `global_strikes_grid.total_count`, `global_strikes_grid.cache_hits` gauge, `strikes_grid_query.count` counter, `global_strikes_grid.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
+| **cluster** | `get_local_clusters`: `clusters.total_count`, `local_clusters.total_count`, `local_clusters.data_area.<area>`, `local_clusters.cache_hits` gauge, `clusters_query.count` counter, `clusters.total` timing (>= 1ms); at 10 minutes also both `bg_count`s | `get_global_clusters`: `clusters.total_count`, `global_clusters.total_count`, `global_clusters.cache_hits` gauge, `clusters_query.count` counter, `global_clusters.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
+
+The region handler and the non-query metrics sit outside the matrix:
+
 | Handler | Metrics |
 | --- | --- |
-| `get_strikes_grid` | `strikes_grid.total_count` (+ `.<region>`), `strikes_grid.cache_hits` gauge, `strikes_grid_query.count` counter (one per DB query), `strikes_grid.total` timing (>= 1ms); at a 10-minute length also `strikes_grid.bg_count` (+ `.<region>`) |
-| `get_global_strikes_grid` | `strikes_grid.total_count`, `global_strikes_grid.total_count`, `global_strikes_grid.cache_hits` gauge, `strikes_grid_query.count` counter, `global_strikes_grid.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
-| `get_local_strikes_grid` | `strikes_grid.total_count`, `local_strikes_grid.total_count`, `local_strikes_grid.data_area.<area>`, `local_strikes_grid.cache_hits` gauge, `strikes_grid_query.count` counter, `strikes_grid.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
-| `get_global_clusters` | `clusters.total_count`, `global_clusters.total_count`, `global_clusters.cache_hits` gauge, `clusters_query.count` counter (one per DB query), `global_clusters.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
-| `get_local_clusters` | `clusters.total_count`, `local_clusters.total_count`, `local_clusters.data_area.<area>`, `local_clusters.cache_hits` gauge, `clusters_query.count` counter, `clusters.total` timing (>= 1ms); at 10 minutes also both `bg_count`s |
+| `get_strikes_grid` (region query) | `strikes_grid.total_count` (+ `.<region>`), `strikes_grid.cache_hits` gauge, `strikes_grid_query.count` counter (one per DB query), `strikes_grid.total` timing (>= 1ms); at a 10-minute length also `strikes_grid.bg_count` (+ `.<region>`) |
 | histogram cache | `histogram.query.count` counter (one per DB query), `histogram.cache_hits` gauge, `histogram.size` gauge |
 | DB pool wait | `db.pool_wait` timing in milliseconds (at least `1`) |
 

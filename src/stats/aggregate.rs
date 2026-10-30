@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::service_log::{QUERY_TYPE_CLUSTER, QUERY_TYPE_GRID};
 use crate::stats::parse::{parse_file, ParseOutcome, ServiceLogRow};
 
 /// One entry of a "top N" list.
@@ -31,38 +32,55 @@ pub struct DataAreaBucket {
 /// `reference_longitude`/`reference_latitude` (the lower-left of the
 /// `3 * data_area` neighbourhood grid used for the strike query).
 /// `grid_baselength` is the raster baselength in metres, so an overlay can scale
-/// each marker.
+/// each marker; `None` for a cluster request (logged as `-`).
 ///
 /// `data_area` was added for the ASCII world map (issue #24): it determines the
 /// footprint of a query in the base 5-degree raster (`data_area / 5` cells per
 /// side).  It is `5` (the minimum) when the row did not carry a usable value.
 ///
-/// `minute_length` classifies the query as offline or interactive (see
-/// [`is_offline`](Self::is_offline) / [`is_interactive`](Self::is_interactive)).
+/// `query_type` and `minute_length` classify the query as offline (background)
+/// or interactive (see [`is_offline`](Self::is_offline) /
+/// [`is_interactive`](Self::is_interactive)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalQuery {
     pub x: i64,
     pub y: i64,
     pub data_area: i64,
-    pub grid_baselength: i64,
+    pub grid_baselength: Option<i64>,
     /// The requested time span in minutes (`minute_length` in the servicelog).
     pub minute_length: i64,
+    /// `G` ([`QUERY_TYPE_GRID`]) for a grid query, `C` ([`QUERY_TYPE_CLUSTER`])
+    /// for a cluster query.
+    pub query_type: char,
 }
 
-/// The `minute_length` of an **offline** query: the cached widget requests a
-/// fixed 10-minute window.  Every longer window is an interactive query.
+/// The `minute_length` of a **background (offline)** query: the cached widget
+/// requests a fixed 10-minute window.  Only grid queries with this window are
+/// background; a cluster query with a 10-minute window is interactive.
 pub const OFFLINE_MINUTE_LENGTH: i64 = 10;
 
 impl LocalQuery {
-    /// Whether this is an offline query: a fixed 10-minute window.
-    pub fn is_offline(&self) -> bool {
-        self.minute_length == OFFLINE_MINUTE_LENGTH
+    /// Whether this is a grid query (`query_type == 'G'`).
+    pub fn is_grid(&self) -> bool {
+        self.query_type == QUERY_TYPE_GRID
     }
 
-    /// Whether this is an interactive query: any window longer than the offline
-    /// 10 minutes.
+    /// Whether this is a cluster query (`query_type == 'C'`).
+    pub fn is_cluster(&self) -> bool {
+        self.query_type == QUERY_TYPE_CLUSTER
+    }
+
+    /// Whether this is a background (offline) query: a **grid** query with the
+    /// fixed 10-minute window.  Cluster queries are never background.
+    pub fn is_offline(&self) -> bool {
+        self.is_grid() && self.minute_length == OFFLINE_MINUTE_LENGTH
+    }
+
+    /// Whether this is an interactive query: everything that is not
+    /// background — a cluster query (even with a 10-minute window) or a grid
+    /// query with any other window.
     pub fn is_interactive(&self) -> bool {
-        self.minute_length > OFFLINE_MINUTE_LENGTH
+        !self.is_offline()
     }
 
     /// The tile centre as `(longitude, latitude)` degrees.
@@ -78,20 +96,74 @@ impl LocalQuery {
     }
 }
 
+/// The grid/cluster x local/global request-count matrix.
+///
+/// Rows are the query type (grid `G` / cluster `C`), columns the request
+/// flavour (local `region == -1` / global `region == 0`).  Region queries
+/// (`region > 0`) sit outside the matrix and are only counted in
+/// [`ServiceLogStats::region_requests`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueryMatrix {
+    /// Grid queries with `region == -1` (`get_local_strikes_grid`).
+    pub grid_local: u64,
+    /// Grid queries with `region == 0` (`get_global_strikes_grid`).
+    pub grid_global: u64,
+    /// Cluster queries with `region == -1` (`get_local_clusters`).
+    pub cluster_local: u64,
+    /// Cluster queries with `region == 0` (`get_global_clusters`).
+    pub cluster_global: u64,
+}
+
+impl QueryMatrix {
+    /// The `grid` row sum (local + global grid queries).
+    pub fn grid_sum(&self) -> u64 {
+        self.grid_local + self.grid_global
+    }
+
+    /// The `cluster` row sum (local + global cluster queries).
+    pub fn cluster_sum(&self) -> u64 {
+        self.cluster_local + self.cluster_global
+    }
+
+    /// The `local query` column sum (grid + cluster local queries).
+    pub fn local_sum(&self) -> u64 {
+        self.grid_local + self.cluster_local
+    }
+
+    /// The `global query` column sum (grid + cluster global queries).
+    pub fn global_sum(&self) -> u64 {
+        self.grid_global + self.cluster_global
+    }
+
+    /// The grand total of the matrix (all four cells; region queries are
+    /// outside the matrix and not included).
+    pub fn total(&self) -> u64 {
+        self.grid_sum() + self.cluster_sum()
+    }
+}
+
 /// The aggregated daily statistics.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ServiceLogStats {
     /// The total number of parsed requests.
     pub total_requests: u64,
+    /// Requests with `query_type == 'G'` (grid requests).
+    pub grid_requests: u64,
+    /// Requests with `query_type == 'C'` (cluster requests).
+    pub cluster_requests: u64,
     /// Requests with `region == -1`.
     pub local_requests: u64,
     /// Requests with `region == 0`.
     pub global_requests: u64,
     /// Requests with `region > 0`.
     pub region_requests: u64,
-    /// Local requests with a 10-minute window (the offline widget).
+    /// The grid/cluster x local/global request-count matrix.
+    pub query_matrix: QueryMatrix,
+    /// Local grid requests with a 10-minute window (the background/offline
+    /// widget).
     pub offline_requests: u64,
-    /// Local requests with a window longer than 10 minutes (interactive).
+    /// Local requests that are not background: cluster queries (even with a
+    /// 10-minute window) and grid queries with any other window.
     pub interactive_requests: u64,
     /// Requests whose country was unknown (`-`).
     pub unknown_country: u64,
@@ -143,6 +215,21 @@ pub fn aggregate(rows: &[ServiceLogRow], top_n: usize) -> ServiceLogStats {
 
     for row in rows {
         stats.total_requests += 1;
+        if row.is_grid() {
+            stats.grid_requests += 1;
+            if row.is_local() {
+                stats.query_matrix.grid_local += 1;
+            } else if row.is_global() {
+                stats.query_matrix.grid_global += 1;
+            }
+        } else if row.is_cluster() {
+            stats.cluster_requests += 1;
+            if row.is_local() {
+                stats.query_matrix.cluster_local += 1;
+            } else if row.is_global() {
+                stats.query_matrix.cluster_global += 1;
+            }
+        }
         if row.is_local() {
             stats.local_requests += 1;
         } else if row.is_global() {
@@ -174,6 +261,7 @@ pub fn aggregate(rows: &[ServiceLogRow], top_n: usize) -> ServiceLogStats {
                     data_area,
                     grid_baselength: row.grid_baselength,
                     minute_length: row.minute_length,
+                    query_type: row.query_type,
                 };
                 if query.is_interactive() {
                     stats.interactive_requests += 1;

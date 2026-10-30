@@ -5,8 +5,14 @@
 //! [`crate::service_log`]).  This module parses those files back into rows and
 //! aggregates them into daily statistics:
 //!
-//! * **total requests** — the number of parsed rows (optionally split by the
-//!   local / global / region request flavours);
+//! * **total requests** — the number of parsed rows, split by query type
+//!   (grid `G` / cluster `C`) and by the local / global / region request
+//!   flavours, plus the **query matrix**: a grid/cluster x local/global
+//!   count matrix ([`QueryMatrix`], region queries sit outside it) and the
+//!   background/interactive split of the local queries:
+//!   only **grid** queries with `minute_length == 10` are background
+//!   (offline); cluster queries — even with a 10-minute window — and grid
+//!   queries with any other window are interactive;
 //! * **top countries** — requests grouped by the GeoIP country column;
 //! * **top cities** — requests grouped by the GeoIP city column;
 //! * **top client versions** — requests grouped by the parsed
@@ -36,8 +42,8 @@ pub mod parse;
 pub mod render;
 
 pub use aggregate::{
-    aggregate, statistics_for_file, DataAreaBucket, LocalQuery, ServiceLogStats, TopEntry,
-    OFFLINE_MINUTE_LENGTH,
+    aggregate, statistics_for_file, DataAreaBucket, LocalQuery, QueryMatrix, ServiceLogStats,
+    TopEntry, OFFLINE_MINUTE_LENGTH,
 };
 pub use day::{day_from_filename, day_report, today_utc, DayReport};
 pub use parse::{
@@ -321,9 +327,9 @@ mod tool_tests {
     }
 
     const SAMPLE: &str = "\
-08:44:50.596\tUS\tSun Prairie\t\t\tA\t352\t0\t10\t25000\t0\t0\t-\t-\t-\t0.036\n\
-08:44:50.637\tSE\tGothenburg\t\t\tA\t352\t0\t10\t5000\t-1\t0\t4\t13\t5\t0.000\n\
-08:44:50.655\tRO\tBucharest\t\t\tA\t352\t0\t10\t5000\t-1\t0\t5\t8\t5\t0.039\n";
+08:44:50.596\tUS\tSun Prairie\t\t\tA\t352\tG\t0\t10\t25000\t0\t0\t-\t-\t-\t0.036\n\
+08:44:50.637\tSE\tGothenburg\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t4\t13\t5\t0.000\n\
+08:44:50.655\tRO\tBucharest\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t5\t8\t5\t0.039\n";
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("bo-stats-cli-{}-{tag}", std::process::id()));
@@ -401,6 +407,17 @@ mod tool_tests {
         let output = run(&options).unwrap();
         assert!(output.contains("servicelog statistics for 2023-11-14"));
         assert!(output.contains("total requests: 3"));
+        assert!(output.contains("grid: 3  cluster: 0"), "{output}");
+        // The query matrix: 2 grid-local, 1 grid-global, no clusters.
+        assert!(output.contains("query matrix"), "{output}");
+        assert!(
+            output.contains(&format!("    {:>8}  {:>12}  {:>12}  {:>8}", "grid", 2, 1, 3)),
+            "{output}"
+        );
+        assert!(
+            output.contains(&format!("    {:>8}  {:>12}  {:>12}  {:>8}", "sum", 2, 1, 3)),
+            "{output}"
+        );
         assert!(output.contains("local query locations: 2"));
         let _ = std::fs::remove_dir_all(&dir);
     }

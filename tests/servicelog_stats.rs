@@ -8,12 +8,12 @@ use std::process::Command;
 
 /// One servicelog file with the six rows from issue #24.
 const SAMPLE: &str = "\
-08:44:50.596\tUS\tSun Prairie\t\t\tA\t352\t0\t10\t25000\t0\t0\t-\t-\t-\t0.036
-08:44:50.637\tSE\tGothenburg\t\t\tA\t352\t0\t10\t5000\t-1\t0\t4\t13\t5\t0.000
-08:44:50.655\tRO\tBucharest\t\t\tA\t352\t0\t10\t5000\t-1\t0\t5\t8\t5\t0.039
-08:44:51.106\tDE\tBerlin\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t2\t10\t5\t0.000
-08:44:51.238\tDE\tUlm\t\t\t\tA\t352\t0\t10\t5000\t-1\t0\t1\t9\t5\t0.000
-08:44:51.277\tIT\tVicenza\t\t\t\tA\t352\t0\t10\t5000\t-1\t0\t2\t9\t5\t0.000
+08:44:50.596\tUS\tSun Prairie\t\t\tA\t352\tG\t0\t10\t25000\t0\t0\t-\t-\t-\t0.036
+08:44:50.637\tSE\tGothenburg\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t4\t13\t5\t0.000
+08:44:50.655\tRO\tBucharest\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t5\t8\t5\t0.039
+08:44:51.106\tDE\tBerlin\t\t\t\tA\t352\tG\t0\t60\t5000\t-1\t0\t2\t10\t5\t0.000
+08:44:51.238\tDE\tUlm\t\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t1\t9\t5\t0.000
+08:44:51.277\tIT\tVicenza\t\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t2\t9\t5\t0.000
 ";
 
 fn temp_dir(tag: &str) -> PathBuf {
@@ -55,6 +55,7 @@ fn text_report_lists_totals_and_tops() {
         "{stdout}"
     );
     assert!(stdout.contains("total requests: 6"), "{stdout}");
+    assert!(stdout.contains("grid: 6  cluster: 0"), "{stdout}");
     assert!(
         stdout.contains("local:  5  global: 1  region: 0"),
         "{stdout}"
@@ -95,16 +96,18 @@ fn json_report_is_valid_json() {
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
     assert_eq!(value["day"], "2023-11-14");
     assert_eq!(value["total_requests"], 6);
+    assert_eq!(value["grid_requests"], 6);
+    assert_eq!(value["cluster_requests"], 0);
     assert_eq!(value["countries"][0]["label"], "DE");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Local rows with varied `data_area` values (5, 10, 15, 20).
 const DATA_AREA_SAMPLE: &str = "\
-08:00:00.000\tDE\tCity\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t1\t1\t5\t0.000\n\
-08:00:01.000\tDE\tCity\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t2\t1\t10\t0.000\n\
-08:00:02.000\tDE\tCity\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t3\t1\t15\t0.000\n\
-08:00:03.000\tDE\tCity\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t4\t1\t20\t0.000\n";
+08:00:00.000\tDE\tCity\t\t\t\tA\t352\tG\t0\t60\t5000\t-1\t0\t1\t1\t5\t0.000\n\
+08:00:01.000\tDE\tCity\t\t\t\tA\t352\tG\t0\t60\t5000\t-1\t0\t2\t1\t10\t0.000\n\
+08:00:02.000\tDE\tCity\t\t\t\tA\t352\tG\t0\t60\t5000\t-1\t0\t3\t1\t15\t0.000\n\
+08:00:03.000\tDE\tCity\t\t\t\tA\t352\tG\t0\t60\t5000\t-1\t0\t4\t1\t20\t0.000\n";
 
 #[test]
 fn data_area_distribution_is_reported() {
@@ -158,11 +161,14 @@ fn data_area_distribution_is_reported() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Local rows mixing offline (`minute_length=10`) and interactive (60) queries.
+/// Local rows mixing grid queries (offline `minute_length=10` and
+/// interactive `60`) with a cluster query: a local cluster row with
+/// `minute_length=10` (`interval_count=1`) is interactive, not background.
 const MIXED_MINUTES_SAMPLE: &str = "\
-08:00:00.000\tDE\tCity\t\t\t\tA\t352\t0\t10\t5000\t-1\t0\t1\t1\t5\t0.000\n\
-08:00:01.000\tDE\tCity\t\t\t\tA\t352\t0\t10\t5000\t-1\t0\t2\t1\t5\t0.000\n\
-08:00:02.000\tUS\tCity\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t-14\t9\t5\t0.000\n";
+08:00:00.000\tDE\tCity\t\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t1\t1\t5\t0.000\n\
+08:00:01.000\tDE\tCity\t\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t2\t1\t5\t0.000\n\
+08:00:02.000\tUS\tCity\t\t\t\tA\t352\tG\t0\t60\t5000\t-1\t0\t-14\t9\t5\t0.000\n\
+08:00:03.000\tDE\tCity\t\t\t\tA\t352\tC\t0\t10\t-\t-1\t-\t3\t1\t5\t-\n";
 
 #[test]
 fn offline_and_interactive_are_split_into_separate_maps() {
@@ -183,13 +189,16 @@ fn offline_and_interactive_are_split_into_separate_maps() {
         .expect("run bo-servicelog-stats");
     assert!(text.status.success());
     let stdout = String::from_utf8(text.stdout).unwrap();
-    assert!(stdout.contains("offline: 2  interactive: 1"), "{stdout}");
+    assert!(stdout.contains("grid: 3  cluster: 1"), "{stdout}");
+    // The cluster query has `minute_length=10` but is interactive, so only
+    // the two grid queries with a 10-minute window are offline.
+    assert!(stdout.contains("offline: 2  interactive: 2"), "{stdout}");
     assert!(
-        stdout.contains("offline queries (minute_length == 10):"),
+        stdout.contains("offline queries (grid, minute_length == 10):"),
         "{stdout}"
     );
     assert!(
-        stdout.contains("interactive queries (minute_length > 10):"),
+        stdout.contains("interactive queries (cluster or minute_length != 10):"),
         "{stdout}"
     );
     assert!(
@@ -200,7 +209,7 @@ fn offline_and_interactive_are_split_into_separate_maps() {
     );
     assert!(
         stdout.contains(
-            "interactive local-query world map (72x36 cells of 5 degrees, 1 queries, 1 hits)"
+            "interactive local-query world map (72x36 cells of 5 degrees, 2 queries, 2 hits)"
         ),
         "{stdout}"
     );
@@ -220,12 +229,18 @@ fn offline_and_interactive_are_split_into_separate_maps() {
     assert!(json.status.success());
     let value: serde_json::Value =
         serde_json::from_str(&String::from_utf8(json.stdout).unwrap()).expect("valid json");
+    assert_eq!(value["grid_requests"], 3);
+    assert_eq!(value["cluster_requests"], 1);
     assert_eq!(value["offline_requests"], 2);
-    assert_eq!(value["interactive_requests"], 1);
+    assert_eq!(value["interactive_requests"], 2);
     let queries = value["local_queries"].as_array().unwrap();
     assert_eq!(queries[0]["interactive"], false);
     assert_eq!(queries[1]["interactive"], false);
     assert_eq!(queries[2]["interactive"], true);
+    // The cluster row with minute_length == 10 is interactive, not offline.
+    assert_eq!(queries[3]["interactive"], true);
+    assert_eq!(queries[3]["query_type"], "C");
+    assert_eq!(queries[3]["minute_length"], 10);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -358,14 +373,14 @@ fn ascii_map_report_has_frame_and_markers() {
         "{stdout}"
     );
     assert!(stdout.contains("72x36 cells of 5 degrees"), "{stdout}");
-    // Separate maps: four offline queries (`minute_length=10`) and the one
-    // interactive Berlin query (`minute_length=60`).
+    // Separate maps: four offline queries (grid, `minute_length=10`) and the
+    // one interactive Berlin query (`minute_length=60`).
     assert!(
-        stdout.contains("offline queries (minute_length == 10):"),
+        stdout.contains("offline queries (grid, minute_length == 10):"),
         "{stdout}"
     );
     assert!(
-        stdout.contains("interactive queries (minute_length > 10):"),
+        stdout.contains("interactive queries (cluster or minute_length != 10):"),
         "{stdout}"
     );
     assert!(

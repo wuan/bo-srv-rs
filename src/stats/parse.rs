@@ -2,17 +2,20 @@
 //!
 //! The `city` column is tab-padded (see [`crate::service_log::pad_city`]), so a
 //! naive `split('\t')` yields empty segments.  [`parse_row`] therefore splits on
-//! tabs and **drops empty segments**, which recovers exactly the 14 logical
-//! fields.  A row that does not yield 14 fields is reported as malformed and
+//! tabs and **drops empty segments**, which recovers exactly the 15 logical
+//! fields.  A row that does not yield 15 fields is reported as malformed and
 //! skipped (the parser never panics on a truncated or hand-edited file).
 //!
 //! `-` is the placeholder for "unknown" in the country/city/local columns and
-//! is normalised to `None`, so the top lists never contain a `-` bucket.
+//! for the grid-only fields of a cluster row, and is normalised to `None`, so
+//! the top lists never contain a `-` bucket.
 
 use std::path::Path;
 
+use crate::service_log::{QUERY_TYPE_CLUSTER, QUERY_TYPE_GRID};
+
 /// The number of logical fields in a servicelog row.
-pub const SERVICELOG_FIELDS: usize = 14;
+pub const SERVICELOG_FIELDS: usize = 15;
 
 /// The default `N` of the "top N" lists.
 pub const DEFAULT_TOP_N: usize = 10;
@@ -33,20 +36,26 @@ pub struct ServiceLogRow {
     pub platform: String,
     /// The parsed `bo-android-<n>` / `bo-ios-<n>` version, else `None`.
     pub version: Option<i64>,
+    /// `G` ([`QUERY_TYPE_GRID`]) for a grid request, `C`
+    /// ([`QUERY_TYPE_CLUSTER`]) for a cluster request.
+    pub query_type: char,
     pub minute_offset: i64,
     pub minute_length: i64,
-    pub grid_baselength: i64,
+    /// Pre-clamp raster baselength for a grid request, else `None` (cluster).
+    pub grid_baselength: Option<i64>,
     /// `0` global, clamped region for the region grid, `-1` local.
     pub region: i64,
-    pub count_threshold: i64,
-    /// Local-grid centre `x`, else `None`.
+    /// Grid request only, else `None` (cluster).
+    pub count_threshold: Option<i64>,
+    /// Local centre `x`, else `None`.
     pub x: Option<i64>,
-    /// Local-grid centre `y`, else `None`.
+    /// Local centre `y`, else `None`.
     pub y: Option<i64>,
-    /// Local-grid data area, else `None`.
+    /// Local data area, else `None`.
     pub data_area: Option<i64>,
-    /// Raster fill percentage as written (three decimals).
-    pub fill: f64,
+    /// Raster fill percentage as written (three decimals), else `None`
+    /// (cluster).
+    pub fill: Option<f64>,
 }
 
 impl ServiceLogRow {
@@ -64,6 +73,16 @@ impl ServiceLogRow {
     pub fn is_region(&self) -> bool {
         self.region > 0
     }
+
+    /// Whether this is a grid request (`query_type == 'G'`).
+    pub fn is_grid(&self) -> bool {
+        self.query_type == QUERY_TYPE_GRID
+    }
+
+    /// Whether this is a cluster request (`query_type == 'C'`).
+    pub fn is_cluster(&self) -> bool {
+        self.query_type == QUERY_TYPE_CLUSTER
+    }
 }
 
 /// Parse one servicelog line into a [`ServiceLogRow`].
@@ -77,7 +96,7 @@ pub fn parse_row(line: &str) -> Option<ServiceLogRow> {
         return None;
     }
     // The city padding is made of tabs, which produce empty segments; dropping
-    // them recovers exactly the 14 logical fields.
+    // them recovers exactly the 15 logical fields.
     let fields: Vec<&str> = line.split('\t').filter(|s| !s.is_empty()).collect();
     if fields.len() != SERVICELOG_FIELDS {
         return None;
@@ -89,15 +108,16 @@ pub fn parse_row(line: &str) -> Option<ServiceLogRow> {
         city: dash_to_none(fields[2]),
         platform: fields[3].to_string(),
         version: parse_version(fields[4]),
-        minute_offset: fields[5].parse().ok()?,
-        minute_length: fields[6].parse().ok()?,
-        grid_baselength: fields[7].parse().ok()?,
-        region: fields[8].parse().ok()?,
-        count_threshold: fields[9].parse().ok()?,
-        x: dash_to_int(fields[10]),
-        y: dash_to_int(fields[11]),
-        data_area: dash_to_int(fields[12]),
-        fill: fields[13].parse().ok()?,
+        query_type: parse_query_type(fields[5])?,
+        minute_offset: fields[6].parse().ok()?,
+        minute_length: fields[7].parse().ok()?,
+        grid_baselength: dash_to_int(fields[8]),
+        region: fields[9].parse().ok()?,
+        count_threshold: dash_to_int(fields[10]),
+        x: dash_to_int(fields[11]),
+        y: dash_to_int(fields[12]),
+        data_area: dash_to_int(fields[13]),
+        fill: dash_to_f64(fields[14]),
     })
 }
 
@@ -116,6 +136,24 @@ fn dash_to_int(value: &str) -> Option<i64> {
         None
     } else {
         value.parse().ok()
+    }
+}
+
+/// `-` becomes `None`; a float string becomes `Some`.
+fn dash_to_f64(value: &str) -> Option<f64> {
+    if value == "-" {
+        None
+    } else {
+        value.parse().ok()
+    }
+}
+
+/// The query-type column: exactly one character (`G` or `C` in practice).
+fn parse_query_type(value: &str) -> Option<char> {
+    let mut chars = value.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Some(c),
+        _ => None,
     }
 }
 

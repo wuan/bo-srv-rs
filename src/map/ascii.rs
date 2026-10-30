@@ -215,8 +215,10 @@ impl AsciiWorldMap {
 }
 
 /// Render the local queries as ASCII world maps (5-degree raster, issue #24):
-/// one for the **offline** queries (a fixed 10-minute window) and a separate
-/// one for the **interactive** queries (any longer window).
+/// one for the **background (offline)** queries (grid queries with a fixed
+/// 10-minute window) and a separate one for the **interactive** queries
+/// (cluster queries — even with a 10-minute window — and grid queries with
+/// any other window).
 pub fn render_ascii_map(day: &str, stats: &ServiceLogStats) -> String {
     format!(
         "servicelog local-query maps for {day}\n{}",
@@ -224,15 +226,15 @@ pub fn render_ascii_map(day: &str, stats: &ServiceLogStats) -> String {
     )
 }
 
-/// The two ASCII world maps (offline and interactive), each labelled and
-/// separated by a blank line.
+/// The two ASCII world maps (background/offline and interactive), each
+/// labelled and separated by a blank line.
 pub fn render_ascii_maps(stats: &ServiceLogStats) -> String {
     let offline =
         AsciiWorldMap::from_local_queries_filtered(&stats.local_queries, |q| q.is_offline());
     let interactive =
         AsciiWorldMap::from_local_queries_filtered(&stats.local_queries, |q| q.is_interactive());
     format!(
-        "offline queries (minute_length == {}):\n{}\ninteractive queries (minute_length > {}):\n{}",
+        "offline queries (grid, minute_length == {}):\n{}\ninteractive queries (cluster or minute_length != {}):\n{}",
         OFFLINE_MINUTE_LENGTH,
         offline.render_titled("offline local-query world map"),
         OFFLINE_MINUTE_LENGTH,
@@ -347,17 +349,24 @@ mod tests {
             x,
             y,
             data_area: 5,
-            grid_baselength: 5000,
+            grid_baselength: Some(5000),
             minute_length,
+            query_type: 'G',
         };
-        let queries = [make(1, 1, 10), make(2, 2, 60)];
+        // A cluster query with minute_length == 10 is interactive, not offline.
+        let cluster = LocalQuery {
+            minute_length: 10,
+            query_type: 'C',
+            ..make(3, 3, 10)
+        };
+        let queries = [make(1, 1, 10), make(2, 2, 60), cluster];
         let all = AsciiWorldMap::from_local_queries(&queries);
-        assert_eq!(all.queries(), 2);
+        assert_eq!(all.queries(), 3);
         let offline = AsciiWorldMap::from_local_queries_filtered(&queries, |q| q.is_offline());
         assert_eq!(offline.queries(), 1);
         let interactive =
             AsciiWorldMap::from_local_queries_filtered(&queries, |q| q.is_interactive());
-        assert_eq!(interactive.queries(), 1);
+        assert_eq!(interactive.queries(), 2);
     }
 
     #[test]

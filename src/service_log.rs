@@ -8,11 +8,12 @@
 //!
 //! This replaces the Python two-step design (`base.py` writing per-minute JSON
 //! reports + the `bo-webservice-insertlog` follow-up tool): there are **no JSON
-//! intermediate files** and the transform happens in-process.  The row has 14
+//! intermediate files** and the transform happens in-process.  The row has 15
 //! logical fields (see [`build_row`]): the UTC request time as `HH:MM:SS.nnn`,
-//! country/city, a client **platform** marker, the version, then the request
-//! parameters, the local `x`/`y`/`data_area` (or `-` placeholders) and the
-//! raster `fill` percentage.  The old masked-IP column is gone.  The `city`
+//! country/city, a client **platform** marker, the version, the **query type**
+//! (`G` grid / `C` cluster), then the request parameters, the local
+//! `x`/`y`/`data_area` (or `-` placeholders) and the raster `fill` percentage.
+//! The old masked-IP column is gone.  The `city`
 //! field is tab-padded (see [`pad_city`]), so splitting a line
 //! on `'\t'` produces empty segments for the padding — consumers must ignore
 //! empty segments rather than rely on fixed indices.
@@ -71,12 +72,22 @@ pub const GEOIP_DB_ENV_ALIAS: &str = "BO_SERVICE_GEOIP_DB";
 /// instead of blocking the request path.
 pub const QUEUE_CAPACITY: usize = 65_536;
 
-/// One recorded grid request, carrying the raw fields that [`build_row`]
+/// Query-type marker for a grid request in the servicelog `query_type` column.
+pub const QUERY_TYPE_GRID: char = 'G';
+/// Query-type marker for a cluster request in the servicelog `query_type` column.
+pub const QUERY_TYPE_CLUSTER: char = 'C';
+
+/// One recorded data request, carrying the raw fields that [`build_row`]
 /// renders into the servicelog line.
 ///
 /// `region` is `0` for the global flavour, the clamped region for the region
 /// flavour and `-1` for the local flavour.  `grid_baselength` is the
 /// **pre-clamp** value (`original_grid_base_length` in `base.py`).
+///
+/// `query_type` is [`QUERY_TYPE_GRID`] for a grid request and
+/// [`QUERY_TYPE_CLUSTER`] for a cluster request.  The grid-only fields
+/// (`grid_baselength`, `count_threshold`, `fill`) are `None` for a cluster
+/// request and render as `-`.
 ///
 /// `client` is retained for the GeoIP lookup; the raw client IP is never
 /// written to the log line (see [`build_row`]).  `local` carries the local
@@ -87,13 +98,17 @@ pub struct ServiceLogEntry {
     /// Epoch microseconds of the request.
     pub now_us: i64,
     pub minute_length: i64,
-    pub grid_baselength: i64,
+    /// Pre-clamp raster baselength for a grid request; `None` for a cluster.
+    pub grid_baselength: Option<i64>,
     pub minute_offset: i64,
     pub region: i64,
-    pub count_threshold: i64,
+    /// Grid request only; `None` for a cluster (rendered as `-`).
+    pub count_threshold: Option<i64>,
     /// Percentage of the raster matrix that is filled, `filled / available *
-    /// 100` (`0..=100`), rendered with three decimals.
-    pub fill: f64,
+    /// 100` (`0..=100`), rendered with three decimals; `None` for a cluster.
+    pub fill: Option<f64>,
+    /// [`QUERY_TYPE_GRID`] or [`QUERY_TYPE_CLUSTER`].
+    pub query_type: char,
     pub client: Option<String>,
     pub user_agent: Option<String>,
     /// Local grid only: the request centre and data area.
@@ -142,11 +157,12 @@ pub fn global_entry(
     ServiceLogEntry {
         now_us,
         minute_length,
-        grid_baselength,
+        grid_baselength: Some(grid_baselength),
         minute_offset,
         region: 0,
-        count_threshold,
-        fill,
+        count_threshold: Some(count_threshold),
+        fill: Some(fill),
+        query_type: QUERY_TYPE_GRID,
         client,
         user_agent,
         local: None,
@@ -169,11 +185,12 @@ pub fn region_entry(
     ServiceLogEntry {
         now_us,
         minute_length,
-        grid_baselength,
+        grid_baselength: Some(grid_baselength),
         minute_offset,
         region,
-        count_threshold,
-        fill,
+        count_threshold: Some(count_threshold),
+        fill: Some(fill),
+        query_type: QUERY_TYPE_GRID,
         client,
         user_agent,
         local: None,
@@ -198,11 +215,70 @@ pub fn local_entry(
     ServiceLogEntry {
         now_us,
         minute_length,
-        grid_baselength,
+        grid_baselength: Some(grid_baselength),
         minute_offset,
         region: -1,
-        count_threshold,
-        fill,
+        count_threshold: Some(count_threshold),
+        fill: Some(fill),
+        query_type: QUERY_TYPE_GRID,
+        client,
+        user_agent,
+        local: Some(LocalGridLog { x, y, data_area }),
+    }
+}
+
+/// Build a global-cluster entry (`jsonrpc_get_global_clusters`).
+///
+/// Clusters are stored in 10-minute detection intervals, so the logged
+/// `minute_length` is `interval_count * 10` — the total minutes covered.  The
+/// grid-only fields (`grid_baselength`, `count_threshold`, `fill`) have no
+/// cluster meaning and stay `None` (rendered as `-`); `region` is `0`.
+pub fn global_cluster_entry(
+    now_us: i64,
+    minute_offset: i64,
+    interval_count: i64,
+    client: Option<String>,
+    user_agent: Option<String>,
+) -> ServiceLogEntry {
+    ServiceLogEntry {
+        now_us,
+        minute_length: interval_count * 10,
+        grid_baselength: None,
+        minute_offset,
+        region: 0,
+        count_threshold: None,
+        fill: None,
+        query_type: QUERY_TYPE_CLUSTER,
+        client,
+        user_agent,
+        local: None,
+    }
+}
+
+/// Build a local-cluster entry (`jsonrpc_get_local_clusters`).
+///
+/// Like [`global_cluster_entry`] but with `region = -1` and the local
+/// `x`/`y`/`data_area` values.
+#[allow(clippy::too_many_arguments)]
+pub fn local_cluster_entry(
+    now_us: i64,
+    minute_offset: i64,
+    interval_count: i64,
+    client: Option<String>,
+    user_agent: Option<String>,
+    x: i64,
+    y: i64,
+    data_area: i64,
+) -> ServiceLogEntry {
+    ServiceLogEntry {
+        now_us,
+        minute_length: interval_count * 10,
+        grid_baselength: None,
+        minute_offset,
+        region: -1,
+        count_threshold: None,
+        fill: None,
+        query_type: QUERY_TYPE_CLUSTER,
         client,
         user_agent,
         local: Some(LocalGridLog { x, y, data_area }),
@@ -262,7 +338,7 @@ fn calc_tab_pad_count(length: usize) -> usize {
     CITY_TABS - tab_count
 }
 
-/// Render one entry as the 14-logical-field tab-separated servicelog row.
+/// Render one entry as the 15-logical-field tab-separated servicelog row.
 ///
 /// Field order:
 /// 1. `timestamp` — **UTC wall-clock time `HH:MM:SS.nnn`** (milliseconds);
@@ -271,21 +347,24 @@ fn calc_tab_pad_count(length: usize) -> usize {
 ///    (see [`pad_city`]; never truncated);
 /// 4. `platform` — `A` for Android, `I` for iOS, else `-`;
 /// 5. `version` — `bo-android-<n>` / `bo-ios-<n>` version, else `None`;
-/// 6. `minute_offset`;
-/// 7. `minute_length`;
-/// 8. `grid_baselength` — the **pre-clamp** `original_grid_base_length`;
-/// 9. `region` — `0` global, clamped region for the region grid, `-1` local;
-/// 10. `count_threshold`;
-/// 11. `x` — local-grid centre `x`, else `-`;
-/// 12. `y` — local-grid centre `y`, else `-`;
-/// 13. `data_area` — local-grid data area, else `-`;
-/// 14. `fill` — percentage of filled raster cells (`0..=100`, three decimals).
+/// 6. `query_type` — [`QUERY_TYPE_GRID`] (`G`) or [`QUERY_TYPE_CLUSTER`] (`C`);
+/// 7. `minute_offset`;
+/// 8. `minute_length` — for a cluster request, `interval_count * 10`;
+/// 9. `grid_baselength` — the **pre-clamp** `original_grid_base_length`, else
+///    `-` for a cluster request;
+/// 10. `region` — `0` global, clamped region for the region grid, `-1` local;
+/// 11. `count_threshold`, else `-` for a cluster request;
+/// 12. `x` — local centre `x`, else `-`;
+/// 13. `y` — local centre `y`, else `-`;
+/// 14. `data_area` — local data area, else `-`;
+/// 15. `fill` — percentage of filled raster cells (`0..=100`, three decimals),
+///     else `-` for a cluster request.
 ///
 /// The other fields are separated by single tabs; only the `city` field is
 /// tab-padded (see [`CITY_TABS`] / [`pad_city`]).
 ///
 /// The raw client IP is intentionally **not** written.  For the global/region
-/// flavours fields 11–13 are the `-` placeholders; a local request carries the
+/// flavours fields 12–14 are the `-` placeholders; a local request carries the
 /// local `x`/`y`/`data_area` values and is also distinguishable by `region == -1`.
 ///
 /// The timestamp is the UTC wall-clock time of [`ServiceLogEntry::now_us`],
@@ -324,15 +403,27 @@ pub fn build_row(
             .unwrap_or_else(|| "None".to_string()),
     );
     row.push('\t');
+    row.push_str(&entry.query_type.to_string());
+    row.push('\t');
     row.push_str(&entry.minute_offset.to_string());
     row.push('\t');
     row.push_str(&entry.minute_length.to_string());
     row.push('\t');
-    row.push_str(&entry.grid_baselength.to_string());
+    row.push_str(
+        &entry
+            .grid_baselength
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+    );
     row.push('\t');
     row.push_str(&entry.region.to_string());
     row.push('\t');
-    row.push_str(&entry.count_threshold.to_string());
+    row.push_str(
+        &entry
+            .count_threshold
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+    );
     match entry.local {
         Some(local) => {
             row.push('\t');
@@ -345,7 +436,10 @@ pub fn build_row(
         None => row.push_str("\t-\t-\t-"),
     }
     row.push('\t');
-    row.push_str(&crate::round::py_format_fixed(entry.fill, 3));
+    match entry.fill {
+        Some(fill) => row.push_str(&crate::round::py_format_fixed(fill, 3)),
+        None => row.push('-'),
+    }
     row
 }
 
@@ -376,10 +470,17 @@ pub fn access_metric_key(
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "-".to_string())
         ),
+        format!("type={}", entry.query_type),
         format!("region={}", entry.region),
         format!("minutes={}", entry.minute_length),
         format!("offset={}", entry.minute_offset),
-        format!("grid={}", entry.grid_baselength),
+        format!(
+            "grid={}",
+            entry
+                .grid_baselength
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        ),
     ];
     if let Some(local) = entry.local {
         // Python checks truthiness: `0` is falsy and would be skipped.
@@ -748,11 +849,12 @@ mod tests {
             // 2023-11-14T22:13:20.500000Z
             now_us: 1_700_000_000_500_000,
             minute_length: 60,
-            grid_baselength: 10_000,
+            grid_baselength: Some(10_000),
             minute_offset: 0,
             region,
-            count_threshold: 0,
-            fill: 25.0,
+            count_threshold: Some(0),
+            fill: Some(25.0),
+            query_type: QUERY_TYPE_GRID,
             client: Some("203.0.113.7".into()),
             user_agent: Some("bo-android-190".into()),
             local,
@@ -824,14 +926,14 @@ mod tests {
         // "X" (1 char) stays within the first tab block -> CITY_TABS tabs.
         assert_eq!(
             short,
-            "22:13:20.500\tDE\tX\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000"
+            "22:13:20.500\tDE\tX\t\t\t\tA\t190\tG\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000"
         );
 
         let medium = build_row(&entry(0, None), Some(190), Some("DE"), Some("Berlin"));
         // "Berlin" (6 chars) stays within the first tab block -> CITY_TABS tabs.
         assert_eq!(
             medium,
-            "22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000"
+            "22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\tG\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000"
         );
 
         let long = build_row(
@@ -843,14 +945,14 @@ mod tests {
         // 17 chars span 2 full tab blocks -> 4 - 2 = 2 tabs.
         assert_eq!(
             long,
-            "22:13:20.500\tDE\tFrankfurt am Main\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000"
+            "22:13:20.500\tDE\tFrankfurt am Main\t\tA\t190\tG\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000"
         );
 
         // Padding tabs show up as empty segments on a naive split; ignoring
-        // them recovers exactly the 14 logical fields.
+        // them recovers exactly the 15 logical fields.
         for row in [&short, &medium, &long] {
             let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
-            assert_eq!(logical.len(), 14, "row: {row}");
+            assert_eq!(logical.len(), 15, "row: {row}");
         }
     }
 
@@ -863,13 +965,13 @@ mod tests {
         // 27 chars span 3 full tab blocks -> CITY_TABS - 3 = 1 tab.
         assert_eq!(
             row,
-            "22:13:20.500\tRU\tSankt-Peterburg-Nikolaevsk\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000"
+            "22:13:20.500\tRU\tSankt-Peterburg-Nikolaevsk\tA\t190\tG\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000"
         );
         // The name is intact (no truncation).
         assert!(row.contains(long));
         let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
         assert_eq!(logical[2], long);
-        assert_eq!(logical.len(), 14);
+        assert_eq!(logical.len(), 15);
     }
 
     /// `pad_city` drops one tab per full tab block of city text and keeps a
@@ -923,10 +1025,10 @@ mod tests {
         // The local x/y/data_area are written after `count_threshold`.
         assert_eq!(
             row,
-            "22:13:20.500\t-\t-\t\t\t\tA\tNone\t0\t60\t10000\t-1\t0\t101\t202\t5\t25.000"
+            "22:13:20.500\t-\t-\t\t\t\tA\tNone\tG\t0\t60\t10000\t-1\t0\t101\t202\t5\t25.000"
         );
         let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
-        assert_eq!(logical.len(), 14);
+        assert_eq!(logical.len(), 15);
     }
 
     /// A non-Android (or absent) user agent yields platform `-`.
@@ -963,22 +1065,23 @@ mod tests {
         let row = build_row(&e, Some(190), Some("DE"), Some("Berlin"));
         assert!(!row.contains("203.0.113.7"));
         let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
-        assert_eq!(logical[10], "101");
-        assert_eq!(logical[11], "202");
-        assert_eq!(logical[12], "5");
-        assert_eq!(logical.len(), 14);
+        assert_eq!(logical[11], "101");
+        assert_eq!(logical[12], "202");
+        assert_eq!(logical[13], "5");
+        assert_eq!(logical.len(), 15);
     }
 
     #[test]
     fn region_row_keeps_region_and_preclamp_baselength() {
         let mut e = entry(3, None);
-        e.grid_baselength = 2_000; // below MIN_GRID_BASE_LENGTH
+        e.grid_baselength = Some(2_000); // below MIN_GRID_BASE_LENGTH
         let row = build_row(&e, Some(42), None, None);
         let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
-        assert_eq!(logical[7], "2000"); // pre-clamp grid_baselength
-        assert_eq!(logical[8], "3"); // region
+        assert_eq!(logical[8], "2000"); // pre-clamp grid_baselength
+        assert_eq!(logical[9], "3"); // region
         assert_eq!(logical[4], "42"); // version
-        assert_eq!(logical.len(), 14);
+        assert_eq!(logical[5], "G"); // query type
+        assert_eq!(logical.len(), 15);
     }
 
     #[test]
@@ -1001,11 +1104,11 @@ mod tests {
         );
         assert_eq!(
             access_metric_key(&e, Some(190), Some("DE")),
-            "access,version=190,region=-1,minutes=60,offset=0,grid=10000,data_area=101x202-5,country=DE"
+            "access,version=190,type=G,region=-1,minutes=60,offset=0,grid=10000,data_area=101x202-5,country=DE"
         );
         assert_eq!(
             access_metric_key(&e, None, None),
-            "access,version=-,region=-1,minutes=60,offset=0,grid=10000,data_area=101x202-5"
+            "access,version=-,type=G,region=-1,minutes=60,offset=0,grid=10000,data_area=101x202-5"
         );
     }
 
@@ -1027,7 +1130,7 @@ mod tests {
         let content = std::fs::read_to_string(dir.join("servicelog_2023-11-14")).unwrap();
         assert_eq!(
             content,
-            "22:13:20.500\t-\t-\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000\n"
+            "22:13:20.500\t-\t-\t\t\t\tA\t190\tG\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1121,7 +1224,7 @@ mod tests {
         let day2 = std::fs::read_to_string(dir.join("servicelog_2023-11-15")).unwrap();
         assert_eq!(
             day2,
-            "00:00:00.000\t-\t-\t\t\t\tA\t190\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000\n"
+            "00:00:00.000\t-\t-\t\t\t\tA\t190\tG\t0\t60\t10000\t0\t0\t-\t-\t-\t25.000\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1369,7 +1472,95 @@ mod tests {
         let key = access_metric_key(&e, None, Some(""));
         assert_eq!(
             key,
-            "access,version=-,region=-1,minutes=60,offset=0,grid=10000"
+            "access,version=-,type=G,region=-1,minutes=60,offset=0,grid=10000"
+        );
+    }
+
+    /// The cluster constructors record `C`, `interval_count * 10` as
+    /// `minute_length`, `None` grid-only fields and `region` 0 / -1.
+    #[test]
+    fn cluster_entry_constructors() {
+        let global = global_cluster_entry(
+            1_700_000_000_500_000,
+            0,
+            6,
+            Some("203.0.113.7".into()),
+            Some("bo-android-190".into()),
+        );
+        assert_eq!(global.query_type, QUERY_TYPE_CLUSTER);
+        assert_eq!(global.minute_length, 60); // interval_count * 10
+        assert_eq!(global.grid_baselength, None);
+        assert_eq!(global.count_threshold, None);
+        assert_eq!(global.fill, None);
+        assert_eq!(global.region, 0);
+        assert_eq!(global.local, None);
+
+        let local = local_cluster_entry(
+            1_700_000_000_500_000,
+            5,
+            1,
+            Some("203.0.113.7".into()),
+            Some("bo-ios-42".into()),
+            101,
+            202,
+            5,
+        );
+        assert_eq!(local.query_type, QUERY_TYPE_CLUSTER);
+        assert_eq!(local.minute_length, 10);
+        assert_eq!(local.minute_offset, 5);
+        assert_eq!(local.region, -1);
+        assert_eq!(
+            local.local,
+            Some(LocalGridLog {
+                x: 101,
+                y: 202,
+                data_area: 5
+            })
+        );
+    }
+
+    /// A global cluster row renders `C` at column 6, `interval_count * 10` as
+    /// `minute_length` and `-` for the grid-only fields.
+    #[test]
+    fn global_cluster_row_renders_dashes_for_grid_only_fields() {
+        let e = global_cluster_entry(1_700_000_000_500_000, 0, 6, None, Some("bo-android-190".into()));
+        let row = build_row(&e, Some(190), Some("DE"), Some("Berlin"));
+        assert_eq!(
+            row,
+            "22:13:20.500\tDE\tBerlin\t\t\t\tA\t190\tC\t0\t60\t-\t0\t-\t-\t-\t-\t-"
+        );
+        let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
+        assert_eq!(logical.len(), 15);
+        assert_eq!(logical[5], "C");
+        assert_eq!(logical[7], "60"); // minute_length = interval_count * 10
+        assert_eq!(logical[8], "-"); // grid_baselength
+        assert_eq!(logical[10], "-"); // count_threshold
+        assert_eq!(logical[14], "-"); // fill
+    }
+
+    /// A local cluster row keeps its tile coordinates and logs `C`.
+    #[test]
+    fn local_cluster_row_keeps_tile_coordinates() {
+        let e = local_cluster_entry(1_700_000_000_500_000, 0, 1, None, None, 101, 202, 5);
+        let row = build_row(&e, None, None, None);
+        let logical: Vec<&str> = row.split('\t').filter(|s| !s.is_empty()).collect();
+        assert_eq!(logical.len(), 15);
+        assert_eq!(logical[5], "C");
+        assert_eq!(logical[7], "10"); // minute_length = 1 * 10
+        assert_eq!(logical[9], "-1"); // region
+        assert_eq!(logical[11], "101"); // x
+        assert_eq!(logical[12], "202"); // y
+        assert_eq!(logical[13], "5"); // data_area
+        assert_eq!(logical[14], "-"); // fill
+    }
+
+    /// The access metric key carries `type=C` and `grid=-` for a cluster entry.
+    #[test]
+    fn access_metric_key_tags_cluster_type() {
+        let e = global_cluster_entry(1_700_000_000_500_000, 0, 6, None, Some("bo-android-190".into()));
+        assert_eq!(
+            access_metric_key(&e, Some(190), Some("DE")),
+            "access,version=190,type=C,region=0,minutes=60,offset=0,grid=-,country=DE"
         );
     }
 }

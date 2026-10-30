@@ -4,12 +4,12 @@ use crate::stats::render::{escape_html, histogram_bar};
 
 /// A sample row copied verbatim from the issue (city padded with tabs).
 const ISSUE_SAMPLE: &str = "\
-08:44:50.596\tUS\tSun Prairie\t\t\tA\t352\t0\t10\t25000\t0\t0\t-\t-\t-\t0.036\n\
-08:44:50.637\tSE\tGothenburg\t\t\tA\t352\t0\t10\t5000\t-1\t0\t4\t13\t5\t0.000\n\
-08:44:50.655\tRO\tBucharest\t\t\tA\t352\t0\t10\t5000\t-1\t0\t5\t8\t5\t0.039\n\
-08:44:51.106\tDE\tBerlin\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t2\t10\t5\t0.000\n\
-08:44:51.238\tDE\tUlm\t\t\t\tA\t352\t0\t10\t5000\t-1\t0\t1\t9\t5\t0.000\n\
-08:44:51.277\tIT\tVicenza\t\t\t\tA\t352\t0\t10\t5000\t-1\t0\t2\t9\t5\t0.000\n";
+08:44:50.596\tUS\tSun Prairie\t\t\tA\t352\tG\t0\t10\t25000\t0\t0\t-\t-\t-\t0.036\n\
+08:44:50.637\tSE\tGothenburg\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t4\t13\t5\t0.000\n\
+08:44:50.655\tRO\tBucharest\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t5\t8\t5\t0.039\n\
+08:44:51.106\tDE\tBerlin\t\t\t\tA\t352\tG\t0\t60\t5000\t-1\t0\t2\t10\t5\t0.000\n\
+08:44:51.238\tDE\tUlm\t\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t1\t9\t5\t0.000\n\
+08:44:51.277\tIT\tVicenza\t\t\t\tA\t352\tG\t0\t10\t5000\t-1\t0\t2\t9\t5\t0.000\n";
 
 #[test]
 fn parses_the_issue_example_rows() {
@@ -23,8 +23,11 @@ fn parses_the_issue_example_rows() {
     assert_eq!(first.city.as_deref(), Some("Sun Prairie"));
     assert_eq!(first.platform, "A");
     assert_eq!(first.version, Some(352));
+    assert_eq!(first.query_type, 'G');
+    assert!(first.is_grid());
+    assert!(!first.is_cluster());
     assert_eq!(first.region, 0);
-    assert_eq!(first.grid_baselength, 25000);
+    assert_eq!(first.grid_baselength, Some(25000));
     assert!(first.is_global());
     assert_eq!(first.x, None);
 
@@ -33,13 +36,13 @@ fn parses_the_issue_example_rows() {
     assert_eq!(local.x, Some(4));
     assert_eq!(local.y, Some(13));
     assert_eq!(local.data_area, Some(5));
-    assert_eq!(local.fill, 0.0);
+    assert_eq!(local.fill, Some(0.0));
 }
 
 #[test]
 fn ignores_city_padding_when_counting_fields() {
     // A long city spans more tab blocks; the logical fields are unchanged.
-    let line = "08:44:51.106\tDE\tFrankfurt am Main\t\tA\t352\t0\t60\t5000\t-1\t0\t2\t10\t5\t0.000";
+    let line = "08:44:51.106\tDE\tFrankfurt am Main\t\tA\t352\tG\t0\t60\t5000\t-1\t0\t2\t10\t5\t0.000";
     let row = parse_row(line).expect("parses");
     assert_eq!(row.city.as_deref(), Some("Frankfurt am Main"));
     assert_eq!(row.x, Some(2));
@@ -56,8 +59,8 @@ fn malformed_lines_are_skipped_not_panicking() {
 #[test]
 fn dash_placeholders_become_none() {
     // A non-Android client (`-` platform) with unknown country/city and no
-    // version: 14 logical fields, city padded with tabs.
-    let line = "08:44:50.596\t-\t-\t\t\t\t-\tNone\t0\t10\t0\t0\t0\t-\t-\t-\t0.000";
+    // version: 15 logical fields, city padded with tabs.
+    let line = "08:44:50.596\t-\t-\t\t\t\t-\tNone\tG\t0\t10\t0\t0\t0\t-\t-\t-\t0.000";
     let row = parse_row(line).expect("parses");
     assert_eq!(row.country, None);
     assert_eq!(row.city, None);
@@ -66,11 +69,51 @@ fn dash_placeholders_become_none() {
     assert_eq!(row.x, None);
 }
 
+/// A legacy 14-field row (no query-type column) is rejected as malformed.
+#[test]
+fn old_14_field_rows_are_rejected() {
+    let line = "08:44:50.596\tUS\tSun Prairie\t\t\tA\t352\t0\t10\t25000\t0\t0\t-\t-\t-\t0.036";
+    assert!(parse_row(line).is_none());
+}
+
+/// A cluster row (`C`) with `-` grid-only fields parses: `minute_length` is
+/// `interval_count * 10`, the grid-only fields are `None`.
+#[test]
+fn cluster_row_parses_with_dash_grid_only_fields() {
+    let line = "08:44:50.596\tDE\tBerlin\t\t\t\tA\t352\tC\t0\t60\t-\t0\t-\t-\t-\t-\t-";
+    let row = parse_row(line).expect("parses");
+    assert_eq!(row.query_type, 'C');
+    assert!(row.is_cluster());
+    assert!(!row.is_grid());
+    assert_eq!(row.minute_length, 60);
+    assert_eq!(row.grid_baselength, None);
+    assert_eq!(row.count_threshold, None);
+    assert_eq!(row.fill, None);
+    assert_eq!(row.region, 0);
+    assert!(row.is_global());
+}
+
+/// A local cluster row keeps its tile coordinates and parses.
+#[test]
+fn local_cluster_row_parses() {
+    let line = "08:44:50.596\tDE\tBerlin\t\t\t\tI\t42\tC\t5\t20\t-\t-1\t-\t101\t202\t5\t-";
+    let row = parse_row(line).expect("parses");
+    assert!(row.is_cluster());
+    assert!(row.is_local());
+    assert_eq!(row.minute_offset, 5);
+    assert_eq!(row.minute_length, 20); // interval_count * 10
+    assert_eq!(row.region, -1);
+    assert_eq!(row.x, Some(101));
+    assert_eq!(row.y, Some(202));
+    assert_eq!(row.data_area, Some(5));
+    assert_eq!(row.fill, None);
+}
+
 /// The platform column is opaque to the parser: an iOS row carries `I` and its
 /// integer version without any special-casing.
 #[test]
 fn ios_platform_row_parses() {
-    let line = "08:44:51.106\tDE\tBerlin\t\t\t\tI\t42\t0\t60\t5000\t-1\t0\t2\t10\t5\t0.000";
+    let line = "08:44:51.106\tDE\tBerlin\t\t\t\tI\t42\tG\t0\t60\t5000\t-1\t0\t2\t10\t5\t0.000";
     let row = parse_row(line).expect("parses");
     assert_eq!(row.platform, "I");
     assert_eq!(row.version, Some(42));
@@ -83,6 +126,8 @@ fn aggregates_totals_and_flavours() {
     let outcome = parse_content(ISSUE_SAMPLE);
     let stats = aggregate(&outcome.rows, 10);
     assert_eq!(stats.total_requests, 6);
+    assert_eq!(stats.grid_requests, 6);
+    assert_eq!(stats.cluster_requests, 0);
     assert_eq!(stats.global_requests, 1);
     assert_eq!(stats.local_requests, 5);
     assert_eq!(stats.region_requests, 0);
@@ -151,15 +196,16 @@ fn local_queries_collect_only_local_rows_with_coordinates() {
             x: 4,
             y: 13,
             data_area: 5,
-            grid_baselength: 5000,
-            minute_length: 10
+            grid_baselength: Some(5000),
+            minute_length: 10,
+            query_type: 'G'
         }
     );
 }
 
 #[test]
 fn unknown_geo_and_version_are_counted_separately() {
-    let content = "08:44:50.596\t-\t-\t\t\t\t-\tNone\t0\t10\t0\t0\t0\t-\t-\t-\t0.000\n";
+    let content = "08:44:50.596\t-\t-\t\t\t\t-\tNone\tG\t0\t10\t0\t0\t0\t-\t-\t-\t0.000\n";
     let stats = aggregate(&parse_content(content).rows, 10);
     assert_eq!(stats.total_requests, 1);
     assert_eq!(stats.unknown_country, 1);
@@ -173,7 +219,7 @@ fn unknown_geo_and_version_are_counted_separately() {
 /// A local row builder for the distribution tests.
 fn local_row(x: i64, y: i64, data_area: &str) -> String {
     format!(
-        "08:00:00.000\tDE\tCity\t\t\t\tA\t352\t0\t60\t5000\t-1\t0\t{x}\t{y}\t{data_area}\t0.000"
+        "08:00:00.000\tDE\tCity\t\t\t\tA\t352\tG\t0\t60\t5000\t-1\t0\t{x}\t{y}\t{data_area}\t0.000"
     )
 }
 
@@ -213,7 +259,7 @@ fn data_area_distribution_counts_and_sorts() {
 /// Non-local rows do not contribute to the distribution.
 #[test]
 fn data_area_distribution_ignores_non_local_rows() {
-    let content = "08:00:00.000\tDE\tBerlin\t\t\t\tA\t352\t0\t60\t10000\t0\t0\t-\t-\t-\t0.000\n";
+    let content = "08:00:00.000\tDE\tBerlin\t\t\t\tA\t352\tG\t0\t60\t10000\t0\t0\t-\t-\t-\t0.000\n";
     let stats = aggregate(&parse_content(content).rows, 10);
     assert!(stats.data_area_distribution.is_empty());
 }
@@ -282,6 +328,7 @@ fn text_render_contains_totals_and_tops() {
     let text = render_text("2023-11-14", &stats);
     assert!(text.contains("servicelog statistics for 2023-11-14"));
     assert!(text.contains("total requests: 6"));
+    assert!(text.contains("grid: 6  cluster: 0"), "{text}");
     assert!(text.contains("top countries:"));
     assert!(text.contains("DE"));
     assert!(text.contains("local query locations: 5"));
@@ -289,10 +336,11 @@ fn text_render_contains_totals_and_tops() {
     // other four local rows use `minute_length=10` -> offline.
     assert!(text.contains("offline: 4  interactive: 1"));
     // The text report includes separate ASCII world maps for the offline
-    // (minute_length == 10) and interactive (minute_length > 10) queries.
-    assert!(text.contains("offline queries (minute_length == 10):"));
+    // (grid queries with minute_length == 10) and interactive (cluster or
+    // other windows) queries.
+    assert!(text.contains("offline queries (grid, minute_length == 10):"));
     assert!(text.contains("offline local-query world map (72x36 cells of 5 degrees"));
-    assert!(text.contains("interactive queries (minute_length > 10):"));
+    assert!(text.contains("interactive queries (cluster or minute_length != 10):"));
     assert!(text.contains("interactive local-query world map (72x36 cells of 5 degrees"));
     assert!(text.contains("4 queries, 4 hits"));
 }
@@ -537,7 +585,7 @@ fn statistics_for_a_real_file() {
 /// A local row builder with an explicit `minute_length`.
 fn local_row_minutes(x: i64, y: i64, data_area: &str, minute_length: i64) -> String {
     format!(
-            "08:00:00.000\tDE\tCity\t\t\t\tA\t352\t0\t{minute_length}\t5000\t-1\t0\t{x}\t{y}\t{data_area}\t0.000"
+            "08:00:00.000\tDE\tCity\t\t\t\tA\t352\tG\t0\t{minute_length}\t5000\t-1\t0\t{x}\t{y}\t{data_area}\t0.000"
         )
 }
 
@@ -547,9 +595,12 @@ fn local_query_classifies_offline_and_interactive() {
         x: 1,
         y: 1,
         data_area: 5,
-        grid_baselength: 5000,
+        grid_baselength: Some(5000),
         minute_length: 10,
+        query_type: 'G',
     };
+    assert!(offline.is_grid());
+    assert!(!offline.is_cluster());
     assert!(offline.is_offline());
     assert!(!offline.is_interactive());
 
@@ -561,6 +612,17 @@ fn local_query_classifies_offline_and_interactive() {
         assert!(interactive.is_interactive(), "minute_length {len}");
         assert!(!interactive.is_offline(), "minute_length {len}");
     }
+
+    // A cluster query is never background: even with a 10-minute window it is
+    // interactive.
+    let cluster = LocalQuery {
+        query_type: 'C',
+        ..offline
+    };
+    assert!(cluster.is_cluster());
+    assert!(!cluster.is_grid());
+    assert!(!cluster.is_offline(), "cluster with minute_length == 10");
+    assert!(cluster.is_interactive(), "cluster with minute_length == 10");
 }
 
 /// The tile centre uses the client's requested-tile origin (`x * data_area`),
@@ -571,8 +633,9 @@ fn local_query_center_uses_requested_tile_origin() {
         x: 1,
         y: 1,
         data_area: 5,
-        grid_baselength: 5000,
+        grid_baselength: Some(5000),
         minute_length: 10,
+        query_type: 'G',
     };
     assert_eq!(query.center_lon_lat(), (7.5, 7.5));
 
@@ -586,8 +649,8 @@ fn local_query_center_uses_requested_tile_origin() {
     assert_eq!(query.center_lon_lat(), (35.0, 25.0));
 }
 
-/// `aggregate` counts offline (`minute_length == 10`) and interactive
-/// (`minute_length > 10`) local requests separately.
+/// `aggregate` counts offline (grid, `minute_length == 10`) and interactive
+/// (everything else) local requests separately.
 #[test]
 fn aggregate_counts_offline_and_interactive() {
     let content = [
@@ -601,6 +664,69 @@ fn aggregate_counts_offline_and_interactive() {
     assert_eq!(stats.local_requests, 4);
     assert_eq!(stats.offline_requests, 2);
     assert_eq!(stats.interactive_requests, 2);
+}
+
+/// A local cluster row builder with an explicit `minute_length`
+/// (`interval_count * 10` in the log).
+fn local_cluster_row_minutes(x: i64, y: i64, minute_length: i64) -> String {
+    format!(
+        "08:00:00.000\tDE\tCity\t\t\t\tA\t352\tC\t0\t{minute_length}\t-\t-1\t-\t{x}\t{y}\t5\t-"
+    )
+}
+
+/// `aggregate` counts grid (`G`) and cluster (`C`) requests separately.
+#[test]
+fn aggregate_counts_grid_and_cluster_requests() {
+    let content = [
+        local_row_minutes(1, 1, "5", 10),        // grid, local
+        "08:00:00.001\tUS\tCity\t\t\t\tA\t352\tG\t0\t10\t25000\t0\t0\t-\t-\t-\t0.036".to_string(), // grid, global
+        local_cluster_row_minutes(2, 1, 10),    // cluster, local
+        "08:00:00.002\tDE\tCity\t\t\t\tA\t352\tC\t0\t60\t-\t0\t-\t-\t-\t-\t-".to_string(), // cluster, global
+    ]
+    .join("\n");
+    let stats = aggregate(&parse_content(&content).rows, 10);
+    assert_eq!(stats.total_requests, 4);
+    assert_eq!(stats.grid_requests, 2);
+    assert_eq!(stats.cluster_requests, 2);
+    assert_eq!(stats.local_requests, 2);
+    assert_eq!(stats.global_requests, 2);
+}
+
+/// A local **cluster** query with `minute_length == 10` (a single 10-minute
+/// cluster interval) is interactive, not background: only grid queries with
+/// the 10-minute window count as offline.
+#[test]
+fn cluster_query_with_ten_minute_window_is_interactive() {
+    let content = [
+        local_row_minutes(1, 1, "5", 10),     // grid, 10 minutes -> offline
+        local_cluster_row_minutes(2, 1, 10), // cluster, 10 minutes -> interactive
+        local_cluster_row_minutes(3, 1, 60), // cluster, 60 minutes -> interactive
+    ]
+    .join("\n");
+    let stats = aggregate(&parse_content(&content).rows, 10);
+    assert_eq!(stats.grid_requests, 1);
+    assert_eq!(stats.cluster_requests, 2);
+    assert_eq!(stats.local_requests, 3);
+    assert_eq!(stats.local_queries.len(), 3);
+    assert_eq!(stats.offline_requests, 1);
+    assert_eq!(stats.interactive_requests, 2);
+    assert!(stats.local_queries[0].is_offline());
+    assert!(stats.local_queries[1].is_interactive());
+    assert_eq!(stats.local_queries[1].query_type, 'C');
+    assert_eq!(stats.local_queries[1].minute_length, 10);
+
+    // The maps split accordingly: the cluster query lands on the interactive
+    // map, not the offline one.
+    let offline =
+        crate::map::AsciiWorldMap::from_local_queries_filtered(&stats.local_queries, |q| {
+            q.is_offline()
+        });
+    let interactive =
+        crate::map::AsciiWorldMap::from_local_queries_filtered(&stats.local_queries, |q| {
+            q.is_interactive()
+        });
+    assert_eq!(offline.queries(), 1);
+    assert_eq!(interactive.queries(), 2);
 }
 
 /// The two maps separate the offline and interactive queries.
@@ -639,15 +765,151 @@ fn json_reports_offline_and_interactive() {
     let content = [
         local_row_minutes(1, 1, "5", 10),
         local_row_minutes(2, 1, "5", 60),
+        local_cluster_row_minutes(3, 1, 10),
     ]
     .join("\n");
     let stats = aggregate(&parse_content(&content).rows, 10);
     let value: serde_json::Value =
         serde_json::from_str(&render_json("2023-11-14", &stats)).unwrap();
+    assert_eq!(value["total_requests"], 3);
+    assert_eq!(value["grid_requests"], 2);
+    assert_eq!(value["cluster_requests"], 1);
     assert_eq!(value["offline_requests"], 1);
-    assert_eq!(value["interactive_requests"], 1);
+    assert_eq!(value["interactive_requests"], 2);
     assert_eq!(value["local_queries"][0]["interactive"], false);
     assert_eq!(value["local_queries"][0]["minute_length"], 10);
+    assert_eq!(value["local_queries"][0]["query_type"], "G");
     assert_eq!(value["local_queries"][1]["interactive"], true);
     assert_eq!(value["local_queries"][1]["minute_length"], 60);
+    // The cluster query with minute_length == 10 is interactive, not offline.
+    assert_eq!(value["local_queries"][2]["interactive"], true);
+    assert_eq!(value["local_queries"][2]["minute_length"], 10);
+    assert_eq!(value["local_queries"][2]["query_type"], "C");
+}
+
+// --- query matrix (grid/cluster x local/global) ---------------------------
+
+/// A sample covering all four matrix cells plus a region query, which stays
+/// outside the matrix: 2 grid-local, 1 grid-global, 1 grid-region,
+/// 3 cluster-local.
+fn matrix_sample() -> String {
+    [
+        local_row_minutes(1, 1, "5", 10),     // grid, local
+        local_row_minutes(2, 1, "5", 60),     // grid, local
+        "08:00:00.001\tUS\tCity\t\t\t\tA\t352\tG\t0\t10\t25000\t0\t0\t-\t-\t-\t0.036".to_string(), // grid, global
+        "08:00:00.002\tFR\tCity\t\t\t\tA\t352\tG\t0\t60\t10000\t3\t0\t-\t-\t-\t0.000".to_string(), // grid, region 3
+        local_cluster_row_minutes(3, 1, 10),  // cluster, local
+        local_cluster_row_minutes(4, 1, 20),  // cluster, local
+        local_cluster_row_minutes(5, 1, 60),  // cluster, local
+    ]
+    .join("\n")
+}
+
+/// `aggregate` fills the grid/cluster x local/global matrix; region queries
+/// are counted in `region_requests` but not in any matrix cell.
+#[test]
+fn aggregate_counts_the_query_matrix() {
+    let stats = aggregate(&parse_content(&matrix_sample()).rows, 10);
+    assert_eq!(stats.query_matrix.grid_local, 2);
+    assert_eq!(stats.query_matrix.grid_global, 1);
+    assert_eq!(stats.query_matrix.cluster_local, 3);
+    assert_eq!(stats.query_matrix.cluster_global, 0);
+    // Row/column/grand sums (region query is outside the matrix).
+    assert_eq!(stats.query_matrix.grid_sum(), 3);
+    assert_eq!(stats.query_matrix.cluster_sum(), 3);
+    assert_eq!(stats.query_matrix.local_sum(), 5);
+    assert_eq!(stats.query_matrix.global_sum(), 1);
+    assert_eq!(stats.query_matrix.total(), 6);
+    // The totals still add up: 4 grid (2 local + 1 global + 1 region) + 3 cluster.
+    assert_eq!(stats.total_requests, 7);
+    assert_eq!(stats.grid_requests, 4);
+    assert_eq!(stats.cluster_requests, 3);
+    assert_eq!(stats.local_requests, 5);
+    assert_eq!(stats.global_requests, 1);
+    assert_eq!(stats.region_requests, 1);
+}
+
+/// The text report prints the matrix as an aligned table under the totals.
+#[test]
+fn text_render_includes_the_query_matrix() {
+    let stats = aggregate(&parse_content(&matrix_sample()).rows, 10);
+    let text = render_text("2023-11-14", &stats);
+    assert!(text.contains("query matrix"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "    {:>8}  {:>12}  {:>12}  {:>8}",
+            "", "local query", "global query", "sum"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "    {:>8}  {:>12}  {:>12}  {:>8}",
+            "grid", 2, 1, 3
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "    {:>8}  {:>12}  {:>12}  {:>8}",
+            "cluster", 3, 0, 3
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "    {:>8}  {:>12}  {:>12}  {:>8}",
+            "sum", 5, 1, 6
+        )),
+        "{text}"
+    );
+}
+
+/// The JSON report carries the matrix as nested objects.
+#[test]
+fn json_render_includes_the_query_matrix() {
+    let stats = aggregate(&parse_content(&matrix_sample()).rows, 10);
+    let value: serde_json::Value =
+        serde_json::from_str(&render_json("2023-11-14", &stats)).unwrap();
+    assert_eq!(value["query_matrix"]["grid"]["local"], 2);
+    assert_eq!(value["query_matrix"]["grid"]["global"], 1);
+    assert_eq!(value["query_matrix"]["grid"]["sum"], 3);
+    assert_eq!(value["query_matrix"]["cluster"]["local"], 3);
+    assert_eq!(value["query_matrix"]["cluster"]["global"], 0);
+    assert_eq!(value["query_matrix"]["cluster"]["sum"], 3);
+    assert_eq!(value["query_matrix"]["sum"]["local"], 5);
+    assert_eq!(value["query_matrix"]["sum"]["global"], 1);
+    assert_eq!(value["query_matrix"]["sum"]["sum"], 6);
+}
+
+/// The HTML report renders the matrix as a table with local/global columns.
+#[test]
+fn html_report_includes_the_query_matrix() {
+    let stats = aggregate(&parse_content(&matrix_sample()).rows, 10);
+    let html = render_html("2023-11-14", &stats);
+    assert!(html.contains("<h2>Query matrix</h2>"), "{html}");
+    assert!(html.contains("<th class=\"num\">local query</th>"), "{html}");
+    assert!(html.contains("<th class=\"num\">global query</th>"), "{html}");
+    assert!(html.contains("<th class=\"num\">sum</th>"), "{html}");
+    assert!(
+        html.contains(
+            "<tr><td>grid</td><td class=\"num\">2</td><td class=\"num\">1</td>\
+             <td class=\"num\">3</td></tr>"
+        ),
+        "{html}"
+    );
+    assert!(
+        html.contains(
+            "<tr><td>cluster</td><td class=\"num\">3</td><td class=\"num\">0</td>\
+             <td class=\"num\">3</td></tr>"
+        ),
+        "{html}"
+    );
+    assert!(
+        html.contains(
+            "<tr><td>sum</td><td class=\"num\">5</td><td class=\"num\">1</td>\
+             <td class=\"num\">6</td></tr>"
+        ),
+        "{html}"
+    );
 }

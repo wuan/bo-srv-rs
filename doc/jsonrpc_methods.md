@@ -460,6 +460,11 @@ the fly, and it applies the client checks but **not** the `region` or
 **Result:** a [cluster object](#cluster-object).  A blocked/invalid request
 returns `{}`.
 
+Successful requests are recorded in the
+[servicelog](../README.md#file-format) with query type `C`; the row's
+`minute_length` is logged as `interval_count * 10` (clusters are stored in
+10-minute detection intervals), and the grid-only columns are `-`.
+
 The newest interval ends at the minute-truncated `now + minute_offset`, snapped
 to the latest stored cluster within the requested window when `minute_offset` is
 `0` (see [Cluster time anchoring](#cluster-time-anchoring)); the
@@ -491,6 +496,11 @@ geometry filter.  `data_area` is clamped with `max(5, ..)`.
 
 **Result:** a [cluster object](#cluster-object).  A blocked/invalid request
 returns `{}`.
+
+Successful requests are recorded in the
+[servicelog](../README.md#file-format) with query type `C`, `region` `-1` and
+the tile's `x`/`y`/`data_area`; `minute_length` is logged as
+`interval_count * 10`.
 
 The newest interval is snapped to the latest stored cluster **within the tile's
 neighbourhood** when `minute_offset` is `0` (see

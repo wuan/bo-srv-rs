@@ -8,8 +8,11 @@
 //! ```
 //!
 //! Reads `servicelog_YYYY-MM-DD` files and reports, per day: the total request
-//! count, the top countries/cities/client versions and an ASCII world map of
-//! the local queries.
+//! count (split into grid and cluster queries), the top
+//! countries/cities/client versions and an ASCII world map of the local
+//! queries.  Local queries are split into background queries (grid queries
+//! with `minute_length == 10`; cluster queries with a 10-minute window are
+//! interactive) and interactive queries.
 //!
 //! `--format html` produces a standalone static HTML document with an SVG world
 //! map (a coarse continent basemap plus the local-query overlay); combine it

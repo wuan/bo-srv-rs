@@ -9,9 +9,14 @@ pub fn render_text(day: &str, stats: &ServiceLogStats) -> String {
     out.push_str(&format!("servicelog statistics for {day}\n"));
     out.push_str(&format!("total requests: {}\n", stats.total_requests));
     out.push_str(&format!(
+        "  grid: {}  cluster: {}\n",
+        stats.grid_requests, stats.cluster_requests
+    ));
+    out.push_str(&format!(
         "  local:  {}  global: {}  region: {}\n",
         stats.local_requests, stats.global_requests, stats.region_requests
     ));
+    out.push_str(&matrix_text(stats));
     out.push_str(&format!(
         "  offline: {}  interactive: {}\n",
         stats.offline_requests, stats.interactive_requests
@@ -67,6 +72,32 @@ pub fn render_text(day: &str, stats: &ServiceLogStats) -> String {
     out
 }
 
+/// Render the grid/cluster x local/global query matrix as an aligned text
+/// table: rows `grid`/`cluster`, columns `local query`/`global query`, each
+/// with a `sum` column/row.
+fn matrix_text(stats: &ServiceLogStats) -> String {
+    let m = &stats.query_matrix;
+    let mut out = String::new();
+    out.push_str("  query matrix (rows: grid/cluster, columns: local/global query):\n");
+    out.push_str(&format!(
+        "    {:>8}  {:>12}  {:>12}  {:>8}\n",
+        "", "local query", "global query", "sum"
+    ));
+    out.push_str(&format!(
+        "    {:>8}  {:>12}  {:>12}  {:>8}\n",
+        "grid", m.grid_local, m.grid_global, m.grid_sum()
+    ));
+    out.push_str(&format!(
+        "    {:>8}  {:>12}  {:>12}  {:>8}\n",
+        "cluster", m.cluster_local, m.cluster_global, m.cluster_sum()
+    ));
+    out.push_str(&format!(
+        "    {:>8}  {:>12}  {:>12}  {:>8}\n",
+        "sum", m.local_sum(), m.global_sum(), m.total()
+    ));
+    out
+}
+
 /// A `#` bar of `width` columns scaled to `max` (at least one `#` for a
 /// non-zero count so no bucket renders as blank).
 pub(crate) fn histogram_bar(count: u64, max: u64, width: usize) -> String {
@@ -82,9 +113,28 @@ pub fn render_json(day: &str, stats: &ServiceLogStats) -> String {
     let value = serde_json::json!({
         "day": day,
         "total_requests": stats.total_requests,
+        "grid_requests": stats.grid_requests,
+        "cluster_requests": stats.cluster_requests,
         "local_requests": stats.local_requests,
         "global_requests": stats.global_requests,
         "region_requests": stats.region_requests,
+        "query_matrix": {
+            "grid": {
+                "local": stats.query_matrix.grid_local,
+                "global": stats.query_matrix.grid_global,
+                "sum": stats.query_matrix.grid_sum(),
+            },
+            "cluster": {
+                "local": stats.query_matrix.cluster_local,
+                "global": stats.query_matrix.cluster_global,
+                "sum": stats.query_matrix.cluster_sum(),
+            },
+            "sum": {
+                "local": stats.query_matrix.local_sum(),
+                "global": stats.query_matrix.global_sum(),
+                "sum": stats.query_matrix.total(),
+            },
+        },
         "offline_requests": stats.offline_requests,
         "interactive_requests": stats.interactive_requests,
         "unknown_country": stats.unknown_country,
@@ -103,6 +153,7 @@ pub fn render_json(day: &str, stats: &ServiceLogStats) -> String {
             "data_area": q.data_area,
             "grid_baselength": q.grid_baselength,
             "minute_length": q.minute_length,
+            "query_type": q.query_type.to_string(),
             "interactive": q.is_interactive(),
         })).collect::<Vec<_>>(),
     });
@@ -292,6 +343,8 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
     html.push_str("  <div class=\"cards\">\n");
     for (label, value) in [
         ("total", stats.total_requests),
+        ("grid", stats.grid_requests),
+        ("cluster", stats.cluster_requests),
         ("local", stats.local_requests),
         ("global", stats.global_requests),
         ("region", stats.region_requests),
@@ -310,6 +363,42 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
     }
     html.push_str("  </div>\n");
 
+    // Query matrix: rows grid/cluster, columns local/global query (region
+    // queries sit outside the matrix).
+    let m = &stats.query_matrix;
+    html.push_str("  <h2>Query matrix</h2>\n");
+    html.push_str(
+        "  <table>\n    <thead><tr><th></th>\
+         <th class=\"num\">local query</th><th class=\"num\">global query</th>\
+         <th class=\"num\">sum</th></tr></thead>\n\
+         \x20   <tbody>\n",
+    );
+    let _ = writeln!(
+        html,
+        "      <tr><td>grid</td><td class=\"num\">{}</td><td class=\"num\">{}</td>\
+         <td class=\"num\">{}</td></tr>",
+        m.grid_local,
+        m.grid_global,
+        m.grid_sum()
+    );
+    let _ = writeln!(
+        html,
+        "      <tr><td>cluster</td><td class=\"num\">{}</td><td class=\"num\">{}</td>\
+         <td class=\"num\">{}</td></tr>",
+        m.cluster_local,
+        m.cluster_global,
+        m.cluster_sum()
+    );
+    let _ = writeln!(
+        html,
+        "      <tr><td>sum</td><td class=\"num\">{}</td><td class=\"num\">{}</td>\
+         <td class=\"num\">{}</td></tr>",
+        m.local_sum(),
+        m.global_sum(),
+        m.total()
+    );
+    html.push_str("    </tbody>\n  </table>\n");
+
     // World maps: one per query category so the overlays never overlap.
     html.push_str("  <h2>Local query locations</h2>\n");
     html.push_str(&format!(
@@ -326,9 +415,9 @@ pub fn render_html(day: &str, stats: &ServiceLogStats) -> String {
     let _ = write!(
         html,
         "    <figure>{offline_svg}<figcaption>Background / offline queries \
-         (minute_length == 10): {offline}</figcaption></figure>\n\
+         (grid, minute_length == 10): {offline}</figcaption></figure>\n\
          \x20   <figure>{interactive_svg}<figcaption>Interactive queries \
-         (minute_length &gt; 10): {interactive}</figcaption></figure>\n"
+         (cluster or minute_length != 10): {interactive}</figcaption></figure>\n"
     );
     html.push_str("  </div>\n");
 
